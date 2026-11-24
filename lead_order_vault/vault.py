@@ -217,8 +217,8 @@ class Vault:
     """Request handling, independent of HTTP and of dstack so it can be tested."""
 
     def __init__(self, *, encryption_key: ec.EllipticCurvePrivateKey, receipts_key: ec.EllipticCurvePrivateKey,
-                 identity: Mapping, caller_token: str, upstream: Upstream = https_upstream,
-                 clock: Callable[[], float] = time.time, tls_spki_sha256: Optional[str] = None) -> None:
+                 identity: Mapping, caller_token: str, tls_spki_sha256: str, upstream: Upstream = https_upstream,
+                 clock: Callable[[], float] = time.time) -> None:
         if not isinstance(caller_token, str) or len(caller_token) < MIN_CALLER_TOKEN:
             raise ValueError("caller token too short")
         self._encryption_key = encryption_key
@@ -232,10 +232,9 @@ class Vault:
         self.receipts_public_key = env.compressed(receipts_key.public_key()).hex()
         self._identity = dict(identity, schema="leadpoet.lead_order_vault.identity.v1",
                               boot_id=self.boot_id, booted_at=self.booted_at)
-        if tls_spki_sha256 is not None:
-            # Binds this boot's TLS key to the KMS-issued receipts key.
-            self._identity["tls"] = self._signed({"schema": TLS_SCHEMA, "boot_id": self.boot_id,
-                                                  "spki_sha256": tls_spki_sha256})
+        # Binds this boot's TLS key to the KMS-issued receipts key.
+        self._identity["tls"] = self._signed({"schema": TLS_SCHEMA, "boot_id": self.boot_id,
+                                              "spki_sha256": tls_spki_sha256})
         self._lock = threading.Lock()
         self._calls: Dict[str, int] = {}
 
@@ -533,23 +532,22 @@ def make_handler(vault: Vault):
 
 
 class BoundedServer(ThreadingHTTPServer):
-    """At most ``MAX_CONNECTIONS`` requests at once; the rest are closed.
+    """The vault's HTTPS server: at most ``MAX_CONNECTIONS`` at once, the rest closed.
 
-    With ``ssl_context`` set, each connection's TLS handshake runs in its own
-    worker thread, so a slow client cannot stall the accept loop. A
-    connection that has not delivered its whole request within
-    ``REQUEST_READ_SECONDS`` is cut; the handler calls ``request_read`` once
-    it has.
+    Each connection's TLS handshake runs in its own worker thread, so a slow
+    client cannot stall the accept loop. A connection that has not delivered
+    its whole request, handshake included, within ``REQUEST_READ_SECONDS``
+    is cut; the handler calls ``request_read`` once it has.
     """
 
     # Not daemons: server_close() waits for calls in flight, so a restart
     # does not cut a billed call or lose its receipt.
     daemon_threads = False
     MAX_CONNECTIONS = 128
-    ssl_context: Optional[ssl.SSLContext] = None
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self, address, handler, ssl_context: ssl.SSLContext) -> None:
+        super().__init__(address, handler)
+        self._ssl_context = ssl_context
         self._slots = threading.BoundedSemaphore(self.MAX_CONNECTIONS)
         self._reading = threading.local()
 
@@ -570,21 +568,21 @@ class BoundedServer(ThreadingHTTPServer):
             self._slots.release()
 
     def finish_request(self, request, client_address) -> None:
-        current = [request]  # wrapping for TLS replaces the socket object
-        timer = threading.Timer(REQUEST_READ_SECONDS, lambda: _shutdown(current[0]))
+        try:
+            # No I/O yet: the handshake runs below, under the read deadline.
+            tls = self._ssl_context.wrap_socket(request, server_side=True, do_handshake_on_connect=False)
+        except OSError:  # the client already left
+            return
+        timer = threading.Timer(REQUEST_READ_SECONDS, _shutdown, args=(tls,))
         timer.daemon = True
         self._reading.timer = timer
         timer.start()
         try:
-            if self.ssl_context is None:
-                super().finish_request(request, client_address)
-                return
-            request.settimeout(REQUEST_READ_SECONDS)
-            try:
-                current[0] = tls = self.ssl_context.wrap_socket(request, server_side=True)
-            except OSError:  # includes ssl.SSLError: a failed handshake is just closed
-                return
             with tls:
+                try:
+                    tls.do_handshake()
+                except OSError:  # includes ssl.SSLError: a failed handshake is just closed
+                    return
                 super().finish_request(tls, client_address)
         finally:
             timer.cancel()
@@ -702,8 +700,7 @@ def main() -> None:
     tls_context, tls_spki = tls_server_context()
     vault = Vault(encryption_key=encryption_key, receipts_key=receipts_key, identity=identity,
                   caller_token=caller_token, tls_spki_sha256=tls_spki)
-    server = BoundedServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), make_handler(vault))
-    server.ssl_context = tls_context
+    server = BoundedServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), make_handler(vault), tls_context)
     # On stop, refuse new connections and let calls in flight finish; each
     # ends within MAX_TIMEOUT_SECONDS plus REQUEST_READ_SECONDS.
     signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown).start())

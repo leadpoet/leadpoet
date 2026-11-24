@@ -3,8 +3,16 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
+import http.client
 import json
+import socket
+import ssl
+import threading
+import time
+import urllib.error
+import urllib.request
 
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
@@ -13,7 +21,8 @@ from cryptography.hazmat.primitives.asymmetric import ec, utils
 from lead_order_vault import chain, cli, trust
 from lead_order_vault import envelope as env
 from lead_order_vault.vault import (
-    ENCRYPTION_DOMAIN, RECEIPTS_DOMAIN, UpstreamError, UpstreamResponse, Vault, VaultError, canonical,
+    CALLER_HEADER, ENCRYPTION_DOMAIN, RECEIPTS_DOMAIN, BoundedServer, UpstreamError, UpstreamResponse, Vault,
+    VaultError, canonical, make_handler, tls_server_context,
 )
 
 HOTKEY = "5" + "F" * 47
@@ -52,7 +61,8 @@ class FakeProvider:
 
 def _vault(provider=None) -> Vault:
     return Vault(encryption_key=ENCRYPTION, receipts_key=RECEIPTS, identity={"app_id": "ab" * 20},
-                 caller_token=TOKEN, upstream=provider or FakeProvider(), clock=lambda: 1_800_000_000)
+                 caller_token=TOKEN, tls_spki_sha256="0" * 64, upstream=provider or FakeProvider(),
+                 clock=lambda: 1_800_000_000)
 
 
 def _seal(secret, provider="openrouter", purpose="runtime", hotkey=HOTKEY, vault_key=VAULT_KEY):
@@ -365,40 +375,62 @@ def test_identity_reveals_no_key():
     assert OPENROUTER_KEY not in text and vault.identity()["boot_id"] == vault.boot_id
 
 
+# -- the vault's HTTPS server ---------------------------------------------------------
+
+# The tests reach the server without pinning; the trust tests pin.
+UNVERIFIED = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+UNVERIFIED.check_hostname, UNVERIFIED.verify_mode = False, ssl.CERT_NONE
+
+
+def _tls_vault(provider=None):
+    context, spki = tls_server_context()
+    vault = Vault(encryption_key=ENCRYPTION, receipts_key=RECEIPTS, identity=_identity(), caller_token=TOKEN,
+                  tls_spki_sha256=spki, upstream=provider or FakeProvider())
+    return vault, (context, spki)
+
+
+@contextlib.contextmanager
+def _serving(handler, tls, server_class=BoundedServer):
+    """``handler`` behind the vault's own HTTPS server on a loopback port."""
+
+    server = server_class(("127.0.0.1", 0), handler, tls[0])
+    thread = threading.Thread(target=server.serve_forever, args=(0.05,))
+    thread.start()
+    try:
+        yield server, "https://127.0.0.1:%d" % server.server_address[1]
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+def _connect(server):
+    return http.client.HTTPSConnection("127.0.0.1", server.server_address[1], timeout=5, context=UNVERIFIED)
+
+
 def test_http_server_routes_authenticates_and_never_logs(capsys):
-    import threading
-    import urllib.error
-    import urllib.request
-    from lead_order_vault.vault import CALLER_HEADER, BoundedServer, make_handler
-
     provider = FakeProvider()
-    server = BoundedServer(("127.0.0.1", 0), make_handler(_vault(provider)))
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    base = "http://127.0.0.1:%d" % server.server_address[1]
+    vault, tls = _tls_vault(provider)
 
-    def post(path, document, token=TOKEN):
+    def post(base, path, document, token=TOKEN):
         request = urllib.request.Request(base + path, data=json.dumps(document).encode(), method="POST",
                                          headers={CALLER_HEADER: token} if token else {})
         try:
-            with urllib.request.urlopen(request) as response:
+            with urllib.request.urlopen(request, context=UNVERIFIED) as response:
                 return response.status, json.loads(response.read())
         except urllib.error.HTTPError as error:
             return error.code, json.loads(error.read())
 
-    try:
-        with urllib.request.urlopen(base + "/v1/identity") as response:
-            assert json.loads(response.read())["app_id"] == "ab" * 20
-        assert post("/v1/call", _call(), token=None) == (401, {"error": "caller_unauthorized"})
-        assert post("/v1/call", _call(url="https://evil.example/x")) == (400, {"error": "host_not_allowed"})
-        status, result = post("/v1/call", _call())
+    with _serving(make_handler(vault), tls) as (_, base):
+        with urllib.request.urlopen(base + "/v1/identity", context=UNVERIFIED) as response:
+            assert json.loads(response.read())["boot_id"] == vault.boot_id
+        assert post(base, "/v1/call", _call(), token=None) == (401, {"error": "caller_unauthorized"})
+        assert post(base, "/v1/call", _call(url="https://evil.example/x")) == (400, {"error": "host_not_allowed"})
+        status, result = post(base, "/v1/call", _call())
         assert status == 200 and result["status"] == 200 and len(provider.requests) == 1
-        assert post("/v1/nope", {})[0] == 404
-    finally:
-        server.shutdown()
-        server.server_close()
+        assert post(base, "/v1/nope", {})[0] == 404
     captured = capsys.readouterr()
     assert captured.out == "" and captured.err == ""
-
 
 def test_an_unexpected_upstream_failure_still_gets_its_receipt():
     result = _vault(FakeProvider({"/api/v1/chat/completions": AttributeError("surprise")})).call(_call())
@@ -407,11 +439,6 @@ def test_an_unexpected_upstream_failure_still_gets_its_receipt():
 
 
 def test_stopping_the_server_lets_a_call_in_flight_finish():
-    import http.client
-    import threading
-
-    from lead_order_vault.vault import CALLER_HEADER, BoundedServer, make_handler
-
     started, release = threading.Event(), threading.Event()
 
     class HeldProvider(FakeProvider):
@@ -420,13 +447,14 @@ def test_stopping_the_server_lets_a_call_in_flight_finish():
             release.wait(5)
             return super().__call__(*args)
 
-    server = BoundedServer(("127.0.0.1", 0), make_handler(_vault(HeldProvider())))
+    vault, tls = _tls_vault(HeldProvider())
+    server = BoundedServer(("127.0.0.1", 0), make_handler(vault), tls[0])
     serving = threading.Thread(target=server.serve_forever)
     serving.start()
     answers = []
 
     def call():
-        connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        connection = _connect(server)
         connection.request("POST", "/v1/call", body=json.dumps(_call()).encode(), headers={CALLER_HEADER: TOKEN})
         answers.append(json.loads(connection.getresponse().read()))
 
@@ -446,24 +474,17 @@ def test_stopping_the_server_lets_a_call_in_flight_finish():
 
 
 def test_every_answer_closes_its_connection_and_slow_clients_are_cut(monkeypatch):
-    import http.client
-    import socket
-    import threading
-    import time
-
     from lead_order_vault import vault as vault_module
-    from lead_order_vault.vault import BoundedServer, make_handler
 
     monkeypatch.setattr(vault_module, "REQUEST_READ_SECONDS", 0.5)
+
     class OneSlot(BoundedServer):
         MAX_CONNECTIONS = 1
 
-    server = OneSlot(("127.0.0.1", 0), make_handler(_vault()))
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    port = server.server_address[1]
-    try:
+    vault, tls = _tls_vault()
+    with _serving(make_handler(vault), tls, OneSlot) as (server, _):
         # A refusal reads the body first and still closes the connection.
-        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        connection = _connect(server)
         connection.request("POST", "/v1/call", body=json.dumps(_call()).encode())
         refused = connection.getresponse()
         refused.read()
@@ -471,7 +492,7 @@ def test_every_answer_closes_its_connection_and_slow_clients_are_cut(monkeypatch
         connection.close()
         # A client sending one byte at a time holds the only slot only until
         # the read deadline, not for as long as it keeps trickling.
-        slow = socket.create_connection(("127.0.0.1", port))
+        slow = UNVERIFIED.wrap_socket(socket.create_connection(server.server_address))
         slow.settimeout(0.2)
         started = time.monotonic()
         try:
@@ -487,23 +508,14 @@ def test_every_answer_closes_its_connection_and_slow_clients_are_cut(monkeypatch
         assert time.monotonic() - started < 2
         slow.close()
         time.sleep(0.1)
-        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        connection = _connect(server)
         connection.request("GET", "/healthz")
         answered = connection.getresponse()
         assert answered.status == 200 and answered.will_close
         connection.close()
-    finally:
-        server.shutdown()
-        server.server_close()
-
 
 def test_the_real_upstream_bounds_total_time_and_size():
-    import socket
-    import ssl
-    import threading
-    import time
-
-    from lead_order_vault.vault import https_upstream, tls_server_context
+    from lead_order_vault.vault import https_upstream
 
     server_context, _ = tls_server_context()
     listener = socket.create_server(("127.0.0.1", 0))
@@ -630,80 +642,51 @@ def test_every_request_the_broker_sends_fits_the_vault():
 # -- the vault ends TLS itself ------------------------------------------------------
 
 
+@contextlib.contextmanager
 def _tls_server(identity_source, tls=None):
-    """A TLS server like the vault's. ``identity_source`` answers /v1/identity."""
+    """A server like the vault's whose /v1/identity is ``identity_source()``: (deployment, spki)."""
 
-    import threading
     from http.server import BaseHTTPRequestHandler
-
-    from lead_order_vault.vault import BoundedServer, tls_server_context
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
         def do_GET(self):
+            self.server.request_read()
             data = json.dumps(identity_source()).encode()
             self.send_response(200)
             self.send_header("content-length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
 
-    server = BoundedServer(("127.0.0.1", 0), Handler)
-    server.ssl_context, spki = tls or tls_server_context()
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server, spki, dict(DEPLOYMENT, url="https://127.0.0.1:%d" % server.server_address[1])
-
-
-def _tls_vault():
-    from lead_order_vault.vault import tls_server_context
-
-    context, spki = tls_server_context()
-    vault = Vault(encryption_key=ENCRYPTION, receipts_key=RECEIPTS, identity=_identity(), caller_token=TOKEN,
-                  upstream=FakeProvider(), tls_spki_sha256=spki)
-    return vault, (context, spki)
-
+    tls = tls or tls_server_context()
+    with _serving(Handler, tls) as (_, url):
+        yield dict(DEPLOYMENT, url=url), tls[1]
 
 def test_the_cli_trusts_only_a_tls_session_the_vault_ends_itself():
-    import urllib.error
-    import urllib.request
-
     vault, tls = _tls_vault()
-    server, spki, deployment = _tls_server(vault.identity, tls)
-    try:
+    with _tls_server(vault.identity, tls) as (deployment, spki):
         identity, certificate = trust.connect(deployment)
         assert identity["tls"]["document"]["spki_sha256"] == spki
         context = trust.tls_context(certificate)
         with urllib.request.urlopen(deployment["url"] + "/v1/identity", context=context) as response:
             assert json.loads(response.read())["boot_id"] == vault.boot_id
         # After a restart the vault has a new TLS key: the old pin fails closed.
-        restarted, _, again = _tls_server(vault.identity)
-        try:
+        with _tls_server(vault.identity) as (again, _):
             with pytest.raises(urllib.error.URLError, match="CERTIFICATE_VERIFY_FAILED"):
                 urllib.request.urlopen(again["url"] + "/v1/identity", context=context)
-        finally:
-            restarted.shutdown()
-            restarted.server_close()
-    finally:
-        server.shutdown()
-        server.server_close()
 
 
 def test_a_gateway_that_ends_tls_itself_is_refused():
     vault, _ = _tls_vault()
     # The gateway relays the vault's real, KMS-signed identity over its own TLS key.
-    gateway, _, deployment = _tls_server(vault.identity)
-    try:
+    with _tls_server(vault.identity) as (deployment, _):
         with pytest.raises(trust.TrustError, match="does not end in the vault"):
             trust.connect(deployment)
-    finally:
-        gateway.shutdown()
-        gateway.server_close()
 
 
 def test_a_gateway_cannot_rebind_the_tls_key_without_the_receipts_key():
-    from lead_order_vault.vault import tls_server_context
-
     vault, _ = _tls_vault()
     context, spki = tls_server_context()
 
@@ -712,10 +695,6 @@ def test_a_gateway_cannot_rebind_the_tls_key_without_the_receipts_key():
         identity["tls"]["document"]["spki_sha256"] = spki
         return identity
 
-    gateway, _, deployment = _tls_server(forged, (context, spki))
-    try:
+    with _tls_server(forged, (context, spki)) as (deployment, _):
         with pytest.raises(trust.TrustError, match="not signed by the vault.s receipts key"):
             trust.connect(deployment)
-    finally:
-        gateway.shutdown()
-        gateway.server_close()

@@ -9,22 +9,30 @@ Phala's KMS to the app named in ``deployment.json``, and prints an envelope.
 Submit the envelope to ``POST /lead-orders/keys``. Only the vault can open it.
 
 The check needs nothing from Leadpoet: the app id and the KMS root key in
-``deployment.json`` can be compared with the on-chain records on Base.
+``deployment.json`` can be compared with the on-chain records on Base. It
+also refuses any TLS session the vault does not end itself, so Phala's
+gateway or any proxy in between sees only ciphertext.
 """
 
 from __future__ import annotations
 
 import argparse
 import getpass
+import http.client
 import json
+import ssl
 import sys
-import urllib.request
 from pathlib import Path
-from typing import Callable, Mapping, Optional
+from typing import Callable, Mapping, Optional, Tuple
+from urllib.parse import urlsplit
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from . import chain
 from . import envelope as env
-from .vault import ENCRYPTION_DOMAIN, KEY_ALGORITHM, RECEIPTS_DOMAIN
+from .vault import ENCRYPTION_DOMAIN, KEY_ALGORITHM, RECEIPTS_DOMAIN, TLS_SCHEMA, canonical, spki_sha256
 
 DEPLOYMENT_FILE = Path(__file__).with_name("deployment.json")
 _DEPLOYMENT_FIELDS = ("url", "app_id", "kms_root_public_key", "kms_contract", "chain")
@@ -44,9 +52,60 @@ def load_deployment(path: Path = DEPLOYMENT_FILE) -> Mapping:
     return deployment
 
 
-def fetch_identity(url: str) -> Mapping:
-    with urllib.request.urlopen(url.rstrip("/") + "/v1/identity", timeout=30) as response:  # noqa: S310 (https only)
-        return json.loads(response.read(65536))
+def _tls_context(certificate_pem: Optional[str]) -> ssl.SSLContext:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    # The vault's certificate is self-signed and names no host; it is trusted
+    # only as the exact key its identity signed.
+    context.check_hostname = False
+    if certificate_pem is None:
+        context.verify_mode = ssl.CERT_NONE
+    else:
+        context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+        context.load_verify_locations(cadata=certificate_pem)
+    return context
+
+
+def pinned_context(certificate_pem: str) -> ssl.SSLContext:
+    """A TLS context that accepts only the certificate ``connect`` verified."""
+
+    return _tls_context(certificate_pem)
+
+
+def connect(deployment: Mapping) -> Tuple[Mapping, str]:
+    """The verified identity and the vault's certificate, from one TLS session.
+
+    The identity is read over the same session whose certificate it must
+    sign, so the session provably ends inside the vault.
+    """
+
+    parts = urlsplit(str(deployment["url"]))
+    if parts.scheme != "https" or not parts.hostname:
+        raise CliError("deployment.json url must be https")
+    connection = http.client.HTTPSConnection(parts.hostname, parts.port or 443, timeout=30,
+                                             context=_tls_context(None))
+    try:
+        connection.request("GET", "/v1/identity")
+        certificate = connection.sock.getpeercert(binary_form=True)
+        response = connection.getresponse()
+        if response.status != 200:
+            raise CliError("The vault's identity answered %d." % response.status)
+        identity = json.loads(response.read(65536))
+    finally:
+        connection.close()
+    identity = verified_identity(deployment, identity)
+    if not isinstance(identity.get("tls"), Mapping) or \
+            identity["tls"].get("document") != {"schema": TLS_SCHEMA, "boot_id": identity.get("boot_id"),
+                                                "spki_sha256": spki_sha256(certificate)}:
+        raise CliError("The TLS session does not end in the vault (a gateway or proxy ended it).")
+    receipts_key = ec.EllipticCurvePublicKey.from_encoded_point(
+        ec.SECP256K1(), bytes.fromhex(identity["receipts"]["public_key"]))
+    try:
+        receipts_key.verify(bytes.fromhex(str(identity["tls"].get("signature"))),
+                            canonical(identity["tls"]["document"]), ec.ECDSA(hashes.SHA256()))
+    except (InvalidSignature, ValueError):
+        raise CliError("The vault's TLS key is not signed by its receipts key.") from None
+    return identity, ssl.DER_cert_to_PEM_cert(certificate)
 
 
 def verified_identity(deployment: Mapping, identity: Mapping) -> Mapping:
@@ -90,11 +149,12 @@ def main(argv: Optional[list] = None) -> int:
     args = parser.parse_args(argv)
     try:
         deployment = load_deployment()
-        identity = verified_identity(deployment, fetch_identity(deployment["url"]))
+        identity, _ = connect(deployment)
         if args.command == "verify":
             print(json.dumps({"verified": True, "app_id": identity["app_id"], "compose_hash": identity.get("compose_hash"),
                               "encryption_public_key": identity["encryption"]["public_key"],
-                              "receipts_public_key": identity["receipts"]["public_key"]}, indent=2))
+                              "receipts_public_key": identity["receipts"]["public_key"],
+                              "tls_spki_sha256": identity["tls"]["document"]["spki_sha256"]}, indent=2))
             return 0
         sealed = seal_key(provider=args.provider, hotkey=args.hotkey, identity=identity,
                           read_secret=lambda prompt: getpass.getpass(prompt).strip())

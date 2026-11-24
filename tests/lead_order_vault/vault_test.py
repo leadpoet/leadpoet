@@ -466,3 +466,97 @@ def test_every_request_the_broker_sends_fits_the_vault():
     assert _route_allowed("openrouter", "GET", "/api/v1/generation", "id=" + quote("gen-1.a:b", safe=""))
     for tool in broker.DEEPLINE_OPERATIONS:
         assert _route_allowed("deepline", "POST", "/api/v2/integrations/%s/execute" % tool, "")
+
+
+# -- the vault ends TLS itself ------------------------------------------------------
+
+
+def _tls_server(identity_source, tls=None):
+    """A TLS server like the vault's. ``identity_source`` answers /v1/identity."""
+
+    import threading
+    from http.server import BaseHTTPRequestHandler
+
+    from lead_order_vault.vault import BoundedServer, tls_server_context
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            data = json.dumps(identity_source()).encode()
+            self.send_response(200)
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = BoundedServer(("127.0.0.1", 0), Handler)
+    server.ssl_context, spki = tls or tls_server_context()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, spki, dict(DEPLOYMENT, url="https://127.0.0.1:%d" % server.server_address[1])
+
+
+def _tls_vault():
+    from lead_order_vault.vault import tls_server_context
+
+    context, spki = tls_server_context()
+    vault = Vault(encryption_key=ENCRYPTION, receipts_key=RECEIPTS, identity=_identity(), caller_token=TOKEN,
+                  upstream=FakeProvider(), tls_spki_sha256=spki)
+    return vault, (context, spki)
+
+
+def test_the_cli_trusts_only_a_tls_session_the_vault_ends_itself():
+    import urllib.error
+    import urllib.request
+
+    vault, tls = _tls_vault()
+    server, spki, deployment = _tls_server(vault.identity, tls)
+    try:
+        identity, certificate = cli.connect(deployment)
+        assert identity["tls"]["document"]["spki_sha256"] == spki
+        context = cli.pinned_context(certificate)
+        with urllib.request.urlopen(deployment["url"] + "/v1/identity", context=context) as response:
+            assert json.loads(response.read())["boot_id"] == vault.boot_id
+        # After a restart the vault has a new TLS key: the old pin fails closed.
+        restarted, _, again = _tls_server(vault.identity)
+        try:
+            with pytest.raises(urllib.error.URLError, match="CERTIFICATE_VERIFY_FAILED"):
+                urllib.request.urlopen(again["url"] + "/v1/identity", context=context)
+        finally:
+            restarted.shutdown()
+            restarted.server_close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_gateway_that_ends_tls_itself_is_refused():
+    vault, _ = _tls_vault()
+    # The gateway relays the vault's real, KMS-signed identity over its own TLS key.
+    gateway, _, deployment = _tls_server(vault.identity)
+    try:
+        with pytest.raises(cli.CliError, match="does not end in the vault"):
+            cli.connect(deployment)
+    finally:
+        gateway.shutdown()
+        gateway.server_close()
+
+
+def test_a_gateway_cannot_rebind_the_tls_key_without_the_receipts_key():
+    from lead_order_vault.vault import tls_server_context
+
+    vault, _ = _tls_vault()
+    context, spki = tls_server_context()
+
+    def forged():
+        identity = json.loads(json.dumps(vault.identity()))
+        identity["tls"]["document"]["spki_sha256"] = spki
+        return identity
+
+    gateway, _, deployment = _tls_server(forged, (context, spki))
+    try:
+        with pytest.raises(cli.CliError, match="not signed by its receipts key"):
+            cli.connect(deployment)
+    finally:
+        gateway.shutdown()
+        gateway.server_close()

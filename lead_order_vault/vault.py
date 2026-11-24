@@ -6,7 +6,8 @@ Leadpoet cannot read a miner's key, even with full access to its own servers.
 
 Endpoints:
 
-* ``GET  /v1/identity``  public keys, their KMS signature chains, build ids.
+* ``GET  /v1/identity``  public keys, their KMS signature chains, build ids,
+                         and this boot's TLS key, signed by the receipts key.
 * ``POST /v1/check``     open a newly registered key and validate it.
 * ``POST /v1/call``      open a key, attach it, forward the request, and
                          return the response with a signed receipt.
@@ -22,11 +23,16 @@ names, and a new model or Deepline tool needs no vault change:
 
 Every forwarded call gets a receipt with a per-key sequence number, so a call
 the gateway hides shows up as a gap. No database, files or request logs.
+
+The vault ends TLS itself, with a key made at boot and held only in memory.
+Phala's gateway passes the TLS stream through unread, and clients trust the
+certificate only because the identity's receipts key signed it.
 """
 
 from __future__ import annotations
 
 import base64
+import datetime
 import hashlib
 import hmac
 import http.client
@@ -35,6 +41,8 @@ import os
 import re
 import socket
 import ssl
+import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -43,8 +51,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
 
+from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 
 from . import envelope as env
 
@@ -52,6 +62,8 @@ ENCRYPTION_DOMAIN = "leadpoet/lead-order-vault/encryption/v1"
 RECEIPTS_DOMAIN = "leadpoet/lead-order-vault/receipts/v1"
 KEY_ALGORITHM = "secp256k1"
 RECEIPT_SCHEMA = "leadpoet.lead_order_vault.receipt.v1"
+TLS_SCHEMA = "leadpoet.lead_order_vault.tls.v1"
+TLS_HANDSHAKE_SECONDS = 30.0
 
 HOSTS = {"openrouter.ai": "openrouter", "code.deepline.com": "deepline"}
 # Request shapes a miner's key may take. Anything else, such as billing
@@ -147,7 +159,7 @@ class Vault:
 
     def __init__(self, *, encryption_key: ec.EllipticCurvePrivateKey, receipts_key: ec.EllipticCurvePrivateKey,
                  identity: Mapping, caller_token: str, upstream: Upstream = https_upstream,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time, tls_spki_sha256: Optional[str] = None) -> None:
         if not isinstance(caller_token, str) or len(caller_token) < MIN_CALLER_TOKEN:
             raise ValueError("caller token too short")
         self._encryption_key = encryption_key
@@ -161,6 +173,10 @@ class Vault:
         self.receipts_public_key = _compressed_hex(receipts_key)
         self._identity = dict(identity, schema="leadpoet.lead_order_vault.identity.v1",
                               boot_id=self.boot_id, booted_at=self.booted_at)
+        if tls_spki_sha256 is not None:
+            # Binds this boot's TLS key to the KMS-issued receipts key.
+            self._identity["tls"] = self._signed({"schema": TLS_SCHEMA, "boot_id": self.boot_id,
+                                                  "spki_sha256": tls_spki_sha256})
         self._lock = threading.Lock()
         self._calls: Dict[str, int] = {}
 
@@ -443,10 +459,15 @@ def make_handler(vault: Vault):
 
 
 class BoundedServer(ThreadingHTTPServer):
-    """At most ``MAX_CONNECTIONS`` requests at once; the rest are closed."""
+    """At most ``MAX_CONNECTIONS`` requests at once; the rest are closed.
+
+    With ``ssl_context`` set, each connection's TLS handshake runs in its own
+    worker thread, so a slow client cannot stall the accept loop.
+    """
 
     daemon_threads = True
     MAX_CONNECTIONS = 128
+    ssl_context: Optional[ssl.SSLContext] = None
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -467,6 +488,58 @@ class BoundedServer(ThreadingHTTPServer):
             super().process_request_thread(request, client_address)
         finally:
             self._slots.release()
+
+    def finish_request(self, request, client_address) -> None:
+        if self.ssl_context is None:
+            super().finish_request(request, client_address)
+            return
+        request.settimeout(TLS_HANDSHAKE_SECONDS)
+        try:
+            tls = self.ssl_context.wrap_socket(request, server_side=True)
+        except OSError:  # includes ssl.SSLError: a failed handshake is just closed
+            return
+        with tls:
+            super().finish_request(tls, client_address)
+
+
+def spki_sha256(certificate_der: bytes) -> str:
+    """SHA-256 of a certificate's public key, which is what the identity signs."""
+
+    public_key = x509.load_der_x509_certificate(certificate_der).public_key()
+    return hashlib.sha256(public_key.public_bytes(serialization.Encoding.DER,
+                                                  serialization.PublicFormat.SubjectPublicKeyInfo)).hexdigest()
+
+
+def tls_server_context() -> Tuple[ssl.SSLContext, str]:
+    """A new P-256 TLS key for this boot, never written to disk, and its SPKI hash."""
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "lead-order-vault")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    certificate = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+                   .serial_number(x509.random_serial_number())
+                   .not_valid_before(now - datetime.timedelta(hours=1))
+                   .not_valid_after(now + datetime.timedelta(days=3650))
+                   .sign(key, hashes.SHA256()))
+    pem = certificate.public_bytes(serialization.Encoding.PEM) + key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    # ssl loads keys only from a path. In the vault that path is an in-memory
+    # file; elsewhere (local tests) a temporary file removed right after.
+    if sys.platform.startswith("linux"):
+        descriptor = os.memfd_create("lead-order-vault-tls")
+        try:
+            os.write(descriptor, pem)
+            context.load_cert_chain("/proc/self/fd/%d" % descriptor)
+        finally:
+            os.close(descriptor)
+    else:
+        with tempfile.NamedTemporaryFile() as handle:
+            handle.write(pem)
+            handle.flush()
+            context.load_cert_chain(handle.name)
+    return context, spki_sha256(certificate.public_bytes(serialization.Encoding.DER))
 
 
 def _not_found() -> Mapping:
@@ -526,9 +599,11 @@ def main() -> None:
     info = dstack.info()
     identity = {name: info.get(name) for name in ("app_id", "compose_hash", "instance_id", "os_image_hash")}
     identity.update(encryption=encryption, receipts=receipts)
+    tls_context, tls_spki = tls_server_context()
     vault = Vault(encryption_key=encryption_key, receipts_key=receipts_key, identity=identity,
-                  caller_token=caller_token)
+                  caller_token=caller_token, tls_spki_sha256=tls_spki)
     server = BoundedServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), make_handler(vault))
+    server.ssl_context = tls_context
     server.serve_forever()
 
 

@@ -5,11 +5,16 @@ and uses it as the request's credential: ``VaultTransport`` sends the request
 to the vault, which swaps the envelope for the key, forwards it to the
 provider, and returns the answer with a signed receipt. Leadpoet's own keys
 keep the direct transport.
+
+The client talks only to a TLS session the vault itself ends: it pins the
+certificate that the vault's KMS-verified identity signed (``cli.connect``),
+so Phala's gateway cannot read the caller token or the envelopes.
 """
 
 from __future__ import annotations
 
 import base64
+import threading
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional
 from urllib.parse import urlsplit
@@ -18,6 +23,7 @@ import httpx
 
 from lab_arena import broker as arena_broker
 from lab_arena.broker import ProviderResponse, ProviderTransportError
+from lead_order_vault import cli as vault_cli
 
 CALLER_HEADER = "x-lead-order-vault-token"
 # Time for the vault itself on top of the provider's own timeout.
@@ -68,22 +74,50 @@ class VaultTransportError(ProviderTransportError):
 
 
 class VaultClient:
-    def __init__(self, url: str, caller_token: str, *, client: Optional[httpx.Client] = None) -> None:
-        if not url.startswith("https://") and not url.startswith("http://127.0.0.1"):
+    """``deployment`` is ``lead_order_vault/deployment.json``: url, app id, KMS root.
+
+    ``client`` replaces the pinned client, for tests only.
+    """
+
+    def __init__(self, deployment: Mapping[str, Any], caller_token: str, *,
+                 client: Optional[httpx.Client] = None) -> None:
+        self._url = str(deployment.get("url") or "").rstrip("/")
+        if not self._url.startswith("https://"):
             raise ValueError("vault url must be https")
-        self._url = url.rstrip("/")
+        self._deployment = deployment
         self._token = caller_token
-        self._client = client or httpx.Client(follow_redirects=False, trust_env=False)
+        self._client = client
+        self._fixed = client is not None
+        self._lock = threading.Lock()
+
+    def _pinned(self, refresh: bool) -> httpx.Client:
+        with self._lock:
+            if self._client is None or (refresh and not self._fixed):
+                try:
+                    _, certificate = vault_cli.connect(self._deployment)
+                except (vault_cli.CliError, OSError, ValueError, KeyError, TypeError):
+                    raise VaultUnavailable("vault_unverified", forwarded=False) from None
+                previous, self._client = self._client, httpx.Client(
+                    verify=vault_cli.pinned_context(certificate), follow_redirects=False, trust_env=False)
+                if previous is not None:
+                    previous.close()
+            return self._client
 
     def _post(self, path: str, document: Mapping[str, Any], timeout: float) -> Dict[str, Any]:
-        try:
-            response = self._client.post(self._url + path, json=document, timeout=timeout,
-                                         headers={CALLER_HEADER: self._token})
-        except (httpx.ConnectError, httpx.ConnectTimeout):
-            raise VaultUnavailable("vault_unreachable", forwarded=False) from None
-        except httpx.HTTPError:
-            raise VaultUnavailable("vault_unreachable", forwarded=None) from None
-        return self._document(response)
+        # A failed connect sent nothing. It is retried once after verifying the
+        # vault again, which picks up the new TLS key after a restart.
+        for refresh in (False, True):
+            try:
+                response = self._pinned(refresh).post(self._url + path, json=document, timeout=timeout,
+                                                      headers={CALLER_HEADER: self._token})
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                if not refresh:
+                    continue
+                raise VaultUnavailable("vault_unreachable", forwarded=False) from None
+            except httpx.HTTPError:
+                raise VaultUnavailable("vault_unreachable", forwarded=None) from None
+            return self._document(response)
+        raise AssertionError("unreachable")
 
     @staticmethod
     def _document(response: httpx.Response) -> Dict[str, Any]:
@@ -98,13 +132,6 @@ class VaultClient:
             raise VaultUnavailable("vault_" + str(code or status), status=status,
                                    forwarded=False if refused else None)
         return document
-
-    def identity(self) -> Dict[str, Any]:
-        try:
-            response = self._client.get(self._url + "/v1/identity", timeout=10.0)
-        except httpx.HTTPError:
-            raise VaultUnavailable("vault_unreachable", forwarded=False) from None
-        return self._document(response)
 
     def check(self, *, provider: str, envelope: str, management_envelope: Optional[str]) -> Dict[str, Any]:
         document: Dict[str, Any] = {"provider": provider, "envelope": envelope}

@@ -4,7 +4,7 @@ Reuses the Arena's production pieces and their environment names: the
 PostgREST store credential (``LAB_ARENA_SUPABASE_URL``,
 ``LAB_ARENA_SERVICE_KEY``), the chain endpoint, the KMS signing key that
 signs Arena documents. Miner keys go through the lead-order key vault
-(``LEAD_ORDER_VAULT_URL``, ``LEAD_ORDER_VAULT_CALLER_TOKEN``). Nothing is
+(``lead_order_vault/deployment.json``, ``LEAD_ORDER_VAULT_CALLER_TOKEN``). Nothing is
 built, and no network is touched, while the mode is ``off``.
 """
 
@@ -27,6 +27,7 @@ from lab_arena.lead_orders.policy import load_policy
 from lab_arena.lead_orders.service import LeadOrderService
 from lab_arena.lead_orders.store import LeadOrderStore
 from lab_arena.lead_orders.vault_client import VaultClient, VaultTransport
+from lead_order_vault import cli as vault_cli
 from lab_arena.store import PostgrestTransport
 
 PRICE_TABLE_TTL_SECONDS = 3600
@@ -89,7 +90,11 @@ def build_from_environment(environ: Optional[Mapping[str, str]] = None):
     registrar = None
     miner_transport = None
     if config.uses_miner_keys:
-        vault = VaultClient(_required("LEAD_ORDER_VAULT_URL", env), _required("LEAD_ORDER_VAULT_CALLER_TOKEN", env))
+        try:
+            deployment = vault_cli.load_deployment()
+        except vault_cli.CliError as error:
+            raise LeadOrdersUnavailable(str(error)) from None
+        vault = VaultClient(deployment, _required("LEAD_ORDER_VAULT_CALLER_TOKEN", env))
         registrar = lead_keys.MinerKeyRegistrar(vault)
         miner_transport = VaultTransport(vault)
     broker = LeadOrderBroker(

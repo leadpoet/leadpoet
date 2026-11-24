@@ -473,16 +473,21 @@ def test_every_request_the_broker_sends_fits_the_vault():
 
 @pytest.fixture
 def served_vault():
-    import threading
-    from http.server import ThreadingHTTPServer
+    """The real vault server, ending TLS itself, with a KMS-issued identity."""
 
-    from lead_order_vault.vault import make_handler
+    import threading
+
+    from lead_order_vault.vault import BoundedServer, make_handler, tls_server_context
 
     provider = FakeProvider({"/api/v2/integrations/boom/execute": UpstreamError("reset", observed_status=None)})
-    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(_vault(provider)))
+    context, spki = tls_server_context()
+    vault = Vault(encryption_key=ENCRYPTION, receipts_key=RECEIPTS, identity=_identity(), caller_token=TOKEN,
+                  upstream=provider, tls_spki_sha256=spki)
+    server = BoundedServer(("127.0.0.1", 0), make_handler(vault))
+    server.ssl_context = context
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        yield "http://127.0.0.1:%d" % server.server_address[1], provider
+        yield dict(DEPLOYMENT, url="https://127.0.0.1:%d" % server.server_address[1]), provider
     finally:
         server.shutdown()
         server.server_close()
@@ -519,7 +524,7 @@ def test_vault_transport_says_whether_the_provider_was_reached(served_vault):
               sealed=_seal(DEEPLINE_KEY, "deepline"))
     assert lost.value.forwarded is True and _check_receipt(lost.value.vault_receipt)["outcome"] == "transport_error"
     with pytest.raises(VaultTransportError) as down:
-        _send(VaultTransport(VaultClient("http://127.0.0.1:9", TOKEN)))
+        _send(VaultTransport(VaultClient(dict(url, url="https://127.0.0.1:9"), TOKEN)))
     assert down.value.forwarded is False
 
 
@@ -532,11 +537,64 @@ def test_vault_client_checks_a_sealed_key(served_vault):
     assert checked["status"] == "valid" and checked["key_fingerprint"] == env.fingerprint("deepline", DEEPLINE_KEY)
 
 
-def test_vault_client_refuses_plain_http_to_another_host():
+def test_vault_client_refuses_plain_http():
     from lab_arena.lead_orders.vault_client import VaultClient
 
-    with pytest.raises(ValueError):
-        VaultClient("http://vault.example", TOKEN)
+    for url in ("http://vault.example", "http://127.0.0.1:8080"):
+        with pytest.raises(ValueError):
+            VaultClient(dict(DEPLOYMENT, url=url), TOKEN)
+
+
+def test_vault_client_sends_nothing_through_a_gateway_that_ends_tls():
+    from lab_arena.lead_orders.vault_client import VaultClient, VaultTransport, VaultTransportError
+
+    vault, _ = _tls_vault()
+    gateway, _, deployment = _tls_server(vault.identity)
+    try:
+        with pytest.raises(VaultTransportError) as refused:
+            _send(VaultTransport(VaultClient(deployment, TOKEN)))
+        assert refused.value.forwarded is False and str(refused.value) == "vault_unverified"
+    finally:
+        gateway.shutdown()
+        gateway.server_close()
+
+
+def test_vault_client_follows_a_restarted_vault_to_its_new_tls_key():
+    import threading
+
+    from lab_arena.lead_orders.vault_client import VaultClient, VaultTransport
+    from lead_order_vault.vault import BoundedServer, make_handler
+
+    def serve(port=0):
+        vault, (context, _) = _tls_vault()
+
+        # One request per connection: a stopped test server's threads would
+        # otherwise keep serving a kept-alive connection, which a real
+        # restart (a new process) cannot.
+        class Handler(make_handler(vault)):
+            protocol_version = "HTTP/1.0"
+
+        server = BoundedServer(("127.0.0.1", port), Handler)
+        server.ssl_context = context
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server, vault
+
+    first, _ = serve()
+    port = first.server_address[1]
+    client = VaultClient(dict(DEPLOYMENT, url="https://127.0.0.1:%d" % port), TOKEN)
+    transport = VaultTransport(client)
+    try:
+        assert _check_receipt(_send(transport).vault_receipt)["key_sequence"] == 1
+    finally:
+        first.shutdown()
+        first.server_close()
+    # Same address, new boot: a new TLS key and a new boot id.
+    second, restarted = serve(port)
+    try:
+        assert _check_receipt(_send(transport).vault_receipt)["boot_id"] == restarted.boot_id
+    finally:
+        second.shutdown()
+        second.server_close()
 
 
 # -- the miner's receipts check ---------------------------------------------------
@@ -607,7 +665,7 @@ def test_only_the_vaults_own_refusals_prove_nothing_was_sent():
 
     def answer(status, document):
         handler = lambda request: httpx.Response(status, json=document)
-        return VaultTransport(VaultClient("https://vault.example", TOKEN,
+        return VaultTransport(VaultClient(DEPLOYMENT, TOKEN,
                                           client=httpx.Client(transport=httpx.MockTransport(handler))))
 
     cases = [(400, {"error": "path_not_allowed"}, False), (408, {"error": "timeout"}, None),
@@ -623,3 +681,97 @@ def test_a_withheld_answer_keeps_the_generation_id():
     result = _vault(FakeProvider({"/api/v1/chat/completions": echo})).call(_call())
     assert result["status"] == 502 and ["x-generation-id", "gen-9"] in result["headers"]
     assert OPENROUTER_KEY not in json.dumps(result)
+
+
+# -- the vault ends TLS itself ------------------------------------------------------
+
+
+def _tls_server(identity_source, tls=None):
+    """A TLS server like the vault's. ``identity_source`` answers /v1/identity."""
+
+    import threading
+    from http.server import BaseHTTPRequestHandler
+
+    from lead_order_vault.vault import BoundedServer, tls_server_context
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            data = json.dumps(identity_source()).encode()
+            self.send_response(200)
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = BoundedServer(("127.0.0.1", 0), Handler)
+    server.ssl_context, spki = tls or tls_server_context()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, spki, dict(DEPLOYMENT, url="https://127.0.0.1:%d" % server.server_address[1])
+
+
+def _tls_vault():
+    from lead_order_vault.vault import tls_server_context
+
+    context, spki = tls_server_context()
+    vault = Vault(encryption_key=ENCRYPTION, receipts_key=RECEIPTS, identity=_identity(), caller_token=TOKEN,
+                  upstream=FakeProvider(), tls_spki_sha256=spki)
+    return vault, (context, spki)
+
+
+def test_the_cli_trusts_only_a_tls_session_the_vault_ends_itself():
+    import urllib.error
+    import urllib.request
+
+    vault, tls = _tls_vault()
+    server, spki, deployment = _tls_server(vault.identity, tls)
+    try:
+        identity, certificate = cli.connect(deployment)
+        assert identity["tls"]["document"]["spki_sha256"] == spki
+        context = cli.pinned_context(certificate)
+        with urllib.request.urlopen(deployment["url"] + "/v1/identity", context=context) as response:
+            assert json.loads(response.read())["boot_id"] == vault.boot_id
+        # After a restart the vault has a new TLS key: the old pin fails closed.
+        restarted, _, again = _tls_server(vault.identity)
+        try:
+            with pytest.raises(urllib.error.URLError, match="CERTIFICATE_VERIFY_FAILED"):
+                urllib.request.urlopen(again["url"] + "/v1/identity", context=context)
+        finally:
+            restarted.shutdown()
+            restarted.server_close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_gateway_that_ends_tls_itself_is_refused():
+    vault, _ = _tls_vault()
+    # The gateway relays the vault's real, KMS-signed identity over its own TLS key.
+    gateway, _, deployment = _tls_server(vault.identity)
+    try:
+        with pytest.raises(cli.CliError, match="does not end in the vault"):
+            cli.connect(deployment)
+    finally:
+        gateway.shutdown()
+        gateway.server_close()
+
+
+def test_a_gateway_cannot_rebind_the_tls_key_without_the_receipts_key():
+    from lead_order_vault.vault import tls_server_context
+
+    vault, _ = _tls_vault()
+    context, spki = tls_server_context()
+
+    def forged():
+        identity = json.loads(json.dumps(vault.identity()))
+        identity["tls"]["document"]["spki_sha256"] = spki
+        return identity
+
+    gateway, _, deployment = _tls_server(forged, (context, spki))
+    try:
+        with pytest.raises(cli.CliError, match="not signed by its receipts key"):
+            cli.connect(deployment)
+    finally:
+        gateway.shutdown()
+        gateway.server_close()

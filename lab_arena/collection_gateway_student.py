@@ -166,6 +166,15 @@ def stage_gateway_source(
             }
         },
     }
+    # Give this gateway run exactly one accepted origin. Write-once protection
+    # rejects trying to reuse a run ID with different response or split bytes.
+    reference_key = f"collection/{ORIGIN}/{run_id}/origin.json"
+    reference = judge._json(
+        {"native_sha256": native_sha256, "verification_sha256": saved["sha256"]}
+    ).encode()
+    objects.put(reference_key, reference)
+    if objects.get_bounded(reference_key, len(reference)) != reference:
+        raise ValueError("gateway run origin could not be read back")
     return source, receipt
 
 
@@ -194,6 +203,15 @@ def verify_gateway_source(spec, receipt, sources, objects):
         }:
             raise ValueError("invalid gateway provenance fields")
         run = item["source_run_id"]
+        if not NAME.fullmatch(run):
+            raise ValueError("invalid gateway run identity")
+        authoritative = json.loads(
+            objects.get_bounded(f"collection/{ORIGIN}/{run}/origin.json", 1024)
+        )
+        if authoritative != {
+            k: item[k] for k in ("native_sha256", "verification_sha256")
+        }:
+            raise ValueError("run does not match the gateway's original record")
         original = _read(
             objects, run, "native", item["native_sha256"], 64 * 1024 * 1024
         )

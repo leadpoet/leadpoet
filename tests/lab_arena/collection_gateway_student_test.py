@@ -192,6 +192,24 @@ def test_original_gateway_student_replays_without_external_signature(
                     transport=acct,
                     owner_key="fixture-owner-key",
                 )
+        # An authentic original and an existing billing receipt may not be
+        # rebound to a new source under the same run ID.
+        different = deepcopy(native)
+        different["original"]["meta.json"] = json.dumps(
+            json.loads(native["original"]["meta.json"]), indent=2
+        )
+        newref = store_artifact(db, origin.ORIGIN, run, "native", different)
+        acct.status, acct.cost = 200, 0.00012
+        with pytest.raises(ArenaContractError):
+            origin.stage_gateway_source(
+                db,
+                sources,
+                run_id=run,
+                native_sha256=newref["sha256"],
+                split=split,
+                transport=acct,
+                owner_key="fixture-owner-key",
+            )
         db._path(lnk["key"]).unlink()
         with pytest.raises(ArenaContractError, match="no object"):
             xp.verify_provenance(spec, proof, {xp._hash(src): src}, objects=db)

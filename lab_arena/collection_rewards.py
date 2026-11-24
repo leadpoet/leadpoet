@@ -125,6 +125,15 @@ def existing_collection_state(row, *, epoch, genesis_hash, signer):
     return state
 
 
+class EpochNotCurrent(ValueError):
+    """A collection state was asked for an epoch the chain is no longer settling.
+
+    This is the ordinary epoch-boundary race a validator hits once per tempo, not
+    a fault: the legacy reward path answers it with
+    ``accepted_weight_epoch_not_current`` (409), and the collection path must too.
+    """
+
+
 def epoch_state(store, chain, signer, *, epoch, burn_hotkey, valuation_source):
     """Read the accepted state, or freeze completed work and issue its first signed state."""
     scope = chain.accepted_weight_epoch_scope()
@@ -135,7 +144,7 @@ def epoch_state(store, chain, signer, *, epoch, burn_hotkey, valuation_source):
             existing, epoch=epoch, genesis_hash=genesis, signer=signer
         )
     if scope["epoch"] != epoch:
-        raise ValueError("cannot issue a collection state outside its epoch")
+        raise EpochNotCurrent("cannot issue a collection state outside its epoch")
     basis = store.collection_reward_quotes(epoch)
     if basis["job_count"]:
         basis["valuation"] = valuation_source(scope["valid_from_block"])

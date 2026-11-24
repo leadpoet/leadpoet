@@ -1,4 +1,4 @@
-"""Paid experiments require their own reviewed terms and the miner's signature."""
+"""A miner signs the exact terms for the selected task and payment mode."""
 from types import SimpleNamespace
 
 import pytest
@@ -7,11 +7,12 @@ from lab_arena import collection_intake as intake, contracts
 from tests.lab_arena.collection_intake_test import manager, registration
 
 
-def test_legacy_consent_never_enables_corrections(monkeypatch):
+def test_published_pilot_terms_require_separate_consent(monkeypatch):
     monkeypatch.delenv("LAB_ARENA_CORRECTION_TERMS_SHA256", raising=False)
     assert intake.terms("pilot")["terms_sha256"] == intake.TERMS_HASH
-    with pytest.raises(intake.IntakeError, match="terms_unavailable"):
-        intake.terms("pilot", "synthetic_corrections")
+    published = intake.terms("pilot", "synthetic_corrections")
+    assert published["terms_sha256"] == contracts.hash_bytes(intake.CORRECTION_TERMS.encode())
+    assert published["terms_sha256"] != intake.TERMS_HASH
 
 
 def test_correction_registration_requires_exact_published_pilot_text(monkeypatch):
@@ -20,8 +21,7 @@ def test_correction_registration_requires_exact_published_pilot_text(monkeypatch
     digest = contracts.hash_bytes(CORRECTION_TERMS.encode())
     monkeypatch.setenv("LAB_ARENA_CORRECTION_TERMS_SHA256", digest)
     assert intake.terms("pilot", CORRECTION_SCOPE)["terms_sha256"] == digest
-    with pytest.raises(intake.IntakeError, match="terms_unavailable"):
-        intake.terms("live", CORRECTION_SCOPE)
+    assert intake.terms("live", CORRECTION_SCOPE)["terms_sha256"] != digest
     signed, creds = registration("A", "pilot")
     signed["body"]["task_scope"] = CORRECTION_SCOPE
     calls = []
@@ -43,7 +43,7 @@ def test_gateway_only_publishes_the_digest_to_which_the_miner_consents(monkeypat
     from lab_arena.service import ArenaService, ServiceError
 
     service = SimpleNamespace(collection_mode=lambda: "pilot")
-    monkeypatch.delenv("LAB_ARENA_CORRECTION_TERMS_SHA256", raising=False)
+    monkeypatch.setenv("LAB_ARENA_CORRECTION_TERMS_SHA256", "off")
     with pytest.raises(ServiceError) as refused:
         ArenaService.collection_terms(service, intake.CORRECTION_SCOPE)
     assert refused.value.status == 503

@@ -13,7 +13,7 @@ from tests.lab_arena.locked_collection_pipeline_test import claim
 @pytest.fixture
 def database():
     scripts = Path(__file__).resolve().parents[2] / "scripts"
-    numbers = (720, 721, 722, 723, 724, 725, 726, 727, 728, 729, 732, 733, 738, 740, 743, 745)
+    numbers = (720, 721, 722, 723, 724, 725, 726, 727, 728, 729, 732, 733, 738, 740, 743, 744, 745)
     files = tuple(next(scripts.glob(f"{n}-*.sql")).name for n in numbers)
     yield from database_with_lab_arena_migration(DEFAULT_MIGRATIONS + files)
 

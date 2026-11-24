@@ -11,7 +11,7 @@ import time
 import requests
 
 from lab_arena import contracts
-from lab_arena.collection_intake import CORRECTION_SCOPE, CORRECTION_TERMS, LIVE_CORRECTION_TERMS, SCOPE, TASK_SCOPE, TERMS, TERMS_HASH, scope_id
+from lab_arena.collection_intake import CORRECTION_SCOPE, SCOPE, TASK_SCOPE, TERMS, TERMS_HASH, scope_id
 from lab_arena.credentials import OPENROUTER_FUNDING_FIELDS
 from lab_arena.miner_submit import (
     MinerSubmissionError,
@@ -89,9 +89,6 @@ def run(args, wallet, *, session=requests):
         task_scope = getattr(args, "task_scope", TASK_SCOPE)
         expected = TERMS_HASH
         text = TERMS
-        if task_scope == CORRECTION_SCOPE:
-            text = LIVE_CORRECTION_TERMS if args.mode == "live" else CORRECTION_TERMS
-            expected = contracts.hash_bytes(text.encode())
         if action in ("terms", "register"):
             url = base + "terms" + ("?task_scope=" + CORRECTION_SCOPE if task_scope == CORRECTION_SCOPE else "")
             response = session.get(url, timeout=30, allow_redirects=False)

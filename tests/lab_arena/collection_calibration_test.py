@@ -209,7 +209,12 @@ def exercise_ordinary_cutover(db, *, paid_panel=None, after_cutover=None, retire
         q.execute("ROLLBACK TO staged")
         live_job, live_batch, token = str(uuid4()), "test-live", "sha256:" + "b" * 64
         live_reg, live_orr = str(uuid4()), str(uuid4())
-        consent = {"body": {"task_scope": TASK_SCOPE, "terms_sha256": TERMS_HASH}}
+        consent = {"schema_version":1,"scope":"lab_arena.collection.register.v1",
+                   "round_id":"finney:71:locked-collection:live","hotkey":miner,
+                   "timestamp":1795540000,"request_id":"fixture-unified-terms",
+                   "body":{"daily_cap_microusd":10000000,"task_scope":TASK_SCOPE,
+                           "terms_sha256":TERMS_HASH,"credentials_sha256":"sha256:"+"1"*64},
+                   "signature":"a"*128}
         q.execute("SET LOCAL ROLE lab_arena_service")
         q.execute("SELECT public.collection_register_v1(%s,%s,%s,'live',%s,10000000,%s,NULL)",
                   (live_reg, miner, miner, Json(consent),

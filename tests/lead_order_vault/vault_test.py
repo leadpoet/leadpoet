@@ -243,6 +243,18 @@ def test_trust_refuses_what_base_does_not_confirm(monkeypatch, changes, reason):
         trust.on_chain(DEPLOYMENT, _identity(compose_hash=COMPOSE_HASH), "rpc")
 
 
+def test_cli_verify_reports_what_base_confirmed(monkeypatch, capsys):
+    _base(monkeypatch)
+    identity = _identity(compose_hash=COMPOSE_HASH, tls={"document": {"spki_sha256": "ab" * 32}})
+    monkeypatch.setattr(trust, "load_deployment", lambda: DEPLOYMENT)
+    monkeypatch.setattr(trust, "connect", lambda deployment: (identity, None))
+    assert cli.main(["verify"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["kms_contract"] == DEPLOYMENT["kms_contract"] and report["app_owner"] == "0x" + "99" * 20
+    _base(monkeypatch, approved=False)
+    assert cli.main(["verify"]) == 1
+
+
 def test_cli_seals_both_openrouter_keys_to_the_verified_vault():
     secrets = iter([OPENROUTER_KEY, MANAGEMENT_KEY])
     sealed = cli.seal_key(provider="openrouter", hotkey=HOTKEY, identity=_identity(), read_secret=lambda _: next(secrets))

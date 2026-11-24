@@ -419,5 +419,6 @@ def test_a_vault_receipt_the_store_does_not_keep_is_logged(caplog):
         caplog.clear()
         broker = LeadOrderBroker(store=Store(answer), policy=POLICY, transport=None, registrar=None,
                                  leadpoet_secrets={}, price_table=dict, current_epoch=lambda: 1)
-        broker._keep_receipt("call-1", "call", {"document": {}, "signature": "00"})
+        sent = type("Sent", (), {"vault_receipt": {"document": {}, "signature": "00"}})()
+        broker._keep_receipt("call-1", "call", sent)
         assert ("receipt not kept" in caplog.text) is logged, answer

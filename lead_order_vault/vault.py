@@ -58,6 +58,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from . import envelope as env
+from .envelope import canonical
 
 ENCRYPTION_DOMAIN = "leadpoet/lead-order-vault/encryption/v1"
 RECEIPTS_DOMAIN = "leadpoet/lead-order-vault/receipts/v1"
@@ -68,6 +69,7 @@ TLS_SCHEMA = "leadpoet.lead_order_vault.tls.v1"
 # client that sends one byte at a time hold a connection slot forever.
 REQUEST_READ_SECONDS = 10.0
 REFUSED_BODY_DISCARD = 65536
+MAX_REQUEST_HEAD = 32 * 1024  # request line and headers; http.server alone allows about 6.4 MB
 
 HOSTS = {"openrouter.ai": "openrouter", "code.deepline.com": "deepline"}
 # Request shapes a miner's key may take. Anything else, such as billing
@@ -139,31 +141,29 @@ def _kept_headers(headers) -> List[List[str]]:
     return [[name.lower(), value] for name, value in headers if name.lower() not in DROPPED_HEADERS]
 
 
-def canonical(document: Mapping) -> bytes:
-    return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-
-
 def echoes(secret: str, data: bytes) -> bool:
-    """The key appears in ``data`` literally, URL-encoded, or JSON-escaped."""
+    """The key appears in ``data`` literally, URL-encoded, or JSON-escaped,
+    in one JSON body or in any ``data:`` line of a streamed one."""
 
     key = secret.encode("utf-8")
     if key in data or key in unquote_to_bytes(data):
         return True
-    try:
-        # Pairs, not a dict: a duplicate member is still seen.
-        pending = [json.loads(data, object_pairs_hook=list)]
-    except (UnicodeDecodeError, ValueError):
-        return False
-    except RecursionError:
-        return True  # cannot be inspected, so it is withheld
-    while pending:
-        value = pending.pop()
-        if isinstance(value, str):
-            text = value.encode("utf-8", errors="surrogatepass")
-            if key in text or key in unquote_to_bytes(text):
-                return True
-        elif isinstance(value, (list, tuple)):
-            pending.extend(value)
+    for document in [data] + [line[5:] for line in data.splitlines() if line.startswith(b"data:")]:
+        try:
+            # Pairs, not a dict: a duplicate member is still seen.
+            pending = [json.loads(document, object_pairs_hook=list)]
+        except (UnicodeDecodeError, ValueError):
+            continue
+        except RecursionError:
+            return True  # cannot be inspected, so it is withheld
+        while pending:
+            value = pending.pop()
+            if isinstance(value, str):
+                text = value.encode("utf-8", errors="surrogatepass")
+                if key in text or key in unquote_to_bytes(text):
+                    return True
+            elif isinstance(value, (list, tuple)):
+                pending.extend(value)
     return False
 
 
@@ -240,11 +240,9 @@ class Vault:
         self._upstream = upstream
         self._clock = clock
         self.boot_id = str(uuid.uuid4())
-        self.booted_at = int(clock())
-        self.encryption_public_key = env.compressed(encryption_key.public_key()).hex()
         self.receipts_public_key = env.compressed(receipts_key.public_key()).hex()
         self._identity = dict(identity, schema="leadpoet.lead_order_vault.identity.v1",
-                              boot_id=self.boot_id, booted_at=self.booted_at)
+                              boot_id=self.boot_id, booted_at=int(clock()))
         # Binds this boot's TLS key to the KMS-issued receipts key.
         self._identity["tls"] = self._signed({"schema": TLS_SCHEMA, "boot_id": self.boot_id,
                                               "spki_sha256": tls_spki_sha256})
@@ -489,6 +487,10 @@ def make_handler(vault: Vault):
         def log_message(self, *args) -> None:  # no request logs, ever
             return
 
+        def setup(self) -> None:
+            super().setup()
+            self.rfile = _HeadLimit(self.rfile)
+
         def _reply(self, status: int, document: Mapping) -> None:
             data = canonical(document)
             self.send_response(status)
@@ -547,6 +549,24 @@ def make_handler(vault: Vault):
     return Handler
 
 
+class _HeadLimit:
+    """``rfile`` with at most ``MAX_REQUEST_HEAD`` bytes of lines; the body is read as sent."""
+
+    def __init__(self, raw) -> None:
+        self._raw = raw
+        self._left = MAX_REQUEST_HEAD
+
+    def readline(self, limit: int = -1) -> bytes:
+        line = self._raw.readline(self._left + 1 if limit < 0 else min(limit, self._left + 1))
+        self._left -= len(line)
+        if self._left < 0:
+            raise http.client.LineTooLong("request head")
+        return line
+
+    def __getattr__(self, name: str):
+        return getattr(self._raw, name)
+
+
 class BoundedServer(ThreadingHTTPServer):
     """The vault's HTTPS server: at most ``MAX_CONNECTIONS`` at once, the rest closed.
 
@@ -559,6 +579,7 @@ class BoundedServer(ThreadingHTTPServer):
     # Not daemons: server_close() waits for calls in flight, so a restart
     # does not cut a billed call or lose its receipt.
     daemon_threads = False
+    request_queue_size = 128  # the listen backlog; Python's default of 5 drops bursts
     MAX_CONNECTIONS = 128
 
     def __init__(self, address, handler, ssl_context: ssl.SSLContext) -> None:
@@ -672,10 +693,10 @@ def _not_found() -> Mapping:
 class Dstack:
     """The dstack guest agent on its Unix socket (API v1)."""
 
-    def __init__(self, socket_path: str = "/var/run/dstack.sock") -> None:
+    def __init__(self, socket_path: str) -> None:
         self._socket_path = socket_path
 
-    def _post(self, method: str, body: Mapping) -> Mapping:
+    def post(self, method: str, body: Mapping) -> Mapping:
         path = self._socket_path
 
         class Connection(http.client.HTTPConnection):
@@ -698,7 +719,7 @@ class Dstack:
             connection.close()
 
     def key(self, domain: str) -> Tuple[ec.EllipticCurvePrivateKey, Mapping]:
-        reply = self._post("GetKey", {"domain": domain, "algorithm": KEY_ALGORITHM})
+        reply = self.post("GetKey", {"domain": domain, "algorithm": KEY_ALGORITHM})
         private_key = ec.derive_private_key(int(reply["key"], 16), ec.SECP256K1())
         public_key = env.compressed(private_key.public_key()).hex()
         if reply.get("public_key", public_key).lower() != public_key:
@@ -706,16 +727,13 @@ class Dstack:
         return private_key, {"domain": domain, "algorithm": KEY_ALGORITHM, "public_key": public_key,
                              "signature_chain": list(reply["signature_chain"])}
 
-    def info(self) -> Mapping:
-        return self._post("Info", {})
-
 
 def main() -> None:
     caller_token = os.environ.get("LEAD_ORDER_VAULT_CALLER_TOKEN", "")
     dstack = Dstack(os.environ.get("DSTACK_SOCKET", "/var/run/dstack.sock"))
     encryption_key, encryption = dstack.key(ENCRYPTION_DOMAIN)
     receipts_key, receipts = dstack.key(RECEIPTS_DOMAIN)
-    info = dstack.info()
+    info = dstack.post("Info", {})
     identity = {name: info.get(name) for name in ("app_id", "compose_hash", "instance_id", "os_image_hash")}
     identity.update(encryption=encryption, receipts=receipts)
     tls_context, tls_spki = tls_server_context()

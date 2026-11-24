@@ -137,6 +137,15 @@ class UnavailableMailer:
         raise MailerUnavailable("no confirmation mail sender is configured")
 
 
+def _since(since: Any) -> int:
+    """A feed cursor: a whole number, 0 when absent."""
+
+    text = "0" if since in (None, "") else str(since)
+    if not text.isdigit() or len(text) > 18:
+        raise LeadOrderServiceError(422, "since_invalid")
+    return int(text)
+
+
 def usd(microusd: Any) -> Optional[str]:
     """Micro-USD as a decimal USD string with at least two places: 5000000 -> "5.00"."""
 
@@ -601,11 +610,8 @@ class LeadOrderService:
                    or bool(self._store.buyer(hotkey).get("confirmed")))
         if not allowed:
             raise LeadOrderServiceError(403, "suppressions_not_allowed")
-        text = "0" if since in (None, "") else str(since)
-        if not text.isdigit() or len(text) > 18:
-            raise LeadOrderServiceError(422, "since_invalid")
-        rows = self._store.suppressions(since=int(text), limit=suppressions.PAGE_SIZE)
-        return {"suppressions": rows, "next_since": rows[-1]["sequence"] if rows else int(text),
+        rows = self._store.suppressions(since=_since(since), limit=suppressions.PAGE_SIZE)
+        return {"suppressions": rows, "next_since": rows[-1]["sequence"] if rows else _since(since),
                 "more": len(rows) == suppressions.PAGE_SIZE}
 
     def statement(self, hotkey: str, since: Any) -> Dict[str, Any]:
@@ -615,10 +621,7 @@ class LeadOrderService:
 
         if hotkey in self.config.blocked_hotkeys:
             raise LeadOrderServiceError(403, "hotkey_not_allowed")
-        text = "0" if since in (None, "") else str(since)
-        if not text.isdigit() or len(text) > 18:
-            raise LeadOrderServiceError(422, "since_invalid")
-        return self._store.statement(hotkey, since=int(text), limit=STATEMENT_PAGE_SIZE)
+        return self._store.statement(hotkey, since=_since(since), limit=STATEMENT_PAGE_SIZE)
 
     def vault_receipts(self, hotkey: str, since: Any) -> Dict[str, Any]:
         """A miner's signed vault receipts after ``since`` (receipt sequence),
@@ -629,10 +632,7 @@ class LeadOrderService:
 
         if hotkey in self.config.blocked_hotkeys:
             raise LeadOrderServiceError(403, "hotkey_not_allowed")
-        text = "0" if since in (None, "") else str(since)
-        if not text.isdigit() or len(text) > 18:
-            raise LeadOrderServiceError(422, "since_invalid")
-        page = self._store.vault_receipts(hotkey, since=int(text), limit=STATEMENT_PAGE_SIZE)
+        page = self._store.vault_receipts(hotkey, since=_since(since), limit=STATEMENT_PAGE_SIZE)
         keys = [{"key_id": row["key_id"], "provider": row["provider"], "key_fingerprint": row["key_fingerprint"],
                  "sealed_to": lead_keys.sealed_to(row.get("envelope"))} for row in page.get("keys") or []]
         return {"receipts": list(page.get("receipts") or []), "keys": keys}

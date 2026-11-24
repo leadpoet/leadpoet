@@ -221,14 +221,11 @@ def on_chain(*, rpc_url: str, chain: str, kms_contract_hex: str, app_id_hex: str
         if _call(rpc_url, app, "allowedComposeHashes(bytes32)", compose_hash) != _TRUE:
             raise ChainError("compose_hash_not_approved")
         owner = _call(rpc_url, app, "owner()")
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, http.client.HTTPException) as error:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError,
+            http.client.HTTPException) as error:
         if isinstance(error, ChainError):
             raise
         raise ChainError("chain_unreadable") from None
     if len(owner) != 32:
         raise ChainError("chain_unreadable")
     return "0x" + owner[12:].hex()
-
-
-__all__ = ["ChainError", "app_root_key", "claim_message", "issued_message", "keccak256", "on_chain", "recover",
-           "verify_key"]

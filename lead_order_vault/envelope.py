@@ -8,6 +8,11 @@ was sealed to, and only for the provider, purpose and miner it names.
 
 Leadpoet stores the envelope and passes it to the vault as the request's
 credential. It never holds the key.
+
+This module is also the wire contract the vault shares with ``cli``,
+``trust`` and Leadpoet's gateway: key domains, document schemas, provider
+hosts and the one canonical JSON encoding. Changing one of these is a vault
+release.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ import os
 from dataclasses import dataclass
 from typing import Mapping, Tuple
 
+from cryptography import x509
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -27,6 +33,15 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 PREFIX = "lov1."
 PROVIDERS = ("openrouter", "deepline")
+HOSTS = {"openrouter.ai": "openrouter", "code.deepline.com": "deepline"}
+ENCRYPTION_DOMAIN = "leadpoet/lead-order-vault/encryption/v1"
+RECEIPTS_DOMAIN = "leadpoet/lead-order-vault/receipts/v1"
+KEY_ALGORITHM = "secp256k1"
+IDENTITY_SCHEMA = "leadpoet.lead_order_vault.identity.v1"
+RECEIPT_SCHEMA = "leadpoet.lead_order_vault.receipt.v1"
+TLS_SCHEMA = "leadpoet.lead_order_vault.tls.v1"
+CALLER_HEADER = "x-lead-order-vault-token"
+CHECK_TIMEOUT_SECONDS = 15.0
 # A runtime key makes calls. An OpenRouter management key is used once, at
 # registration, to prove the miner owns the runtime key; it never makes calls.
 PURPOSES = ("runtime", "management")
@@ -85,6 +100,14 @@ def _aad(header: Header) -> bytes:
 def _aes_key(shared: bytes, ephemeral: bytes, vault_key: bytes) -> bytes:
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
                 info=_HKDF_INFO + ephemeral + vault_key).derive(shared)
+
+
+def spki_sha256(certificate_der: bytes) -> str:
+    """SHA-256 of a certificate's public key, which is what the identity signs."""
+
+    public_key = x509.load_der_x509_certificate(certificate_der).public_key()
+    return hashlib.sha256(public_key.public_bytes(serialization.Encoding.DER,
+                                                  serialization.PublicFormat.SubjectPublicKeyInfo)).hexdigest()
 
 
 def compressed(public_key: ec.EllipticCurvePublicKey) -> bytes:
@@ -161,9 +184,3 @@ def open_envelope(envelope: str, private_key: ec.EllipticCurvePrivateKey) -> Tup
         return plaintext.decode("utf-8"), header
     except UnicodeDecodeError:
         raise EnvelopeError("envelope_invalid") from None
-
-
-__all__ = [
-    "EnvelopeError", "Header", "MAX_ENVELOPE_CHARS", "PREFIX", "PROVIDERS", "PURPOSES",
-    "fingerprint", "open_envelope", "read_header", "seal",
-]

@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, utils
 from lead_order_vault import chain, cli, trust
 from lead_order_vault import envelope as env
 from lead_order_vault.vault import (
-    CALLER_HEADER, ENCRYPTION_DOMAIN, RECEIPTS_DOMAIN, BoundedServer, UpstreamError, UpstreamResponse, Vault,
+    CALLER_HEADER, ENCRYPTION_DOMAIN, IDENTITY_SCHEMA, RECEIPTS_DOMAIN, BoundedServer, UpstreamError, UpstreamResponse, Vault,
     VaultError, canonical, make_handler, tls_server_context,
 )
 
@@ -163,7 +163,7 @@ DEPLOYMENT = {"url": "https://vault.example", "app_id": APP_ID.hex(), "kms_root_
 
 
 def _identity(**changes):
-    identity = {"app_id": APP_ID.hex(), "encryption": _issued(ENCRYPTION, ENCRYPTION_DOMAIN),
+    identity = {"schema": IDENTITY_SCHEMA, "app_id": APP_ID.hex(), "encryption": _issued(ENCRYPTION, ENCRYPTION_DOMAIN),
                 "receipts": _issued(RECEIPTS, RECEIPTS_DOMAIN)}
     identity.update(changes)
     return identity
@@ -176,6 +176,7 @@ def test_trust_accepts_keys_the_kms_issued_to_our_app():
 @pytest.mark.parametrize("changes,message", [
     ({"encryption": None}, "not the expected kind"),
     ({"app_id": "cd" * 20}, "different app id"),
+    ({"schema": "something.else"}, "not an identity document"),
 ])
 def test_trust_refuses_a_wrong_identity(changes, message):
     identity = _identity(**changes)
@@ -290,32 +291,39 @@ def test_call_swaps_the_envelope_for_the_key_and_signs_a_receipt():
     assert OPENROUTER_KEY not in json.dumps(result)
 
 
-@pytest.mark.parametrize("url,code", [
-    ("https://evil.example/api/v1/chat/completions", "host_not_allowed"),
-    ("http://openrouter.ai/api/v1/chat/completions", "host_not_allowed"),
-    ("https://openrouter.ai:8443/api/v1/chat/completions", "host_not_allowed"),
-    ("https://user@openrouter.ai/api/v1/chat/completions", "host_not_allowed"),
-    ("https://openrouter.ai.evil.example/api/v1/chat", "host_not_allowed"),
-    ("https://openrouter.ai/api/v1/keys", "path_not_allowed"),
-    ("https://openrouter.ai/api/v1/Keys/abc", "path_not_allowed"),
-    ("https://openrouter.ai/api/v1/credits/coinbase", "path_not_allowed"),
-    ("https://openrouter.ai/api/v1/%6beys", "path_not_allowed"),
-    ("https://openrouter.ai/api/v1/x/../keys", "path_not_allowed"),
-    ("https://openrouter.ai/api/v1/chat/completions?x=1", "path_not_allowed"),
-    ("https://openrouter.ai/api/v1/responses", "path_not_allowed"),
+DEEPLINE_TOOL = "https://code.deepline.com/api/v2/integrations/harvestapi_get_profile/execute"
+
+
+@pytest.mark.parametrize("method,url,provider,code", [
+    ("POST", "https://evil.example/api/v1/chat/completions", "openrouter", "host_not_allowed"),
+    ("POST", "http://openrouter.ai/api/v1/chat/completions", "openrouter", "host_not_allowed"),
+    ("POST", "https://openrouter.ai:8443/api/v1/chat/completions", "openrouter", "host_not_allowed"),
+    ("POST", "https://user@openrouter.ai/api/v1/chat/completions", "openrouter", "host_not_allowed"),
+    ("POST", "https://openrouter.ai.evil.example/api/v1/chat", "openrouter", "host_not_allowed"),
+    ("POST", "https://openrouter.ai/api/v1/keys", "openrouter", "path_not_allowed"),
+    ("POST", "https://openrouter.ai/api/v1/Keys/abc", "openrouter", "path_not_allowed"),
+    ("POST", "https://openrouter.ai/api/v1/credits/coinbase", "openrouter", "path_not_allowed"),
+    ("POST", "https://openrouter.ai/api/v1/%6beys", "openrouter", "path_not_allowed"),
+    ("POST", "https://openrouter.ai/api/v1/x/../keys", "openrouter", "path_not_allowed"),
+    ("POST", "https://openrouter.ai/api/v1/chat/completions?x=1", "openrouter", "path_not_allowed"),
+    ("POST", "https://openrouter.ai/api/v1/responses", "openrouter", "path_not_allowed"),
+    ("POST", DEEPLINE_TOOL, "openrouter", "provider_mismatch"),  # a key works only on its own host
+    ("POST", "https://code.deepline.com/api/v2/integrations/Bad-Tool/execute", "deepline", "path_not_allowed"),
+    ("POST", "https://code.deepline.com/api/v2/billing/top-up", "deepline", "path_not_allowed"),
+    ("GET", "https://code.deepline.com/api/v2/billing/balance", "deepline", "path_not_allowed"),
+    ("POST", "https://code.deepline.com/api/v2/plays/run", "deepline", "path_not_allowed"),
+    ("POST", DEEPLINE_TOOL + "/x", "deepline", "path_not_allowed"),
+    ("GET", DEEPLINE_TOOL, "deepline", "path_not_allowed"),
 ])
-def test_call_refuses_other_hosts_and_management_paths(url, code):
-    provider = FakeProvider()
+def test_a_key_reaches_only_its_own_allowed_routes(method, url, provider, code):
+    upstream = FakeProvider()
+    key = OPENROUTER_KEY if provider == "openrouter" else DEEPLINE_KEY
+    request = _call(url=url, sealed=_seal(key, provider=provider), method=method)
+    if method == "GET":
+        request.pop("body_b64")
     with pytest.raises(VaultError, match=code):
-        _vault(provider).call(_call(url=url))
-    assert provider.requests == []
-
-
-def test_a_key_works_only_on_its_own_provider_host():
-    provider = FakeProvider()
-    with pytest.raises(VaultError, match="provider_mismatch"):
-        _vault(provider).call(_call(url="https://code.deepline.com/api/v2/integrations/harvestapi_get_profile/execute"))
-    assert provider.requests == []
+        _vault(upstream).call(request)
+    assert upstream.requests == []
 
 
 def test_the_management_key_never_makes_a_call():
@@ -666,24 +674,6 @@ def test_the_real_upstream_bounds_total_time_and_size():
             thread.join(5)
     finally:
         listener.close()
-
-
-@pytest.mark.parametrize("method,url", [
-    ("POST", "https://code.deepline.com/api/v2/integrations/Bad-Tool/execute"),
-    ("POST", "https://code.deepline.com/api/v2/billing/top-up"),
-    ("GET", "https://code.deepline.com/api/v2/billing/balance"),
-    ("POST", "https://code.deepline.com/api/v2/plays/run"),
-    ("POST", "https://code.deepline.com/api/v2/integrations/harvestapi_get_profile/execute/x"),
-    ("GET", "https://code.deepline.com/api/v2/integrations/harvestapi_get_profile/execute"),
-])
-def test_deepline_keys_reach_only_tool_execute(method, url):
-    provider = FakeProvider()
-    request = _call(url=url, sealed=_seal(DEEPLINE_KEY, provider="deepline"), method=method)
-    if method == "GET":
-        request.pop("body_b64")
-    with pytest.raises(VaultError, match="path_not_allowed"):
-        _vault(provider).call(request)
-    assert provider.requests == []
 
 
 def test_generation_read_back_is_allowed_with_only_an_id():

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 
 from scripts.lab_arena_restart_claim_guard import _read_scoped_environment
@@ -96,10 +97,48 @@ def worker_snapshot():
             "result": states[service]["Result"], "recent_arms": arms, "unit_failed_recently": recent_failure}
 
 
+_EDGE_REQUEST = re.compile(rb'\b(GET|POST) /arena/v1/collection/(terms|register|revoke|statement)(?:\?[^\s"]*)? HTTP/[\d.]+"\s+([1-5]\d\d)\b')
+
+
+def edge_snapshot(directory, prior):
+    """Keep bounded forward cursors. Public requests can include operator probes."""
+    counts = dict(prior.get("http", {}))
+    cursors = {}
+    gaps = prior.get("windows_with_gap", 0)
+    for slot in (0, 1):
+        name = f"arena-edge-slot{slot}.log"
+        try:
+            stream = (directory / name).open("rb")
+        except FileNotFoundError:
+            continue
+        with stream:
+            st = os.fstat(stream.fileno())
+            previous = prior.get("cursors", {}).get(name)
+            # The baseline begins at installation. Historical reads require a separate scope.
+            offset = st.st_size if not previous else previous[1]
+            if previous and (previous[0] != st.st_ino or offset > st.st_size):
+                gaps += 1
+                offset = 0
+            if st.st_size - offset > 4 * 1024 * 1024:
+                gaps += 1
+                offset = st.st_size - 4 * 1024 * 1024
+            stream.seek(offset)
+            chunk = stream.read(st.st_size - offset)
+            complete = chunk.rfind(b"\n") + 1
+            for verb, op, status in _EDGE_REQUEST.findall(chunk[:complete]):
+                if (verb == b"GET") == (op == b"terms"):
+                    key = b" ".join((verb, op, status)).decode("ascii")
+                    counts[key] = counts.get(key, 0) + 1
+            cursors[name] = [st.st_ino, offset + complete]
+    if not cursors:
+        raise FileNotFoundError("no edge log")
+    return {"http": counts, "cursors": cursors, "windows_with_gap": gaps}
+
+
 def notices(data):
     """Milestones are monotone where possible. Keep idle polls and ordinary blocks quiet."""
     signals = {}
-    for name in ("collection", "worker", "weights"):
+    for name in ("collection", "worker", "weights", "edge"):
         if name not in data:
             signals[name + " read unavailable"] = 1
     collection = data.get("collection", {})
@@ -122,6 +161,10 @@ def notices(data):
     signals["completed candidate packs; verify ordinary runs and controls for blind review"] = collection.get("completed_review_candidate_packs")
     for name in ("staged", "first_epoch", "correction_quotes"):
         signals["collection " + name] = collection.get(name)
+    edge = data.get("edge", {})
+    for name, count in edge.get("http", {}).items():
+        if name.startswith("POST register ") and int(name[-3:]) >= 400:
+            signals["public registration " + name[-3:] + " responses; check intake"] = count
     worker = data.get("worker")
     if worker:
         if not worker["timer_enabled_active"] or worker["result"] != "success" or worker["unit_failed_recently"]:
@@ -158,7 +201,7 @@ def save(directory, data):
     previous = json.loads(path.read_text()) if path.exists() else {}
     # An unread source means unknown. Keep its last signals until it can be read again.
     previous_observations = previous.get("last_read", {})
-    last_read = {name: data.get(name, previous_observations.get(name)) for name in ("collection", "worker", "weights")}
+    last_read = {name: data.get(name, previous_observations.get(name)) for name in ("collection", "worker", "weights", "edge")}
     current = notices({name: value for name, value in last_read.items() if value is not None})
     for name in last_read:
         if name not in data:
@@ -195,6 +238,12 @@ def main():
         data["collection"] = db.rpc("collection_participation_v1", {})
     except Exception as exc:
         data["read_errors"]["collection"] = type(exc).__name__
+    try:
+        status = args.state_directory / "status.json"
+        prior = json.loads(status.read_text()).get("last_read", {}) if status.exists() else {}
+        data["edge"] = edge_snapshot(Path("/home/ec2-user/gateway"), prior.get("edge") or {})
+    except Exception as exc:
+        data["read_errors"]["edge"] = type(exc).__name__
     try:
         data["worker"] = worker_snapshot()
     except Exception as exc:

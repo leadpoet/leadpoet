@@ -3,7 +3,7 @@ from scripts.collection_participation_watch import notices, save, worker_snapsho
 
 
 def test_idle_sampling_and_chain_head_updates_do_not_repeat_notifications(tmp_path):
-    snapshot = {"worker": {"result": "success", "timer_enabled_active": True,
+    snapshot = {"edge": {}, "worker": {"result": "success", "timer_enabled_active": True,
                            "worker": "inactive", "recent_arms": {"comparison": "idle", "correction": "idle"},
                            "unit_failed_recently": False},
                 "collection": {}, "weights": {"signed_state": True, "block": 1, "champion_ppb": 325000000}}
@@ -76,3 +76,25 @@ def test_zero_champion_share_requires_collection_job_basis_and_all_three_vectors
     assert notices(data)[verified]
     weights["validators"]["rizzo"] = "differs"
     assert notices(data)["inspect post-cutover reward evidence"] and not notices(data).get(verified)
+
+
+def test_edge_counts_only_allowlisted_new_complete_responses_and_detects_rotation(tmp_path):
+    from scripts.collection_participation_watch import edge_snapshot
+    path = tmp_path / "arena-edge-slot0.log"
+    path.write_bytes(b'old POST /arena/v1/collection/register HTTP/1.1" 400\n')
+    prior = edge_snapshot(tmp_path, {})
+    assert prior["http"] == {}
+    with path.open("ab") as f:
+        f.write(b'private-peer "GET /arena/v1/collection/terms?private-value HTTP/1.1" 200 OK\n')
+        f.write(b'"POST /arena/v1/collection/register HTTP/1.1"')
+    first = edge_snapshot(tmp_path, prior)
+    assert first["http"] == {"GET terms 200": 1}
+    with path.open("ab") as f:
+        f.write(b' 400 bad\n"PUT /arena/v1/collection/terms HTTP/1.1" 501\n')
+    second = edge_snapshot(tmp_path, first)
+    assert second["http"] == {"GET terms 200": 1, "POST register 400": 1}
+    assert edge_snapshot(tmp_path, second) == second and "private" not in str(second)
+    path.rename(tmp_path / "old")
+    path.write_bytes(b'"POST /arena/v1/collection/register HTTP/1.1" 200 OK\n')
+    third = edge_snapshot(tmp_path, second)
+    assert third["windows_with_gap"] == 1 and third["http"]["POST register 200"] == 1

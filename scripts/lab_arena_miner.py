@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
-"""Submit one local Arena model source directory and its run credentials.
+"""Use the SN71 miner CLI from a source checkout.
 
-    OPENROUTER_API_KEY=... OPENROUTER_MANAGEMENT_KEY=... DEEPLINE_API_KEY=... \
-    python3 scripts/lab_arena_miner.py submit-model --source ./my-agent \
-        --wallet-name W --hotkey-name H
-
-The helper makes one bounded source archive, uploads it to the Arena's private
-target, and finalizes it with the miner hotkey. Credentials are read only from
-masked prompts or environment variables, and are never command arguments or
-source archive content. ``--hotkey-uri`` is for development only.
+    python3 scripts/lab_arena_miner.py collection-terms
+    python3 scripts/lab_arena_miner.py collection-register --help
 """
 
 import sys

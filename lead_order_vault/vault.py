@@ -523,12 +523,14 @@ def make_handler(vault: Vault):
                 return
 
             def action() -> Mapping:
-                vault.authorize(self.headers.get(CALLER_HEADER))
                 length = self.headers.get("content-length", "")
                 if not length.isdigit() or int(length) > MAX_REQUEST_BODY:
                     raise VaultError("request_too_large", 413)
+                # Read before refusing: closing on unread data resets the
+                # connection, and the caller would lose the answer.
                 body = self.rfile.read(int(length))
                 self.server.request_read()
+                vault.authorize(self.headers.get(CALLER_HEADER))
                 try:
                     request = json.loads(body)
                 except ValueError:

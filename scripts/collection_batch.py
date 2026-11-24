@@ -22,6 +22,8 @@ from scripts.run_locked_collection import load_batch, assignment
 
 
 def source_bundle(raw, prompt, transport, objects):
+    if raw.get("reference_successor"):
+        raise ValueError("a witnessed route comparison is private reference data only")
     policy = load_batch(raw, prompt)
     agent, builder = comparison_revisions(raw)
     jobs = transport.rpc("collection_batch_jobs_v1", {"p_batch": policy.batch_id})
@@ -129,6 +131,8 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
     )
     from lab_arena.collection_workflow import store_artifact
 
+    if raw.get("reference_successor"):
+        raise ValueError("private reference successor cannot release training data")
     terms = raw.get("terms_sha256")
     if not terms or terms != intake.SYNTHETIC_TRAINING_TERMS_HASH:
         raise ValueError("comparison enrollment did not grant training release rights")

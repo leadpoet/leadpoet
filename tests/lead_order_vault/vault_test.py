@@ -220,16 +220,6 @@ def test_call_swaps_the_envelope_for_the_key_and_signs_a_receipt():
     assert OPENROUTER_KEY not in json.dumps(result)
 
 
-def test_usage_counts_calls_per_key_and_is_signed():
-    vault = _vault()
-    for _ in range(3):
-        vault.call(_call())
-    vault.call(_call(url="https://code.deepline.com/api/v2/integrations/harvestapi_get_profile/execute",
-                     sealed=_seal(DEEPLINE_KEY, provider="deepline")))
-    usage = _check_receipt(vault.usage({"fingerprint": [env.fingerprint("openrouter", OPENROUTER_KEY)]}))
-    assert usage["calls"] == 3 and usage["last_sequence"] == 4 and usage["boot_id"] == vault.boot_id
-
-
 @pytest.mark.parametrize("url,code", [
     ("https://evil.example/api/v1/chat/completions", "host_not_allowed"),
     ("http://openrouter.ai/api/v1/chat/completions", "host_not_allowed"),
@@ -363,10 +353,10 @@ def test_check_deepline_reads_the_balance():
     assert result["status"] == "valid" and provider.requests[0]["target"] == "/api/v2/billing/balance"
 
 
-def test_identity_and_usage_reveal_no_key():
+def test_identity_reveals_no_key():
     vault = _vault()
     vault.call(_call())
-    text = json.dumps([vault.identity(), vault.usage({"fingerprint": ["sha256:" + "0" * 64]})])
+    text = json.dumps(vault.identity())
     assert OPENROUTER_KEY not in text and vault.identity()["boot_id"] == vault.boot_id
 
 
@@ -408,14 +398,14 @@ def test_http_server_routes_authenticates_and_never_logs(capsys):
 
 
 @pytest.mark.parametrize("method,url", [
-    ("POST", "https://code.deepline.com/api/v2/integrations/generic_http/execute"),
+    ("POST", "https://code.deepline.com/api/v2/integrations/Bad-Tool/execute"),
     ("POST", "https://code.deepline.com/api/v2/billing/top-up"),
     ("GET", "https://code.deepline.com/api/v2/billing/balance"),
     ("POST", "https://code.deepline.com/api/v2/plays/run"),
     ("POST", "https://code.deepline.com/api/v2/integrations/harvestapi_get_profile/execute/x"),
     ("GET", "https://code.deepline.com/api/v2/integrations/harvestapi_get_profile/execute"),
 ])
-def test_deepline_keys_reach_only_the_listed_tools(method, url):
+def test_deepline_keys_reach_only_tool_execute(method, url):
     provider = FakeProvider()
     request = _call(url=url, sealed=_seal(DEEPLINE_KEY, provider="deepline"), method=method)
     if method == "GET":
@@ -445,14 +435,7 @@ def test_bad_headers_are_refused_before_the_call_is_counted(headers):
     request["headers"].update(headers)
     with pytest.raises(VaultError, match="headers_invalid"):
         vault.call(request)
-    assert _check_receipt(vault.usage({"fingerprint": [env.fingerprint("openrouter", OPENROUTER_KEY)]}))["calls"] == 0
-
-
-def test_usage_signs_the_callers_nonce():
-    nonce = "ab" * 32
-    assert _check_receipt(_vault().usage({"fingerprint": ["sha256:" + "0" * 64], "nonce": [nonce]}))["nonce"] == nonce
-    with pytest.raises(VaultError, match="nonce_invalid"):
-        _vault().usage({"fingerprint": ["sha256:" + "0" * 64], "nonce": ["zz"]})
+    assert _check_receipt(vault.call(_call())["receipt"])["key_sequence"] == 1
 
 
 def test_an_envelope_has_one_spelling():
@@ -462,10 +445,22 @@ def test_an_envelope_has_one_spelling():
             env.open_envelope(variant, ENCRYPTION)
 
 
-def test_vault_allows_exactly_what_the_lead_order_broker_sends():
-    from lab_arena.lead_orders import broker
-    from lead_order_vault import vault
+def test_any_deepline_tool_works_without_a_vault_change():
+    provider = FakeProvider()
+    sealed = _seal(DEEPLINE_KEY, provider="deepline")
+    receipts = [_check_receipt(_vault(provider).call(_call(url="https://code.deepline.com/api/v2/integrations/%s/execute" % tool,
+                                                             sealed=sealed))["receipt"])
+                for tool in ("harvestapi_get_profile", "a_tool_added_next_year")]
+    assert [r["path"] for r in receipts] == ["/api/v2/integrations/harvestapi_get_profile/execute",
+                                             "/api/v2/integrations/a_tool_added_next_year/execute"]
 
-    assert vault.DEEPLINE_TOOLS == broker.DEEPLINE_OPERATIONS
-    assert {path for _, path in vault.OPENROUTER_ROUTES} == {
-        "/" + broker.OPENROUTER_CHAT_PATH, "/" + broker.OPENROUTER_DECISIONS_PATH, "/api/v1/generation"}
+
+def test_every_request_the_broker_sends_fits_the_vault():
+    from lab_arena.lead_orders import broker
+    from lead_order_vault.vault import _route_allowed
+
+    assert _route_allowed("openrouter", "POST", "/" + broker.OPENROUTER_CHAT_PATH, "")
+    assert _route_allowed("openrouter", "POST", "/" + broker.OPENROUTER_DECISIONS_PATH, "")
+    assert _route_allowed("openrouter", "GET", "/api/v1/generation", "id=gen-1")
+    for tool in broker.DEEPLINE_OPERATIONS:
+        assert _route_allowed("deepline", "POST", "/api/v2/integrations/%s/execute" % tool, "")

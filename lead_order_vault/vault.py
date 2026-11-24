@@ -6,19 +6,22 @@ Leadpoet cannot read a miner's key, even with full access to its own servers.
 
 Endpoints:
 
-* ``GET  /v1/identity``     public keys, their KMS signature chains, build ids.
-* ``GET  /v1/attestation``  a TDX quote binding both public keys to a nonce.
-* ``GET  /v1/usage``        a signed count of calls made with one key this boot.
-* ``POST /v1/check``        open a newly registered key and validate it.
-* ``POST /v1/call``         open a key, attach it, forward the request, and
-                            return the response with a signed receipt.
+* ``GET  /v1/identity``  public keys, their KMS signature chains, build ids.
+* ``POST /v1/check``     open a newly registered key and validate it.
+* ``POST /v1/call``      open a key, attach it, forward the request, and
+                         return the response with a signed receipt.
 
-Fixed rules: only the requests the lead-order broker makes (three OpenRouter
-routes and the listed Deepline tools), the key only in the ``authorization``
-header, no redirects, bounded
-sizes, only Leadpoet's broker may call ``check`` and ``call``. No database,
-no files, no logs of requests or bodies. Counters live in memory and reset on
-restart; receipts carry the boot id so a restart is visible.
+The vault holds keys and proves their use; the gateway decides which models
+and tools to pay for. So the vault's rules are about request shapes, not
+names, and a new model or Deepline tool needs no vault change:
+
+* OpenRouter: chat completions, Decisions, and the generation cost read-back.
+* Deepline: ``POST /api/v2/integrations/<tool>/execute``, any tool.
+* The key only in ``authorization``, no redirects, bounded sizes, only the
+  broker may call ``check`` and ``call``.
+
+Every forwarded call gets a receipt with a per-key sequence number, so a call
+the gateway hides shows up as a gap. No database, files or request logs.
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ import uuid
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Dict, List, Mapping, Optional, Tuple
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -49,32 +52,16 @@ ENCRYPTION_DOMAIN = "leadpoet/lead-order-vault/encryption/v1"
 RECEIPTS_DOMAIN = "leadpoet/lead-order-vault/receipts/v1"
 KEY_ALGORITHM = "secp256k1"
 RECEIPT_SCHEMA = "leadpoet.lead_order_vault.receipt.v1"
-USAGE_SCHEMA = "leadpoet.lead_order_vault.usage.v1"
-ATTESTATION_TAG = b"leadpoet.lead_order_vault.attestation.v1"
 
 HOSTS = {"openrouter.ai": "openrouter", "code.deepline.com": "deepline"}
-# The only requests a miner's key may make: the ones the lead-order broker
-# sends (lab_arena/lead_orders/broker.py). The vault does not trust the
-# gateway, so it repeats the list instead of relying on it. Anything else,
-# such as billing top-ups, monitors, plays or key management, is refused.
+# Request shapes a miner's key may take. Anything else, such as billing
+# top-ups, plays, monitors or key management, is refused.
 OPENROUTER_ROUTES = frozenset({
     ("POST", "/api/v1/chat/completions"),
     ("POST", "/api/alpha/decisions"),
     ("GET", "/api/v1/generation"),  # free cost read-back by generation id
 })
-# Same list as DEEPLINE_OPERATIONS in lab_arena/lead_orders/broker.py. Adding
-# a tool needs a new vault build and its on-chain approval.
-DEEPLINE_TOOLS = frozenset({
-    "harvestapi_search_jobs", "harvestapi_get_job", "harvestapi_get_company", "harvestapi_search_posts",
-    "harvestapi_get_post_reactions", "harvestapi_get_post_comments", "harvestapi_get_profile_posts",
-    "harvestapi_search_leads", "harvestapi_get_profile", "bloomberry_search_job_postings",
-    "parallel_run_task", "parallel_get_task_run_result", "search_contact",
-    "free_company_lookup", "crustdata_v3_company_identify", "crustdata_v3_company_enrich",
-    "crustdata_v3_person_search", "prospeo_enrich_person", "zerobounce_validate", "hunter_email_finder",
-    "dropleads_email_finder", "leadmagic_email_finder", "findymail_find_from_name",
-    "findymail_find_from_business_profile", "crustdata_v3_job_search", "quickenrich_employee_email_enrich",
-    "icypeas_email_verification", "icypeas_read_results", "firecrawl_scrape",
-})
+_DEEPLINE_TOOL = re.compile(r"[a-z0-9_]{1,64}")
 _GENERATION_QUERY = re.compile(r"id=[A-Za-z0-9_-]{1,128}")
 _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}")
 METHODS = ("GET", "POST")
@@ -159,7 +146,7 @@ class Vault:
 
     def __init__(self, *, encryption_key: ec.EllipticCurvePrivateKey, receipts_key: ec.EllipticCurvePrivateKey,
                  identity: Mapping, caller_token: str, upstream: Upstream = https_upstream,
-                 clock: Callable[[], float] = time.time, attest: Optional[Callable[[bytes], Mapping]] = None) -> None:
+                 clock: Callable[[], float] = time.time) -> None:
         if not isinstance(caller_token, str) or len(caller_token) < MIN_CALLER_TOKEN:
             raise ValueError("caller token too short")
         self._encryption_key = encryption_key
@@ -167,7 +154,6 @@ class Vault:
         self._caller_token = caller_token.encode("utf-8")
         self._upstream = upstream
         self._clock = clock
-        self._attest = attest
         self.boot_id = str(uuid.uuid4())
         self.booted_at = int(clock())
         self.encryption_public_key = _compressed_hex(encryption_key)
@@ -175,51 +161,13 @@ class Vault:
         self._identity = dict(identity, schema="leadpoet.lead_order_vault.identity.v1",
                               boot_id=self.boot_id, booted_at=self.booted_at)
         self._lock = threading.Lock()
-        self._attest_lock = threading.Lock()
         self._sequence = 0
         self._calls: Dict[str, int] = {}
-        self._checks: Dict[str, int] = {}
 
     # -- public, unauthenticated ------------------------------------------------
 
     def identity(self) -> Mapping:
         return self._identity
-
-    def attestation(self, query: Mapping[str, List[str]]) -> Mapping:
-        nonce = _single(query, "nonce")
-        if len(nonce) != 64 or not _is_hex(nonce):
-            raise VaultError("nonce_invalid")
-        if self._attest is None:
-            raise VaultError("attestation_unavailable", 503)
-        # Public, so one quote at a time: a flood waits instead of piling up.
-        if not self._attest_lock.acquire(timeout=10):
-            raise VaultError("attestation_busy", 503)
-        report_data = hashlib.sha256(
-            ATTESTATION_TAG + bytes.fromhex(self.encryption_public_key)
-            + bytes.fromhex(self.receipts_public_key) + bytes.fromhex(nonce)).digest()
-        return {"report_data": report_data.hex(), "nonce": nonce,
-                "encryption_public_key": self.encryption_public_key,
-                "receipts_public_key": self.receipts_public_key, "quote": self._quote(report_data)}
-
-    def _quote(self, report_data: bytes) -> Mapping:
-        try:
-            return self._attest(report_data)
-        finally:
-            self._attest_lock.release()
-
-    def usage(self, query: Mapping[str, List[str]]) -> Mapping:
-        key_fingerprint = _single(query, "fingerprint")
-        if not (key_fingerprint.startswith("sha256:") and len(key_fingerprint) == 71 and _is_hex(key_fingerprint[7:])):
-            raise VaultError("fingerprint_invalid")
-        nonce = (query.get("nonce") or [None])[0]
-        if nonce is not None and (len(nonce) != 64 or not _is_hex(nonce)):
-            raise VaultError("nonce_invalid")
-        with self._lock:
-            document = {"schema": USAGE_SCHEMA, "nonce": nonce, "boot_id": self.boot_id, "booted_at": self.booted_at,
-                        "key_fingerprint": key_fingerprint, "calls": self._calls.get(key_fingerprint, 0),
-                        "checks": self._checks.get(key_fingerprint, 0), "last_sequence": self._sequence,
-                        "at": int(self._clock())}
-        return self._signed(document)
 
     # -- Leadpoet's broker only ---------------------------------------------------
 
@@ -241,12 +189,10 @@ class Vault:
                 management, management_header = self._open(request.get("management_envelope"), provider, "management")
                 if management_header.miner_hotkey != header.miner_hotkey:
                     raise VaultError("envelope_mismatch")
-                self._count(self._checks, key_fingerprint)
                 self._check_openrouter(runtime, management)
             else:
                 if request.get("management_envelope") is not None:
                     raise VaultError("request_invalid")
-                self._count(self._checks, key_fingerprint)
                 self._probe(DEEPLINE_BALANCE_URL, runtime, "deepline_api_key_invalid")
         except _Invalid as invalid:
             return dict(result, status="invalid", reason=invalid.code)
@@ -274,7 +220,7 @@ class Vault:
         key_fingerprint = env.fingerprint(provider, secret)
         target = parts.path + ("?" + parts.query if parts.query else "")
         outbound = dict(headers, authorization="Bearer " + secret)
-        sequence, key_sequence, at = self._count(self._calls, key_fingerprint)
+        sequence, key_sequence, at = self._count(key_fingerprint)
         receipt = {"schema": RECEIPT_SCHEMA, "boot_id": self.boot_id, "sequence": sequence,
                    "key_sequence": key_sequence, "at": at,
                    "key_fingerprint": key_fingerprint, "miner_hotkey": header.miner_hotkey, "provider": provider,
@@ -318,11 +264,13 @@ class Vault:
             raise VaultError("purpose_mismatch")
         return secret, header
 
-    def _count(self, table: Dict[str, int], key_fingerprint: str) -> Tuple[int, int, int]:
+    def _count(self, key_fingerprint: str) -> Tuple[int, int, int]:
+        """Number a call: global sequence, this key's sequence, time."""
+
         with self._lock:
             self._sequence += 1
-            table[key_fingerprint] = table.get(key_fingerprint, 0) + 1
-            return self._sequence, table[key_fingerprint], int(self._clock())
+            self._calls[key_fingerprint] = self._calls.get(key_fingerprint, 0) + 1
+            return self._sequence, self._calls[key_fingerprint], int(self._clock())
 
     def _signed(self, document: Mapping) -> Mapping:
         signature = self._receipts_key.sign(canonical(document), ec.ECDSA(hashes.SHA256()))
@@ -366,17 +314,6 @@ class _Invalid(Exception):
         self.code = code
 
 
-def _single(query: Mapping[str, List[str]], name: str) -> str:
-    values = query.get(name) or []
-    if len(values) != 1:
-        raise VaultError(name + "_invalid")
-    return values[0]
-
-
-def _is_hex(value: str) -> bool:
-    return bool(value) and all(c in "0123456789abcdef" for c in value)
-
-
 def _route_allowed(provider: str, method: str, path: str, query: str) -> bool:
     if provider == "openrouter":
         if (method, path) not in OPENROUTER_ROUTES:
@@ -384,7 +321,7 @@ def _route_allowed(provider: str, method: str, path: str, query: str) -> bool:
         return _GENERATION_QUERY.fullmatch(query) is not None if method == "GET" else query == ""
     parts = path.split("/")
     return (method == "POST" and query == "" and len(parts) == 6 and parts[:4] == ["", "api", "v2", "integrations"]
-            and parts[4] in DEEPLINE_TOOLS and parts[5] == "execute")
+            and _DEEPLINE_TOOL.fullmatch(parts[4]) is not None and parts[5] == "execute")
 
 
 def _parse_call(request: Mapping):
@@ -478,9 +415,7 @@ def make_handler(vault: Vault):
 
         def do_GET(self) -> None:
             parts = urlsplit(self.path)
-            query = parse_qs(parts.query, keep_blank_values=True)
-            routes = {"/v1/identity": vault.identity, "/v1/attestation": lambda: vault.attestation(query),
-                      "/v1/usage": lambda: vault.usage(query), "/healthz": lambda: {"ok": True}}
+            routes = {"/v1/identity": vault.identity, "/healthz": lambda: {"ok": True}}
             route = routes.get(parts.path)
             self._handle(route if route else _not_found)
 
@@ -581,8 +516,6 @@ class Dstack:
     def info(self) -> Mapping:
         return self._post("Info", {})
 
-    def attest(self, report_data: bytes) -> Mapping:
-        return self._post("Attest", {"report_data": report_data.hex()})
 
 
 def main() -> None:
@@ -594,7 +527,7 @@ def main() -> None:
     identity = {name: info.get(name) for name in ("app_id", "compose_hash", "instance_id", "os_image_hash")}
     identity.update(encryption=encryption, receipts=receipts)
     vault = Vault(encryption_key=encryption_key, receipts_key=receipts_key, identity=identity,
-                  caller_token=caller_token, attest=dstack.attest)
+                  caller_token=caller_token)
     server = BoundedServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), make_handler(vault))
     server.serve_forever()
 

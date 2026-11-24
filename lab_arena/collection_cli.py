@@ -39,8 +39,13 @@ _ERROR_GUIDANCE = {
 
 
 def add_commands(commands, common_options):
-    for action in ("terms", "register", "revoke", "statement"):
-        parser = commands.add_parser("collection-" + action)
+    for action, help_text in (
+        ("terms", "read the published collection terms"),
+        ("register", "enroll a funding key with a signed spending cap"),
+        ("revoke", "stop new charges on an enrollment"),
+        ("statement", "check your enrollments, jobs and charges"),
+    ):
+        parser = commands.add_parser("collection-" + action, help=help_text)
         common_options(parser)
         parser.add_argument(
             "--mode", choices=("pilot", "live"), required=action != "terms"

@@ -72,6 +72,31 @@ against the vault's receipts key, lists any gap in each key's sequence, and
 names any key to seal again because the vault's key changed. It exits 2 when
 something is wrong. All commands refuse until the vault is deployed.
 
+## Releasing
+
+1. Merge the change to `main`, then run **Lead-order vault release** from
+   Actions on `main`. It builds the image twice, stops unless both digests
+   match, pushes `ghcr.io/leadpoet/lead-order-vault@sha256:…`, and uploads
+   `docker-compose.yml` pinned to that digest with `release.json` (commit,
+   image, commit time used as the build time, BuildKit image).
+2. Update the Phala Cloud app with that compose file. Phala shows its
+   compose hash.
+3. The app owner approves the hash with `addComposeHash` on the app's
+   contract on Base. This is the one step that grants a build the keys, so
+   it stays a signed, manual step.
+4. Run `cli verify`. Its `compose_hash` must be the approved one.
+
+First deploy only: make the GHCR package public so Phala can pull it, and
+fill `deployment.json` (url, app id, KMS root key, contract, chain). The
+**Lead-order vault uptime** check then runs `cli verify` every 30 minutes;
+a failed run is the alert.
+
+To check a release yourself, check out the commit in `release.json` and run
+`bash .github/scripts/lead_order_vault_build.sh` from the repository root
+(Docker with buildx). It prints the digest, which must match the image in
+the compose file. Then compare the compose file's hash with the one
+approved on Base and the one `cli verify` prints.
+
 ## Known limits
 
 - Sequence numbers restart with the vault. A hidden call just before a

@@ -1,0 +1,41 @@
+name: Lead-order vault uptime
+
+# Every 30 minutes, runs the same check a miner runs: `cli verify` fetches the
+# live vault's identity and checks both keys chain to the KMS root for the app
+# in deployment.json. A failed run is the alert. Does nothing until deployed.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: lead-order-vault-uptime
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.repository == 'leadpoet/leadpoet'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out main
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Skip until deployed
+        id: deployed
+        run: |
+          python3 -c 'import json; print("yes=" + ("1" if json.load(open("lead_order_vault/deployment.json")).get("url") else ""))' >> "$GITHUB_OUTPUT"
+      - name: Install the pinned dependencies
+        if: steps.deployed.outputs.yes
+        run: |
+          python3 -m venv "$RUNNER_TEMP/v"
+          "$RUNNER_TEMP/v/bin/pip" install --require-hashes --only-binary=:all: --no-deps -r lead_order_vault/requirements.txt
+      - name: Verify the live vault
+        if: steps.deployed.outputs.yes
+        run: |
+          "$RUNNER_TEMP/v/bin/python" -m lead_order_vault.cli verify

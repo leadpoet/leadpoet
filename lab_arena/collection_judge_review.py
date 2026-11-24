@@ -28,6 +28,7 @@ def _read_bundle(bundle, *, require_split=True):
     fields = {"schema", "policy", "assignments", "runs", "planted", "drift"}
     if "capture_version" in bundle:
         from lab_arena.collection_workflow import comparison_revisions
+
         comparison_revisions(bundle)
         fields.add("capture_version")
         if bundle.get("failed_attempts"):
@@ -535,7 +536,10 @@ def registered_bundle(
     import json
     from lab_arena.collection_journal import WorkflowJournal
     from lab_arena.collection_workflow import comparison_revisions
-    capture = {"capture_version":capture_version} if capture_version is not None else {}
+
+    capture = (
+        {"capture_version": capture_version} if capture_version is not None else {}
+    )
     agent, builder = comparison_revisions(capture)
     if capture and expected_builder != builder:
         raise ValueError("comparison capture builder differs from the frozen policy")
@@ -734,8 +738,12 @@ def registered_bundle(
             )
             row = verified(rid, "generator", manifest["generator"], 128 * 1024 * 1024)
             if capture:
-                WorkflowJournal(objects, policy.batch_id,rid).comparison_index(
-                    complete=True, model=record["model"], manifest_events=manifest.get("events"), generator=row)
+                WorkflowJournal(objects, policy.batch_id, rid).comparison_index(
+                    complete=True,
+                    model=record["model"],
+                    manifest_events=manifest.get("events"),
+                    generator=row,
+                )
             judge._require(
                 row.get("run") == rid and row.get("teacher") == record["model"],
                 "generator identity differs from registered job",
@@ -761,8 +769,10 @@ def registered_bundle(
         result["failed_attempts"] = failed_attempts
         if capture:
             result["failed_journals"] = {
-                failed["run_id"]: WorkflowJournal(objects,policy.batch_id,failed["run_id"]).comparison_index(
-                    complete=False, model=failed["generator"]) for failed in failed_attempts
+                failed["run_id"]: WorkflowJournal(
+                    objects, policy.batch_id, failed["run_id"]
+                ).comparison_index(complete=False, model=failed["generator"])
+                for failed in failed_attempts
             }
     _read_bundle(result, require_split=False)
     return result

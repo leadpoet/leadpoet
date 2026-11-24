@@ -59,7 +59,8 @@ def pilot(tmp_path, request):
             **models,
         },
         "scenario_ids": [
-            f"C01-s{2000+i}" for i in range(22 if candidate or checkpointed else variant)
+            f"C01-s{2000+i}"
+            for i in range(22 if candidate or checkpointed else variant)
         ],
         "budgets_microusd": dict.fromkeys(MODELS, 1000000),
         "control_slots": {"130": True, "131": False},
@@ -120,9 +121,10 @@ def pilot(tmp_path, request):
         str(i): judge.digest(case) for i, case in private_cases.items()
     }
     from lab_arena.collection_workflow import comparison_revisions, COMPARISON_CAPTURE
+
     if checkpointed:
-        raw["capture_version"]=COMPARISON_CAPTURE
-    agent,builder=comparison_revisions(raw)
+        raw["capture_version"] = COMPARISON_CAPTURE
+    agent, builder = comparison_revisions(raw)
     policy = load_batch(raw, PROMPT)
     for i in range(len(raw["scenario_ids"]) * len(MODELS)):
         rid = f"run-{i}"
@@ -186,15 +188,26 @@ def pilot(tmp_path, request):
             manifest[field] = store_artifact(objects, policy.batch_id, rid, kind, value)
         if checkpointed:
             from lab_arena.collection_journal import WorkflowJournal
+
             manifest["capture_version"] = raw["capture_version"]
             if i not in private_cases:
-                journal=WorkflowJournal(objects,policy.batch_id,rid)
-                journal.append({"index":0,"kind":"start","model":model,"messages":[],"tools":row["tools"]})
+                journal = WorkflowJournal(objects, policy.batch_id, rid)
+                journal.append(
+                    {
+                        "index": 0,
+                        "kind": "start",
+                        "model": model,
+                        "messages": [],
+                        "tools": row["tools"],
+                    }
+                )
                 for m in row["messages"]:
-                    journal.append({"index":len(journal.hashes),"kind":"reply","message":m})
-                journal.append({"index":len(journal.hashes),"kind":"finish"})
+                    journal.append(
+                        {"index": len(journal.hashes), "kind": "reply", "message": m}
+                    )
+                journal.append({"index": len(journal.hashes), "kind": "finish"})
                 journal.finish("completed")
-                manifest["events"]=journal.hashes
+                manifest["events"] = journal.hashes
         if i in private_cases:
             manifest.pop("generator")
             manifest["control"] = store_artifact(
@@ -363,6 +376,7 @@ def test_legacy_comparison_bundle_refuses_hidden_or_unpartitioned_review(pilot):
         with pytest.raises(ValueError):
             review.prepare_review(forged)
 
+
 @pytest.mark.parametrize("pilot", ["checkpointed"], indirect=True)
 def test_signed_checkpointed_prices_bind_journals_and_live_source(pilot):
     from scripts.run_locked_collection import verify_live_panel
@@ -370,17 +384,28 @@ def test_signed_checkpointed_prices_bind_journals_and_live_source(pilot):
     import json
 
     raw, db, objects, bundle, receipt, public = pilot
-    approved = compile_pilot(db,bundle,receipt,public,objects)
-    assert (approved["harness_commit"],approved["builder_commit"]) == comparison_revisions(raw)
-    assert approved["capture_version"] == raw["capture_version"] and approved["prices"]["C"][MODELS[0]]==125
-    live=dict(raw,mode="live")
-    verify_live_panel(live,load_batch(live,PROMPT),approved)
-    legacy=dict(live)
+    approved = compile_pilot(db, bundle, receipt, public, objects)
+    assert (
+        approved["harness_commit"],
+        approved["builder_commit"],
+    ) == comparison_revisions(raw)
+    assert (
+        approved["capture_version"] == raw["capture_version"]
+        and approved["prices"]["C"][MODELS[0]] == 125
+    )
+    live = dict(raw, mode="live")
+    verify_live_panel(live, load_batch(live, PROMPT), approved)
+    legacy = dict(live)
     legacy.pop("capture_version")
-    with pytest.raises(ValueError,match="differs"):
-        verify_live_panel(legacy,load_batch(legacy,PROMPT),approved)
+    with pytest.raises(ValueError, match="differs"):
+        verify_live_panel(legacy, load_batch(legacy, PROMPT), approved)
     # Changing a single paid run's original journal invalidates the price source.
-    path=objects._root/f"collection/{bundle['policy']['batch_id']}/run-0/events/00001.json"
-    doc=json.loads(path.read_bytes());doc["message"]["content"]="changed";path.write_text(json.dumps(doc))
-    with pytest.raises(ValueError,match="journal is missing or changed"):
-        compile_pilot(db,bundle,receipt,public,objects)
+    path = (
+        objects._root
+        / f"collection/{bundle['policy']['batch_id']}/run-0/events/00001.json"
+    )
+    doc = json.loads(path.read_bytes())
+    doc["message"]["content"] = "changed"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match="journal is missing or changed"):
+        compile_pilot(db, bundle, receipt, public, objects)

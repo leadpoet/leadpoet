@@ -45,7 +45,9 @@ GENERATOR_ROUTES = {
 MODELS = tuple(GENERATOR_ROUTES)
 PROVIDERS = ("openrouter",)
 TASK_SCOPE = "synthetic_workflows"
-SYNTHETIC_SCENARIO = re.compile(r"(?:C[0-9]{2}|K[0-9]{2}|B[1-8]|E[1-7]|P[1-7])-s[1-9][0-9]{0,7}")
+SYNTHETIC_SCENARIO = re.compile(
+    r"(?:C[0-9]{2}|K[0-9]{2}|B[1-8]|E[1-7]|P[1-7])-s[1-9][0-9]{0,7}"
+)
 SCOPE = {
     op: "lab_arena.collection." + op + ".v1"
     for op in ("register", "revoke", "statement")

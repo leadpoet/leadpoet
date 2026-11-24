@@ -35,8 +35,11 @@ def process_job(
 ):
     """The journal stores judge bytes separately. Only scores and tags reach the public statement."""
     from lab_arena.collection_journal import WorkflowJournal
+
     run_id, batch = job["job_id"], job["batch_id"]
-    capture = {"capture_version":capture_version} if capture_version is not None else {}
+    capture = (
+        {"capture_version": capture_version} if capture_version is not None else {}
+    )
     agent, builder = comparison_revisions(capture)
     journal = None
     if job.get("deepline_key_id") is None and job["scenario_id"].startswith("research-"):
@@ -70,11 +73,16 @@ def process_job(
                 raise ValueError("missing trusted research runner")
             row, packet = research(job, broker)
         elif capture:
-            if (getattr(sources[0], "source_revision", None), getattr(sources[1], "source_revision", None)) != (agent,builder):
+            if (
+                getattr(sources[0], "source_revision", None),
+                getattr(sources[1], "source_revision", None),
+            ) != (agent, builder):
                 raise ValueError("comparison worker loaded the wrong pinned sources")
-            journal=WorkflowJournal(objects,batch,run_id)
+            journal = WorkflowJournal(objects, batch, run_id)
             try:
-                row, packet = play_workflow(*sources, job, broker, record=journal.append)
+                row, packet = play_workflow(
+                    *sources, job, broker, record=journal.append
+                )
             except Exception:
                 journal.finish("interrupted")
                 raise
@@ -119,7 +127,7 @@ def process_job(
         "harness_commit": agent,
         "builder_commit": builder,
         **capture,
-        **({"events":journal.hashes} if journal is not None else {}),
+        **({"events": journal.hashes} if journal is not None else {}),
         "judge_policy": asdict(policy),
         "generator": row_ref,
         "packet": packet_ref,

@@ -32,12 +32,19 @@ CORRECTION_POET_REV = "d37173aca32ea59c7c5ffea46b0941726c55f30f"
 
 
 COMPARISON_CAPTURE = "collection.workflow-events.v1"
-# The final release pins the merged training-only task here.
-TRAIN_ONLY_POET_REV = CORRECTION_POET_REV
+# The P7 producer pins its train-only task, rule pool and tool definitions.
+TRAIN_ONLY_POET_REV = "1ff55087fac4cee0748247d47321f94daca7e18b"
+TRAIN_ONLY_PARTITION_SHA256 = (
+    "ff43fc006e3777d21a90d91b021ca3c177b5ebf2068afae555140daffadaf101"
+)
 
 
 def experiment_revisions(scenarios=()):
-    builder = TRAIN_ONLY_POET_REV if any(s.startswith("P7-s") for s in scenarios) else CORRECTION_POET_REV
+    builder = (
+        TRAIN_ONLY_POET_REV
+        if any(s.startswith("P7-s") for s in scenarios)
+        else CORRECTION_POET_REV
+    )
     return CORRECTION_CHAMPION_REV, builder
 
 
@@ -80,7 +87,9 @@ def _load(name, path):
 
 
 @contextmanager
-def workflow_sources(champion_repo, poet_repo, *, corrections=False, builder_revision=None):
+def workflow_sources(
+    champion_repo, poet_repo, *, corrections=False, builder_revision=None
+):
     """Enter once in a dedicated worker process: Poet9B uses flat sibling imports."""
     if builder_revision is None:
         builder_revision = CORRECTION_POET_REV if corrections else POET_REV
@@ -109,7 +118,9 @@ def workflow_sources(champion_repo, poet_repo, *, corrections=False, builder_rev
             if corrections:
                 builders.branch = _load("collection_branches", tasks / "branch_runs.py")
             harness = _load("collection_harness", agent / "harness.py")
-            harness.source_revision = CORRECTION_CHAMPION_REV if corrections else CHAMPION_REV
+            harness.source_revision = (
+                CORRECTION_CHAMPION_REV if corrections else CHAMPION_REV
+            )
             builders.source_revision = builder_revision
             # These are the producer's committed frozen evaluation identities.
             # A batch creator cannot reclassify an evaluation template as training.
@@ -117,7 +128,9 @@ def workflow_sources(champion_repo, poet_repo, *, corrections=False, builder_rev
             published = {key.split(":")[1] for key in frozen["builds"]}
             if not published or not builders.kmodule().TEMPLATES:
                 raise ValueError("missing pinned evaluation template registry")
-            builders.evaluation_templates = published | set(builders.kmodule().TEMPLATES)
+            builders.evaluation_templates = published | set(
+                builders.kmodule().TEMPLATES
+            )
             yield harness, builders
         finally:
             sys.path[:] = before

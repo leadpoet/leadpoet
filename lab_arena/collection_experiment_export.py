@@ -26,7 +26,7 @@ from lab_arena.collection_experiment import (
     load_experiment,
     source_revisions,
 )
-from lab_arena.collection_quality import verify_split
+from lab_arena.collection_quality import require_release_partition, verify_split
 from lab_arena.collection_workflow import store_artifact
 from lab_arena.collection_journal import WorkflowJournal
 
@@ -134,6 +134,7 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
     if trained:
         if spec.raw["terms_sha256"] != correction_terms_hash(spec.raw["mode"]):
             raise ValueError("release requires active approved correction consent")
+        require_release_partition(spec.raw)
         # Qualification documents are reconstructed from authenticated DB + original immutable evidence.
         receipt = verified_panel(database, objects, spec, **qualification)
     costs_rpc = (
@@ -210,8 +211,10 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
                             z.writestr(f"{rid}/interruption.json", judge._json(failure))
                 # A hard stop may leave a verified prefix, but no terminal event index.
                 incomplete = not job.get("artifact_sha256") and not event_hashes
-                journal = WorkflowJournal(objects,batch,rid)
-                for idx,(event,_) in enumerate(journal.read(None if incomplete else event_hashes)):
+                journal = WorkflowJournal(objects, batch, rid)
+                for idx, (event, _) in enumerate(
+                    journal.read(None if incomplete else event_hashes)
+                ):
                     if not trained:
                         z.writestr(f"{rid}/events/{idx:05d}.json", event)
                 if job["status"] == "failed" or not job.get("artifact_sha256"):

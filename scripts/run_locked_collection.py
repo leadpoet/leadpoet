@@ -19,7 +19,8 @@ from lab_arena.collection_broker import CollectionBroker, batch_versions
 from lab_arena.collection_intake import GENERATOR_ROUTES, MODELS, CollectionIntake, live_finney_arena
 from lab_arena.collection_worker import process_job
 from lab_arena.collection_workflow import (
-    CHAMPION_REV, POET_REV,
+    CHAMPION_REV,
+    POET_REV,
     comparison_revisions,
     build_scenario,
     workflow_sources,
@@ -302,6 +303,7 @@ class ComparisonSplitHold(ValueError):
 
 def pack_split(raw, builders, scenario_id):
     from lab_arena.collection_quality import admit_built_split
+
     if not raw.get("split_manifest"):
         raise ComparisonSplitHold("missing_split_manifest")
     try:
@@ -312,18 +314,32 @@ def pack_split(raw, builders, scenario_id):
 
 
 def report_split_hold(policy, exc):
-    print(json.dumps({"batch": policy.batch_id, "status": "comparison_held", "reason": str(exc)}), flush=True)
+    print(
+        json.dumps(
+            {"batch": policy.batch_id, "status": "comparison_held", "reason": str(exc)}
+        ),
+        flush=True,
+    )
     return 0
 
 
 def verify_live_panel(raw, policy, approved):
     certificate = raw.get("panel_qualification_sha256")
-    if (comparison_revisions(raw) != comparison_revisions(approved)
+    if (
+        comparison_revisions(raw) != comparison_revisions(approved)
         or certificate != approved.get("panel_qualification_sha256")
-        or raw.get("claim_protocol", "collection.fresh-claims.v1") != approved.get("claim_protocol", "collection.fresh-claims.v1")
+        or raw.get("claim_protocol", "collection.fresh-claims.v1")
+        != approved.get("claim_protocol", "collection.fresh-claims.v1")
         or policy.qualification != bool(certificate)
-        or (approved.get("split_manifest_sha256") and
-            ("split_manifest" not in raw or judge.digest(raw["split_manifest"]) != approved["split_manifest_sha256"]))):
+        or (
+            approved.get("split_manifest_sha256")
+            and (
+                "split_manifest" not in raw
+                or judge.digest(raw["split_manifest"])
+                != approved["split_manifest_sha256"]
+            )
+        )
+    ):
         raise ValueError("live panel or split differs from approved pilot")
     return certificate
 
@@ -348,7 +364,10 @@ def run_cohort(
     claim_pack=None,
 ):
     agent, builder = comparison_revisions(raw)
-    if raw.get("capture_version") and (getattr(sources[0], "source_revision", None), getattr(sources[1], "source_revision", None)) != (agent,builder):
+    if raw.get("capture_version") and (
+        getattr(sources[0], "source_revision", None),
+        getattr(sources[1], "source_revision", None),
+    ) != (agent, builder):
         raise ValueError("comparison worker loaded the wrong pinned sources")
     staged = False
     ceiling = dict(raw["budgets_microusd"])
@@ -392,9 +411,7 @@ def run_cohort(
                 return report_split_hold(policy, exc)
     completed = 0
     for _ in range(max_jobs):
-        job = intake.claim(
-            policy.batch_id, raw["scenario_ids"], agent, fees, ceiling
-        )
+        job = intake.claim(policy.batch_id, raw["scenario_ids"], agent, fees, ceiling)
         if not job:
             break
         try:
@@ -638,8 +655,14 @@ def _run_options(args, p, raw, *, before_claim=None):
             raise ValueError(
                 "research requires one authenticated validator relay per invocation"
             )
-    agent,builder = experiments.source_revisions(raw) if experiment else comparison_revisions(raw)
-    source_args = {"corrections": True, "builder_revision":builder} if experiment or "capture_version" in raw else {}
+    agent, builder = (
+        experiments.source_revisions(raw) if experiment else comparison_revisions(raw)
+    )
+    source_args = (
+        {"corrections": True, "builder_revision": builder}
+        if experiment or "capture_version" in raw
+        else {}
+    )
     with workflow_sources(args.champion_repo, args.poet_repo, **source_args) as sources:
         experiment_inputs = experiments.read_inputs(experiment, args.experiment_inputs, sources) if experiment else None
         try:
@@ -655,7 +678,11 @@ def _run_options(args, p, raw, *, before_claim=None):
                 json.dumps(
                     {
                         "batch": policy.batch_id,
-                        "models": len({a["model"] for a in raw["arms"]}) if experiment else len(MODELS),
+                        "models": (
+                            len({a["model"] for a in raw["arms"]})
+                            if experiment
+                            else len(MODELS)
+                        ),
                         "scenarios": len(scenarios),
                         "champion": agent,
                         "builder": builder,

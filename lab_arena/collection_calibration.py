@@ -77,10 +77,18 @@ def compile_pilot(
         "judge_prompt_sha256": policy.prompt_sha256,
         "harness_commit": agent,
         "builder_commit": builder,
-        **({"capture_version":bundle["capture_version"]} if "capture_version" in bundle else {}),
+        **(
+            {"capture_version": bundle["capture_version"]}
+            if "capture_version" in bundle
+            else {}
+        ),
         "control_ids": controls,
         "split_manifest_sha256": verified["split_manifest_sha256"],
-        **({"claim_protocol":bundle["claim_protocol"]} if "claim_protocol" in bundle else {}),
+        **(
+            {"claim_protocol": bundle["claim_protocol"]}
+            if "claim_protocol" in bundle
+            else {}
+        ),
         **panel,
         **calibration,
     }

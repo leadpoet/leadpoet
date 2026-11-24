@@ -19,10 +19,10 @@ from tests.lab_arena.lab_arena_pg_harness import DEFAULT_MIGRATIONS, database_wi
 
 MIGRATIONS = (
     *DEFAULT_MIGRATIONS,
-    "720-locked-collection-intake.sql",
-    "722-collection-call-budget.sql",
-    "724-collection-scenario-ranking.sql",
-    "727-collection-synthetic-funding.sql",
+    *(
+        next(Path("scripts").glob(f"{n}-*.sql")).name
+        for n in (720, 721, 722, 723, 724, 725, 726, 727, 728, 729, 732, 733, 738, 740)
+    ),
 )
 
 
@@ -298,8 +298,14 @@ def test_full_six_slot_cohort_and_public_review_projection(transport, tmp_path):
         assert observed == list(MODELS)
 
 
-def test_checkpointed_comparison_keeps_the_exact_prefix_on_generation_failure(transport,tmp_path):
-    from lab_arena.collection_workflow import CORRECTION_CHAMPION_REV
+def test_checkpointed_comparison_keeps_the_exact_prefix_on_generation_failure(
+    transport, tmp_path
+):
+    from lab_arena.collection_workflow import (
+        CORRECTION_CHAMPION_REV,
+        TRAIN_ONLY_POET_REV,
+    )
+
     agent = os.environ.get("COLLECTION_TEST_AGENT_REPO")
     poet = os.environ.get("COLLECTION_TEST_POET_REPO")
     if not agent or not poet:
@@ -307,54 +313,173 @@ def test_checkpointed_comparison_keeps_the_exact_prefix_on_generation_failure(tr
     from tests.lab_arena.collection_judge_test import PROMPT
 
     batch = "capture-failure-proof"
-    enrolled = registered(transport,"J")
-    job = enrolled.claim(batch,["E4-s2027"],CORRECTION_CHAMPION_REV,
-                         dict.fromkeys(MODELS,0),dict.fromkeys(MODELS,4000000))
-    policy = judge.BatchPolicy(batch,"fixed",judge.digest(PROMPT),pilot=True)
+    enrolled = registered(transport, "J")
+    job = enrolled.claim(
+        batch,
+        ["P7-s60001"],
+        CORRECTION_CHAMPION_REV,
+        dict.fromkeys(MODELS, 0),
+        dict.fromkeys(MODELS, 4000000),
+    )
+    policy = judge.BatchPolicy(batch, "fixed", judge.digest(PROMPT), pilot=True)
+
     class Broken:
-        def __init__(self): self.calls=0
+        def __init__(self):
+            self.calls = 0
+
         def model_call(self, request_id, body):
-            self.calls+=1
-            if self.calls==2: raise TimeoutError()
-            return {"model":body["model"],"id":"one","choices":[{"finish_reason":"tool_calls","message":{
-                "role":"assistant","content":"","reasoning":"Inspect the workspace.",
-                "tool_calls":[{"id":"step1","type":"function","function":{"name":"list_files","arguments":"{}"}}]}}]}
-    with workflow_sources(agent,poet,corrections=True) as sources:
+            self.calls += 1
+            if self.calls == 2:
+                raise TimeoutError()
+            return {
+                "model": body["model"],
+                "id": "one",
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning": "Inspect the workspace.",
+                            "tool_calls": [
+                                {
+                                    "id": "step1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "list_files",
+                                        "arguments": "{}",
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+
+    with workflow_sources(
+        agent, poet, corrections=True, builder_revision=TRAIN_ONLY_POET_REV
+    ) as sources:
         with pytest.raises(TimeoutError):
-            process_job(job=job,policy=policy,prompt=PROMPT,intake=enrolled,broker=Broken(),objects=LocalObjectStore(tmp_path),
-                        sources=sources,epoch=lambda:10,assignment={"run_id":job["job_id"]},capture_version="collection.workflow-events.v1")
-    base=tmp_path/"collection"/batch/job["job_id"]
-    events=[json.loads(f.read_text()) for f in sorted((base/"events").glob("[0-9]*.json"))]
-    assert [e["kind"] for e in events]==["start","before","reply","tool","before","interrupted"]
-    assert events[2]["message"]["reasoning"]=="Inspect the workspace."
-    assert events[3]["output"]==json.dumps(sorted(events[1]["files"]))
-    assert events[4]["state"]==events[1]["state"] and events[4]["prefix_messages"]==4
-    assert all("code_checks" in e for e in (events[1],events[4]))
+            process_job(
+                job=job,
+                policy=policy,
+                prompt=PROMPT,
+                intake=enrolled,
+                broker=Broken(),
+                objects=LocalObjectStore(tmp_path),
+                sources=sources,
+                epoch=lambda: 10,
+                assignment={"run_id": job["job_id"]},
+                capture_version="collection.workflow-events.v1",
+            )
+    base = tmp_path / "collection" / batch / job["job_id"]
+    events = [
+        json.loads(f.read_text()) for f in sorted((base / "events").glob("[0-9]*.json"))
+    ]
+    assert [e["kind"] for e in events] == [
+        "start",
+        "before",
+        "reply",
+        "tool",
+        "before",
+        "interrupted",
+    ]
+    assert events[2]["message"]["reasoning"] == "Inspect the workspace."
+    assert events[3]["output"] == json.dumps(sorted(events[1]["files"]))
+    assert (
+        events[4]["state"] == events[1]["state"] and events[4]["prefix_messages"] == 4
+    )
+    assert all("code_checks" in e for e in (events[1], events[4]))
     assert not list(base.glob("manifest-*.json"))
 
 
-
-@pytest.mark.parametrize("checkpointed",[False,True])
-def test_funded_runner_holds_missing_or_contradictory_split_before_claim(checkpointed,capsys):
+@pytest.mark.parametrize("checkpointed", [False, True])
+def test_funded_runner_holds_missing_or_contradictory_split_before_claim(
+    checkpointed, capsys
+):
     from types import SimpleNamespace
     from scripts.run_locked_collection import run_cohort
-    from lab_arena.collection_workflow import COMPARISON_CAPTURE
-    agent=os.environ.get("COLLECTION_TEST_AGENT_REPO"); poet=os.environ.get("COLLECTION_TEST_POET_REPO")
+    from lab_arena.collection_workflow import (
+        COMPARISON_CAPTURE,
+        TRAIN_ONLY_POET_REV,
+        POET_REV,
+    )
+
+    agent = os.environ.get("COLLECTION_TEST_AGENT_REPO")
+    poet = os.environ.get("COLLECTION_TEST_POET_REPO")
     if not agent or not poet:
         pytest.skip("requires both approved workflow repositories")
-    attempted=[]
+    attempted = []
+
     class NoClaim:
-        def claim(self,*args):
+        def claim(self, *args):
             attempted.append(True)
             raise AssertionError("attempted to charge excluded scenario")
-    with workflow_sources(agent,poet,corrections=checkpointed) as sources:
-        raw={"mode":"pilot","scenario_ids":["C07-s3013"],"budgets_microusd":dict.fromkeys(MODELS,1)}
-        if checkpointed: raw["capture_version"]=COMPARISON_CAPTURE
-        args=dict(raw=raw,policy=SimpleNamespace(batch_id="test-split",pilot=True),prompt={},intake=NoClaim(),database=None,
-                  objects=None,transport=None,pricing=None,epoch=lambda:1,sources=sources,owner_lookup=None,judge_key="fixture",max_jobs=1)
-        assert run_cohort(**args)==0 and "missing_split_manifest" in capsys.readouterr().out
+
+    with workflow_sources(
+        agent,
+        poet,
+        corrections=checkpointed,
+        builder_revision=TRAIN_ONLY_POET_REV if checkpointed else POET_REV,
+    ) as sources:
+        raw = {
+            "mode": "pilot",
+            "scenario_ids": ["C07-s3013"],
+            "budgets_microusd": dict.fromkeys(MODELS, 1),
+        }
+        if checkpointed:
+            raw["capture_version"] = COMPARISON_CAPTURE
+        args = dict(
+            raw=raw,
+            policy=SimpleNamespace(batch_id="test-split", pilot=True),
+            prompt={},
+            intake=NoClaim(),
+            database=None,
+            objects=None,
+            transport=None,
+            pricing=None,
+            epoch=lambda: 1,
+            sources=sources,
+            owner_lookup=None,
+            judge_key="fixture",
+            max_jobs=1,
+        )
+        assert (
+            run_cohort(**args) == 0
+            and "missing_split_manifest" in capsys.readouterr().out
+        )
         # A fresh seed and an invented held-out list cannot reassign a known test template.
-        raw["split_manifest"]={"schema":"collection.split.v1","training":{"template_id":["C07"],"rule_pool":["poet:train_rules:chain"],"tool_variant":["contacts,functions,plain"]},
-                               "heldout":{"template_id":["unrelated"],"rule_pool":["separate"],"tool_variant":["another"]}}
-        assert run_cohort(**args)==0 and "scenario_not_in_training_partition" in capsys.readouterr().out
-        assert attempted==[]
+        raw["split_manifest"] = {
+            "schema": "collection.split.v1",
+            "training": {
+                "template_id": ["C07"],
+                "rule_pool": ["poet:train_rules:chain"],
+                "tool_variant": ["contacts,functions,plain"],
+            },
+            "heldout": {
+                "template_id": ["unrelated"],
+                "rule_pool": ["separate"],
+                "tool_variant": ["another"],
+            },
+        }
+        assert (
+            run_cohort(**args) == 0
+            and "scenario_not_in_training_partition" in capsys.readouterr().out
+        )
+        assert attempted == []
+
+
+def test_hard_stop_retains_an_unsealed_private_prefix_without_a_payable_manifest(tmp_path):
+    from lab_arena.collection_journal import WorkflowJournal
+
+    objects = LocalObjectStore(tmp_path)
+    journal = WorkflowJournal(objects, "batch", "run")
+    journal.append({"index": 0, "kind": "start", "model": MODELS[0], "messages": [], "tools": []})
+    journal.append({"index": 1, "kind": "before", "turn": 0, "state": {"example": "before"}})
+    readback = WorkflowJournal(objects, "batch", "run")
+    assert readback.comparison_index(complete=False, model=MODELS[0]) == {
+        "status": "unsealed", "events": journal.hashes
+    }
+    with pytest.raises(ValueError, match="complete event index"):
+        readback.comparison_index(complete=True, model=MODELS[0], manifest_events=journal.hashes)
+    assert not list(tmp_path.rglob("manifest-*.json"))

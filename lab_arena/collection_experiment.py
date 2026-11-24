@@ -51,6 +51,7 @@ class Experiment:
 
 def source_revisions(raw=None):
     from lab_arena.collection_workflow import experiment_revisions
+
     return experiment_revisions(c["scenario_id"] for c in (raw or {}).get("cases", []))
 
 
@@ -58,7 +59,6 @@ def load_experiment(raw, prompt):
     from lab_arena.collection_claims import protocol_of
 
     protocol_of(raw)
-    agent_revision, builder_revision = source_revisions(raw)
 
     if (
         set(raw) - {"claim_protocol", "min_pricing_runs", "pricing_pilot"}
@@ -171,6 +171,7 @@ def load_experiment(raw, prompt):
         raise ValueError("a pilot cannot spend an approved live tariff")
     routes = {m: r.tag for m, r in GENERATOR_ROUTES.items()}
     routes.update({m: r.route for m, r in judge.QUALIFICATION_JUDGES.items()})
+    agent_revision, builder_revision = source_revisions(raw)
     identity = judge.digest(
         {
             "manifest": raw,
@@ -265,7 +266,9 @@ def read_inputs(spec, directory, sources):
             raise ValueError("private experiment input digest changed")
         return value
 
-    if (sources[0].source_revision, sources[1].source_revision) != source_revisions(spec.raw):
+    if (sources[0].source_revision, sources[1].source_revision) != source_revisions(
+        spec.raw
+    ):
         raise ValueError("experiment loaded the wrong pinned sources")
     split = read(spec.raw["split_sha256"])
     resolved = {}
@@ -282,7 +285,11 @@ def read_inputs(spec, directory, sources):
         task = correction_scenario(sources[1], source)
         # These identities are re-derived from the pinned builder, never miner labels.
         stamp = admit_built_split(
-            sources[1], task, json.loads(source["original"]["trace.json"]).get("shape"), split)
+            sources[1],
+            task,
+            json.loads(source["original"]["trace.json"]).get("shape"),
+            split,
+        )
         resolved[case["source_sha256"]] = (source, stamp)
     provenance = read(spec.raw["provenance_sha256"])
     verify_provenance(spec, provenance, {k: v[0] for k, v in resolved.items()})
@@ -375,9 +382,7 @@ def run_experiment(
     for _ in range(max_jobs):
         if before_claim is not None:
             before_claim()
-        job = intake.claim_experiment(
-            spec, agent, fixed_quote=fixed_quote
-        )
+        job = intake.claim_experiment(spec, agent, fixed_quote=fixed_quote)
         if not job:
             break
         run_id = job["job_id"]

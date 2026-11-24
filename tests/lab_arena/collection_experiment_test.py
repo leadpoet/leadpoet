@@ -98,7 +98,22 @@ def test_budget_settings_and_routing_bind_every_arm_and_repeat():
 @pytest.fixture
 def database():
     migrated = list(DEFAULT_MIGRATIONS)
-    for prefix in (720, 721, 722, 723, 724, 725, 726, 727, 728, 729, 732, 733):
+    for prefix in (
+        720,
+        721,
+        722,
+        723,
+        724,
+        725,
+        726,
+        727,
+        728,
+        729,
+        732,
+        733,
+        738,
+        740,
+    ):
         (script,) = Path("scripts").glob(str(prefix) + "-*.sql")
         migrated.append(script.name)
     yield from database_with_lab_arena_migration(tuple(migrated))
@@ -393,6 +408,7 @@ def test_real_harness_checkpoint_and_archive_under_funded_job_contract(
     pub_path.write_bytes(pub(key))
     monkeypatch.setenv("LAB_ARENA_COLLECTION_TRAINER_PUBLIC_KEY_FILE", str(pub_path))
     raw = settings()
+    raw["cases"][0]["scenario_id"] = "P7-s3013"
     if keyed:
         raw["claim_protocol"] = "collection.fresh-claims.v2"
     raw["arms"][0].update(repeats=1, max_steps=90)
@@ -403,13 +419,15 @@ def test_real_harness_checkpoint_and_archive_under_funded_job_contract(
         task_scope="synthetic_corrections", terms_sha256=raw["terms_sha256"]
     )
     enrolled.register(auth, auth["hotkey"], cred)
-    with workflow_sources(agent, poet, corrections=True) as src:
+    with workflow_sources(
+        agent, poet, corrections=True, builder_revision=xp.source_revisions(raw)[1]
+    ) as src:
         harness, builders = src
         br = builders.branch
-        case = builders.build("C06", 3013)
-        broken = next(x[1] for x in br.broken_of(case) if isinstance(x[1], dict))
+        case = builders.build("P7", 3013)
+        broken = dict(builders.perfect(case), answer="wrong final receipt")
         path = tmp_path / "student"
-        br.fake_source(path, ("C06", 3013, builders.PLAIN), case, broken)
+        br.fake_source(path, ("P7", 3013, builders.PLAIN), case, broken)
         _, tools = br.fresh(case, tmp_path / "world")
         transcript = [
             json.loads(l) for l in (path / "transcript.jsonl").read_text().splitlines()
@@ -436,11 +454,7 @@ def test_real_harness_checkpoint_and_archive_under_funded_job_contract(
             return d
 
         stage(student)
-        split = {
-            "schema": "collection.split.v1",
-            "training": {k: [v] for k, v in student["split"].items()},
-            "heldout": {k: ["held-out-test-fixture"] for k in student["split"]},
-        }
+        split = builders.training_partition("P7")
         raw["split_sha256"] = stage(split)
         att = signed(
             key,
@@ -462,11 +476,6 @@ def test_real_harness_checkpoint_and_archive_under_funded_job_contract(
         )
         raw["provenance_sha256"] = stage(att)
         spec = xp.load_experiment(raw, PROMPT)
-        with pytest.raises(ValueError, match="frozen evaluation template"):
-            xp.read_inputs(spec, tmp_path, src)
-        # This fixture exercises downstream funding and archival with a controlled
-        # evaluation registry. Production obtains this set only from pinned Git.
-        monkeypatch.setattr(builders, "evaluation_templates", {"separate-fixture"})
         inputs = xp.read_inputs(spec, tmp_path, src)
         good = builders.perfect(case)
         todo = br.still_to_do(
@@ -614,7 +623,7 @@ def test_real_harness_checkpoint_and_archive_under_funded_job_contract(
     assert released["price_observations"] == [
         {
             "role": "continuation",
-            "task_class": "C06",
+            "task_class": "P7",
             "model": j["model"],
             "measured_runs": 1,
             "miner_cost_microusd": j["miner_cost_microusd"],

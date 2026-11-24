@@ -394,3 +394,19 @@ def test_keyed_claims_reject_displaced_or_missing_sentence_ids_and_mixed_provena
             broker=WrongKeys(),
             protocol=KEYED_V2,
         )
+
+
+def test_historical_replay_cannot_masquerade_as_a_training_release():
+    from lab_arena.collection_quality import require_release_partition
+    from lab_arena.collection_workflow import TRAIN_ONLY_PARTITION_SHA256
+
+    settings = {
+        "split_sha256": "sha256:" + TRAIN_ONLY_PARTITION_SHA256,
+        "cases": [{"scenario_id": "C07-s3013"}],
+    }
+    with pytest.raises(ValueError, match="private audit only"):
+        require_release_partition(settings)
+    settings["cases"] = [{"scenario_id": "P7-s3013"}]
+    require_release_partition(settings)
+    with pytest.raises(ValueError, match="private audit only"):
+        require_release_partition(dict(settings, split_sha256="sha256:" + "a" * 64))

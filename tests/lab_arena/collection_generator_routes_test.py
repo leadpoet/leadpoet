@@ -41,3 +41,23 @@ def test_batch_rejects_unverified_host_before_leasing_a_miner_key():
     routes["deepseek/deepseek-v4-pro-0813"] = "together"
     with pytest.raises(ValueError, match="verified generator route"):
         load_batch(batch, PROMPT)
+
+
+def test_capture_profile_does_not_reinterpret_historical_manifest_sources():
+    from lab_arena.collection_workflow import (
+        comparison_revisions,
+        CHAMPION_REV,
+        POET_REV,
+        CORRECTION_CHAMPION_REV,
+        TRAIN_ONLY_POET_REV,
+        COMPARISON_CAPTURE,
+    )
+
+    assert comparison_revisions({}) == (CHAMPION_REV, POET_REV)
+    assert comparison_revisions({"capture_version": COMPARISON_CAPTURE}) == (
+        CORRECTION_CHAMPION_REV,
+        TRAIN_ONLY_POET_REV,
+    )
+    for unrecognized in ("newest", None):
+        with pytest.raises(ValueError, match="unknown comparison"):
+            comparison_revisions({"capture_version": unrecognized})

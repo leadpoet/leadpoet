@@ -26,6 +26,7 @@ the Arena broker's (``lab_arena.broker``), reused rather than copied.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import math
 import time
@@ -131,6 +132,8 @@ RESOLVE_BATCH = 10
 # leaves them out (OpenRouter's documented max_price fields).
 _INJECTED_MAX_PRICE = (("prompt", True), ("completion", True), ("request", False))
 _FORWARDED_RESPONSE_HEADERS = ("content-type",)
+
+_LOG = logging.getLogger(__name__)
 
 
 def deepline_cost_microusd(body: bytes) -> Optional[int]:
@@ -239,8 +242,10 @@ class LeadOrderBroker:
         self._store = store
         self._policy = policy
         self._transport = transport
-        # Miner keys go through the key vault; the credential is the envelope.
-        self._miner_transport = miner_transport or transport
+        # Miner keys go only through the key vault; the credential is the envelope.
+        if registrar is not None and miner_transport is None:
+            raise ValueError("miner keys need the vault transport")
+        self._miner_transport = miner_transport
         self._registrar = registrar
         self._leadpoet_secrets = {k: v for k, v in leadpoet_secrets.items() if v}
         self._leadpoet_keys = lead_keys.leadpoet_keys(
@@ -559,14 +564,17 @@ class LeadOrderBroker:
 
     def _keep_receipt(self, call_id: str, kind: str, receipt: Optional[Mapping[str, Any]]) -> None:
         """Store a vault receipt. A failed write must not lose an answer the
-        provider already billed; the miner's audit then shows the gap."""
+        provider already billed; it is logged, and the miner's audit shows
+        the gap."""
 
         if receipt is None:
             return
         try:
-            self._store.record_vault_receipt(call_id=call_id, kind=kind, receipt=receipt)
-        except Exception:  # noqa: BLE001 (store outage; nothing secret is in the receipt)
-            pass
+            status = self._store.record_vault_receipt(call_id=call_id, kind=kind, receipt=receipt).get("status")
+        except Exception as error:  # noqa: BLE001 (store outage; nothing secret is in the receipt)
+            status = type(error).__name__
+        if status not in ("recorded", "exists"):
+            _LOG.error("lead-order vault receipt not kept: call %s, %s, %s", call_id, kind, status)
 
     # -- the call -------------------------------------------------------------
     def call(self, token: str, request: BrokerRequest) -> ProviderResponse:

@@ -24,6 +24,7 @@ from typing import Sequence
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, utils
+from Crypto.Hash import keccak  # pycryptodome: requirements-verify.txt; the vault never imports this module
 
 # secp256k1
 _P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
@@ -39,8 +40,6 @@ class ChainError(ValueError):
 
 
 def keccak256(data: bytes) -> bytes:
-    from Crypto.Hash import keccak  # pycryptodome; only the verifier needs it
-
     return keccak.new(digest_bits=256, data=data).digest()
 
 

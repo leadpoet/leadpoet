@@ -390,3 +390,32 @@ def test_signed_host_drops_default_ports_on_both_sides():
     for url, host in (("https://GW.example:443/x", "gw.example"), ("http://gw.example:80", "gw.example"),
                       ("https://gw.example:8443", "gw.example:8443")):
         assert LeadOrdersConfig(mode="off", public_base_url=url).public_host == host
+
+
+def test_miner_keys_never_fall_back_to_the_direct_transport():
+    from lab_arena.lead_orders.broker import LeadOrderBroker
+
+    with pytest.raises(ValueError, match="vault transport"):
+        LeadOrderBroker(store=None, policy=POLICY, transport=object(), registrar=keys.MinerKeyRegistrar(None),
+                        leadpoet_secrets={}, price_table=dict, current_epoch=lambda: 1)
+
+
+def test_a_vault_receipt_the_store_does_not_keep_is_logged(caplog):
+    from lab_arena.lead_orders.broker import LeadOrderBroker
+
+    class Store:
+        def __init__(self, answer):
+            self.answer = answer
+
+        def record_vault_receipt(self, **_):
+            if isinstance(self.answer, Exception):
+                raise self.answer
+            return self.answer
+
+    for answer, logged in (({"status": "recorded"}, False), ({"status": "exists"}, False),
+                           ({"status": "not_recordable"}, True), (OSError("store down"), True)):
+        caplog.clear()
+        broker = LeadOrderBroker(store=Store(answer), policy=POLICY, transport=None, registrar=None,
+                                 leadpoet_secrets={}, price_table=dict, current_epoch=lambda: 1)
+        broker._keep_receipt("call-1", "call", {"document": {}, "signature": "00"})
+        assert ("receipt not kept" in caplog.text) is logged, answer

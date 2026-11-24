@@ -7,7 +7,7 @@ provider, and returns the answer with a signed receipt. Leadpoet's own keys
 keep the direct transport.
 
 The client talks only to a TLS session the vault itself ends: it pins the
-certificate that the vault's KMS-verified identity signed (``cli.connect``),
+certificate that the vault's KMS-verified identity signed (``trust.connect``),
 so Phala's gateway cannot read the caller token or the envelopes.
 """
 
@@ -23,19 +23,15 @@ import httpx
 
 from lab_arena import broker as arena_broker
 from lab_arena.broker import ProviderResponse, ProviderTransportError
-from lead_order_vault import cli as vault_cli
+from lead_order_vault import trust
+from lead_order_vault.vault import CALLER_HEADER, CHECK_TIMEOUT_SECONDS as _VAULT_PROBE_SECONDS
 
-CALLER_HEADER = "x-lead-order-vault-token"
 # Time for the vault itself on top of the provider's own timeout.
 VAULT_OVERHEAD_SECONDS = 15.0
-CHECK_TIMEOUT_SECONDS = 45.0
-# The vault's own refusals, all raised before it contacts the provider. Any
-# other error (a proxy's 408, a 5xx) may come after it already forwarded.
-_REFUSED_BEFORE_SENDING = frozenset({
-    "request_invalid", "method_not_allowed", "url_invalid", "host_not_allowed", "path_not_allowed",
-    "headers_invalid", "body_invalid", "timeout_invalid", "max_response_bytes_invalid", "credential_missing",
-    "provider_mismatch", "purpose_mismatch", "caller_unauthorized", "request_too_large", "not_found",
-})
+# A check probes the runtime key and then the management key.
+CHECK_REQUEST_SECONDS = 2 * _VAULT_PROBE_SECONDS + VAULT_OVERHEAD_SECONDS
+# A failed connection sent nothing.
+_NOT_SENT = (httpx.ConnectError, httpx.ConnectTimeout)
 
 
 class VaultUnavailable(RuntimeError):
@@ -74,20 +70,15 @@ class VaultTransportError(ProviderTransportError):
 
 
 class VaultClient:
-    """``deployment`` is ``lead_order_vault/deployment.json``: url, app id, KMS root.
+    """``deployment`` comes from ``trust.load_deployment``: url, app id, KMS root."""
 
-    ``client`` replaces the pinned client, for tests only.
-    """
-
-    def __init__(self, deployment: Mapping[str, Any], caller_token: str, *,
-                 client: Optional[httpx.Client] = None) -> None:
-        self._url = str(deployment.get("url") or "").rstrip("/")
+    def __init__(self, deployment: Mapping[str, Any], caller_token: str) -> None:
+        self._url = str(deployment["url"]).rstrip("/")
         if not self._url.startswith("https://"):
             raise ValueError("vault url must be https")
         self._deployment = deployment
         self._token = caller_token
-        self._client = client
-        self._fixed = client is not None
+        self._client: Optional[httpx.Client] = None
         self._lock = threading.Lock()
 
     def _pinned(self, failed: Optional[httpx.Client] = None) -> httpx.Client:
@@ -98,13 +89,13 @@ class VaultClient:
         """
 
         with self._lock:
-            if self._client is not None and (self._client is not failed or self._fixed):
+            if self._client is not None and (self._client is not failed):
                 return self._client
         try:
-            _, certificate = vault_cli.connect(self._deployment)
-        except (vault_cli.CliError, OSError, ValueError, KeyError, TypeError):
+            _, certificate = trust.connect(self._deployment)
+        except (trust.TrustError, OSError, ValueError, KeyError, TypeError):
             raise VaultUnavailable("vault_unverified", forwarded=False) from None
-        fresh = httpx.Client(verify=vault_cli.pinned_context(certificate), follow_redirects=False, trust_env=False)
+        fresh = httpx.Client(verify=trust.tls_context(certificate), follow_redirects=False, trust_env=False)
         with self._lock:
             if self._client is None or self._client is failed:
                 self._client = fresh
@@ -114,22 +105,25 @@ class VaultClient:
         return current
 
     def _post(self, path: str, document: Mapping[str, Any], timeout: float) -> Dict[str, Any]:
-        # A failed connect sent nothing. It is retried once after verifying the
-        # vault again, which picks up the new TLS key after a restart.
         client = self._pinned()
-        for retry in (False, True):
-            try:
-                response = client.post(self._url + path, json=document, timeout=timeout,
-                                       headers={CALLER_HEADER: self._token})
-            except (httpx.ConnectError, httpx.ConnectTimeout):
-                if not retry:
-                    client = self._pinned(failed=client)
-                    continue
-                raise VaultUnavailable("vault_unreachable", forwarded=False) from None
-            except httpx.HTTPError:
-                raise VaultUnavailable("vault_unreachable", forwarded=None) from None
-            return self._document(response)
-        raise AssertionError("unreachable")
+        try:
+            return self._document(self._send(client, path, document, timeout))
+        except _NOT_SENT:
+            pass
+        # Verify the vault again, which picks up its new TLS key after a
+        # restart, and retry once.
+        try:
+            return self._document(self._send(self._pinned(failed=client), path, document, timeout))
+        except _NOT_SENT:
+            raise VaultUnavailable("vault_unreachable", forwarded=False) from None
+
+    def _send(self, client: httpx.Client, path: str, document: Mapping[str, Any], timeout: float) -> httpx.Response:
+        try:
+            return client.post(self._url + path, json=document, timeout=timeout, headers={CALLER_HEADER: self._token})
+        except _NOT_SENT:
+            raise
+        except httpx.HTTPError:
+            raise VaultUnavailable("vault_unreachable", forwarded=None) from None
 
     @staticmethod
     def _document(response: httpx.Response) -> Dict[str, Any]:
@@ -140,16 +134,17 @@ class VaultClient:
         if response.status_code != 200 or not isinstance(document, dict):
             code = document.get("error") if isinstance(document, dict) else None
             status = response.status_code
-            refused = isinstance(code, str) and code in _REFUSED_BEFORE_SENDING
+            # Over the pinned session only the vault answers, and it refuses
+            # with a 4xx only before it contacts the provider.
             raise VaultUnavailable("vault_" + str(code or status), status=status,
-                                   forwarded=False if refused else None)
+                                   forwarded=False if 400 <= status < 500 else None)
         return document
 
     def check(self, *, provider: str, envelope: str, management_envelope: Optional[str]) -> Dict[str, Any]:
         document: Dict[str, Any] = {"provider": provider, "envelope": envelope}
         if management_envelope is not None:
             document["management_envelope"] = management_envelope
-        return self._post("/v1/check", document, CHECK_TIMEOUT_SECONDS)
+        return self._post("/v1/check", document, CHECK_REQUEST_SECONDS)
 
     def call(self, document: Mapping[str, Any], timeout: float) -> Dict[str, Any]:
         return self._post("/v1/call", document, timeout + VAULT_OVERHEAD_SECONDS)

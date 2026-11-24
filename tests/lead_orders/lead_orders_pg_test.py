@@ -186,7 +186,8 @@ def make(store, mode, *, staff=(), gamma=None, registrar=None, epoch=None):
 
 def broker_for(store, transport, *, registrar=None, epoch=None, miner_transport=None):
     return LeadOrderBroker(
-        store=store, policy=POLICY, transport=transport, registrar=registrar, miner_transport=miner_transport,
+        store=store, policy=POLICY, transport=transport, registrar=registrar,
+        miner_transport=miner_transport or (transport if registrar else None),
         leadpoet_secrets={"openrouter": SECRET, "deepline": SECRET},
         price_table=lambda: PRICE_TABLE, current_epoch=epoch or Epoch(),
     )
@@ -888,7 +889,7 @@ def test_keys_need_signed_current_miner_terms_and_outdated_acceptances_are_skipp
     live_service.place_order(buyer, {"leads": 10, **ORDER})
     token, order_id = claim(live_service)
     transport = FakeTransport([openrouter_ok("0.000100"), openrouter_ok("0.000100")])
-    broker_v2 = LeadOrderBroker(store=store, policy=v2, transport=transport, registrar=registrar,
+    broker_v2 = LeadOrderBroker(store=store, policy=v2, transport=transport, registrar=registrar, miner_transport=transport,
                                 leadpoet_secrets={"openrouter": SECRET, "deepline": SECRET},
                                 price_table=lambda: PRICE_TABLE, current_epoch=epoch)
     broker_v2.call(token, chat())

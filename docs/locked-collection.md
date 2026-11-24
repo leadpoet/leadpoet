@@ -39,6 +39,8 @@ The pilot uses **your OpenRouter credits and pays no emissions**. Leadpoet pays 
 
 Paid assignments require fresh live consent after the pilot qualifies.
 
+For setup help or to volunteer for a blind workflow review, ask in `#lab-chat` on the [Leadpoet Discord](https://discord.gg/dVxQZmJwxB). Reviewing does not require a wallet or API credits.
+
 The six slots in each comparison pack use the same scenario and the approved generator routes below. Each subsequent complete group advances to a fresh scenario. A provider receipt records known spend even when the run fails. Unknown bills retain their reservation. The worker cannot issue the same paid request identifier twice. Synthetic tools run locally. The miner funds the billed generator calls. Private verifier calls use an owner-controlled credential and count against the job budget.
 
 ## Running one batch

@@ -8,7 +8,7 @@ from tests.lab_arena import installer_capacity710_postgres_test as setup
 from tests.lab_arena import paid_expiry_capacity713_postgres_test as previous
 from tests.lab_arena import stage_cutoff_drain420_postgres_test as jobs
 
-SQL = Path(__file__).parents[2] / "scripts/738-lab-arena-installer-retry-assignment.sql"
+SQL = Path(__file__).parents[2] / "scripts/739-lab-arena-installer-retry-assignment.sql"
 
 
 @pytest.fixture(scope="module")

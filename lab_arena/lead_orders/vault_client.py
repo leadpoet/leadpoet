@@ -90,28 +90,40 @@ class VaultClient:
         self._fixed = client is not None
         self._lock = threading.Lock()
 
-    def _pinned(self, refresh: bool) -> httpx.Client:
+    def _pinned(self, failed: Optional[httpx.Client] = None) -> httpx.Client:
+        """The pinned client; with ``failed``, a freshly verified one unless another thread already replaced it.
+
+        Verification runs outside the lock. A replaced client is left open so
+        requests already in flight on it finish.
+        """
+
         with self._lock:
-            if self._client is None or (refresh and not self._fixed):
-                try:
-                    _, certificate = vault_cli.connect(self._deployment)
-                except (vault_cli.CliError, OSError, ValueError, KeyError, TypeError):
-                    raise VaultUnavailable("vault_unverified", forwarded=False) from None
-                previous, self._client = self._client, httpx.Client(
-                    verify=vault_cli.pinned_context(certificate), follow_redirects=False, trust_env=False)
-                if previous is not None:
-                    previous.close()
-            return self._client
+            if self._client is not None and (self._client is not failed or self._fixed):
+                return self._client
+        try:
+            _, certificate = vault_cli.connect(self._deployment)
+        except (vault_cli.CliError, OSError, ValueError, KeyError, TypeError):
+            raise VaultUnavailable("vault_unverified", forwarded=False) from None
+        fresh = httpx.Client(verify=vault_cli.pinned_context(certificate), follow_redirects=False, trust_env=False)
+        with self._lock:
+            if self._client is None or self._client is failed:
+                self._client = fresh
+                return fresh
+            current = self._client
+        fresh.close()
+        return current
 
     def _post(self, path: str, document: Mapping[str, Any], timeout: float) -> Dict[str, Any]:
         # A failed connect sent nothing. It is retried once after verifying the
         # vault again, which picks up the new TLS key after a restart.
-        for refresh in (False, True):
+        client = self._pinned()
+        for retry in (False, True):
             try:
-                response = self._pinned(refresh).post(self._url + path, json=document, timeout=timeout,
-                                                      headers={CALLER_HEADER: self._token})
+                response = client.post(self._url + path, json=document, timeout=timeout,
+                                       headers={CALLER_HEADER: self._token})
             except (httpx.ConnectError, httpx.ConnectTimeout):
-                if not refresh:
+                if not retry:
+                    client = self._pinned(failed=client)
                     continue
                 raise VaultUnavailable("vault_unreachable", forwarded=False) from None
             except httpx.HTTPError:

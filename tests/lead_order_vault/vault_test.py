@@ -559,6 +559,23 @@ def test_vault_client_sends_nothing_through_a_gateway_that_ends_tls():
         gateway.server_close()
 
 
+def test_re_verifying_leaves_requests_in_flight_alone(served_vault, monkeypatch):
+    from lab_arena.lead_orders import vault_client
+    from lab_arena.lead_orders.vault_client import VaultClient
+
+    deployment, _ = served_vault
+    verified = []
+    real_connect = vault_client.vault_cli.connect
+    monkeypatch.setattr(vault_client.vault_cli, "connect", lambda d: verified.append(1) or real_connect(d))
+    client = VaultClient(deployment, TOKEN)
+    first = client._pinned()
+    # Two threads saw the same connect failure: one re-verifies, the other reuses its result.
+    second = client._pinned(failed=first)
+    assert client._pinned(failed=first) is second and len(verified) == 2
+    # The replaced client stays open for requests still running on it.
+    assert not first.is_closed and first.get(deployment["url"] + "/healthz").json() == {"ok": True}
+
+
 def test_vault_client_follows_a_restarted_vault_to_its_new_tls_key():
     import threading
 

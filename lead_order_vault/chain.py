@@ -18,6 +18,7 @@ links are verified with ``cryptography``; recovery alone proves nothing.
 
 from __future__ import annotations
 
+import http.client
 import json
 import struct
 import urllib.request
@@ -171,7 +172,10 @@ def _rpc(url: str, method: str, params: list):
     request = urllib.request.Request(url, headers={"content-type": "application/json"}, data=json.dumps(
         {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode("ascii"))
     with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read(1 << 20))["result"]
+        reply = json.loads(response.read(1 << 20))
+    if "error" in reply:  # includes a contract call that reverted
+        raise ChainError("rpc_error")
+    return reply["result"]
 
 
 def _call(url: str, contract: bytes, signature: str, argument: bytes = b"") -> bytes:
@@ -204,10 +208,20 @@ def on_chain(*, rpc_url: str, chain: str, kms_contract_hex: str, app_id_hex: str
             raise ChainError("kms_root_mismatch")
         if _call(rpc_url, kms, "registeredApps(address)", app.rjust(32, b"\0")) != _TRUE:
             raise ChainError("app_not_registered")
+        # allowedComposeHashes holds epoch 0 only. Once an owner advances the
+        # app's epoch, approvals live elsewhere and epoch-0 keys are retired,
+        # so this check refuses rather than read the wrong list. A KMS from
+        # before epochs has no currentAppEpoch and is epoch 0.
+        try:
+            epoch = _call(rpc_url, kms, "currentAppEpoch(address)", app.rjust(32, b"\0"))
+        except ChainError:
+            epoch = bytes(32)
+        if epoch != bytes(32):
+            raise ChainError("app_epoch_unsupported")
         if _call(rpc_url, app, "allowedComposeHashes(bytes32)", compose_hash) != _TRUE:
             raise ChainError("compose_hash_not_approved")
         owner = _call(rpc_url, app, "owner()")
-    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, http.client.HTTPException) as error:
         if isinstance(error, ChainError):
             raise
         raise ChainError("chain_unreadable") from None

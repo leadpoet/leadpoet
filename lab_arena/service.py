@@ -1871,6 +1871,8 @@ class ArenaService:
             if unready_reason is None and not defaults.flat_per_icp_cost_policy:
                 unready_reason = "flat_policy_required"
             if unready_reason is None:
+                if baseline_first and document["rewards_enabled"]:
+                    document["dispatch_window_policy"] = "late_predecessor_v1"
                 document["reasoning_capture_policy"] = reasoning_capture.POLICY
                 document[training_coverage.SETTING] = defaults.training_minimum_icp_coverage_percent
                 document[training_coverage.MISSING_REASONING_SETTING] = defaults.training_maximum_missing_reasoning_percent
@@ -9623,6 +9625,8 @@ class ArenaService:
 
         cutoff = (configuration.get("schedule") or {}).get("submission_cutoff")
         return {
+            **({"dispatch_window_policy": configuration["dispatch_window_policy"]}
+               if "dispatch_window_policy" in configuration else {}),
             "max_replacement_attempts": 1,
             "benchmark_icp_count": contracts.benchmark_icp_count(configuration),
             "promotion_margin": contracts.promotion_margin(configuration),

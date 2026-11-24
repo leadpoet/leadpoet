@@ -58,20 +58,16 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from . import envelope as env
-from .envelope import canonical
+# The wire contract the vault shares with cli, trust and the gateway.
+from .envelope import (CALLER_HEADER, CHECK_TIMEOUT_SECONDS, ENCRYPTION_DOMAIN, HOSTS, IDENTITY_SCHEMA,  # noqa: F401
+                       KEY_ALGORITHM, RECEIPT_SCHEMA, RECEIPTS_DOMAIN, TLS_SCHEMA, canonical, spki_sha256)
 
-ENCRYPTION_DOMAIN = "leadpoet/lead-order-vault/encryption/v1"
-RECEIPTS_DOMAIN = "leadpoet/lead-order-vault/receipts/v1"
-KEY_ALGORITHM = "secp256k1"
-RECEIPT_SCHEMA = "leadpoet.lead_order_vault.receipt.v1"
-TLS_SCHEMA = "leadpoet.lead_order_vault.tls.v1"
 # Handshake, headers and body together; a per-read timeout alone would let a
 # client that sends one byte at a time hold a connection slot forever.
 REQUEST_READ_SECONDS = 10.0
 REFUSED_BODY_DISCARD = 65536
 MAX_REQUEST_HEAD = 32 * 1024  # request line and headers; http.server alone allows about 6.4 MB
 
-HOSTS = {"openrouter.ai": "openrouter", "code.deepline.com": "deepline"}
 # Request shapes a miner's key may take. Anything else, such as billing
 # top-ups, plays, monitors or key management, is refused.
 OPENROUTER_ROUTES = frozenset({
@@ -95,8 +91,6 @@ MAX_REQUEST_BODY = 2 * 1024 * 1024  # vault request JSON; carries a <=1 MiB prov
 MAX_PROVIDER_BODY = 1024 * 1024
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_TIMEOUT_SECONDS = 300.0
-CHECK_TIMEOUT_SECONDS = 15.0
-CALLER_HEADER = "x-lead-order-vault-token"
 MIN_CALLER_TOKEN = 32
 
 OPENROUTER_CURRENT_KEY_URL = "https://openrouter.ai/api/v1/key"
@@ -148,6 +142,8 @@ def echoes(secret: str, data: bytes) -> bool:
     key = secret.encode("utf-8")
     if key in data or key in unquote_to_bytes(data):
         return True
+    if b"\\" not in data:  # without an escape, JSON decoding changes nothing
+        return False
     for document in [data] + [line[5:] for line in data.splitlines() if line.startswith(b"data:")]:
         try:
             # Pairs, not a dict: a duplicate member is still seen.
@@ -160,7 +156,7 @@ def echoes(secret: str, data: bytes) -> bool:
             value = pending.pop()
             if isinstance(value, str):
                 text = value.encode("utf-8", errors="surrogatepass")
-                if key in text or key in unquote_to_bytes(text):
+                if key in text or (b"%" in text and key in unquote_to_bytes(text)):
                     return True
             elif isinstance(value, (list, tuple)):
                 pending.extend(value)
@@ -241,7 +237,7 @@ class Vault:
         self._clock = clock
         self.boot_id = str(uuid.uuid4())
         self.receipts_public_key = env.compressed(receipts_key.public_key()).hex()
-        self._identity = dict(identity, schema="leadpoet.lead_order_vault.identity.v1",
+        self._identity = dict(identity, schema=IDENTITY_SCHEMA,
                               boot_id=self.boot_id, booted_at=int(clock()))
         # Binds this boot's TLS key to the KMS-issued receipts key.
         self._identity["tls"] = self._signed({"schema": TLS_SCHEMA, "boot_id": self.boot_id,
@@ -641,14 +637,6 @@ def _shutdown(connection: socket.socket) -> None:
         socket.socket.shutdown(connection, socket.SHUT_RDWR)
     except OSError:
         pass
-
-
-def spki_sha256(certificate_der: bytes) -> str:
-    """SHA-256 of a certificate's public key, which is what the identity signs."""
-
-    public_key = x509.load_der_x509_certificate(certificate_der).public_key()
-    return hashlib.sha256(public_key.public_bytes(serialization.Encoding.DER,
-                                                  serialization.PublicFormat.SubjectPublicKeyInfo)).hexdigest()
 
 
 def tls_server_context() -> Tuple[ssl.SSLContext, str]:

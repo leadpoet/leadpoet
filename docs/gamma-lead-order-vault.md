@@ -98,7 +98,10 @@ something is wrong. All commands refuse until the vault is deployed.
    `docker-compose.yml` pinned to that digest with `release.json` (commit,
    image, commit time used as the build time, BuildKit image).
 2. Update the Phala Cloud app with that compose file. Phala shows its
-   compose hash.
+   compose hash. On stop, the vault refuses new connections and lets calls
+   in flight finish, up to the compose file's 330 s grace period. Check
+   once, on the first update, that Phala waits for it: no receipt gap
+   should appear around the restart.
 3. The app owner approves the hash with `addComposeHash` on the app's
    contract on Base. This is the one step that grants a build the keys, so
    it stays a signed, manual step.

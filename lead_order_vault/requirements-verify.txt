@@ -1,0 +1,5 @@
+# What `cli` needs on Linux x86_64 with CPython 3.12, as the uptime check
+# runs it: the vault's own pins plus pycryptodome for keccak in chain.py.
+# The vault image installs requirements.txt only.
+-r requirements.txt
+pycryptodome==4.4.0 --hash=sha256:32c1a3d98c93d92c2f2a45d6cc9c79fb8d7552aca1bd9a764209a3309bf6a7b1

@@ -1,6 +1,7 @@
 # The compose file Phala hashes. Its hash must be approved on the app's
 # on-chain contract before the KMS releases the vault's keys to it.
-# The image is pinned by digest; PR C fills it in from the reproducible build.
+# The image is pinned by digest. The release workflow writes the pinned copy
+# to its artifact; this file keeps a placeholder digest.
 services:
   vault:
     image: ghcr.io/leadpoet/lead-order-vault@sha256:0000000000000000000000000000000000000000000000000000000000000000

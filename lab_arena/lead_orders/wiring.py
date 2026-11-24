@@ -27,7 +27,7 @@ from lab_arena.lead_orders.policy import load_policy
 from lab_arena.lead_orders.service import LeadOrderService
 from lab_arena.lead_orders.store import LeadOrderStore
 from lab_arena.lead_orders.vault_client import VaultClient, VaultTransport
-from lead_order_vault import cli as vault_cli
+from lead_order_vault import trust as vault_trust
 from lab_arena.store import PostgrestTransport
 
 PRICE_TABLE_TTL_SECONDS = 3600
@@ -91,8 +91,8 @@ def build_from_environment(environ: Optional[Mapping[str, str]] = None):
     miner_transport = None
     if config.uses_miner_keys:
         try:
-            deployment = vault_cli.load_deployment()
-        except vault_cli.CliError as error:
+            deployment = vault_trust.load_deployment()
+        except vault_trust.TrustError as error:
             raise LeadOrdersUnavailable(str(error)) from None
         vault = VaultClient(deployment, _required("LEAD_ORDER_VAULT_CALLER_TOKEN", env))
         registrar = lead_keys.MinerKeyRegistrar(vault)

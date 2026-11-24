@@ -10,7 +10,7 @@ import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, utils
 
-from lead_order_vault import chain, cli
+from lead_order_vault import chain, cli, trust
 from lead_order_vault import envelope as env
 from lead_order_vault.vault import (
     ENCRYPTION_DOMAIN, RECEIPTS_DOMAIN, UpstreamError, UpstreamResponse, Vault, VaultError, canonical,
@@ -160,7 +160,7 @@ def _identity(**changes):
 
 
 def test_cli_accepts_keys_the_kms_issued_to_our_app():
-    assert cli.verified_identity(DEPLOYMENT, _identity())["encryption"]["public_key"] == VAULT_KEY
+    assert trust.verified_identity(DEPLOYMENT, _identity())["encryption"]["public_key"] == VAULT_KEY
 
 
 @pytest.mark.parametrize("changes,message", [
@@ -169,8 +169,8 @@ def test_cli_accepts_keys_the_kms_issued_to_our_app():
 ])
 def test_cli_refuses_a_wrong_identity(changes, message):
     identity = _identity(**changes)
-    with pytest.raises(cli.CliError, match=message):
-        cli.verified_identity(DEPLOYMENT, identity)
+    with pytest.raises(trust.TrustError, match=message):
+        trust.verified_identity(DEPLOYMENT, identity)
 
 
 @pytest.mark.parametrize("issued", [
@@ -181,16 +181,16 @@ def test_cli_refuses_a_wrong_identity(changes, message):
 ])
 def test_cli_refuses_a_key_the_kms_did_not_issue_to_our_app(issued):
     key = dict(issued(), domain=ENCRYPTION_DOMAIN)
-    with pytest.raises(cli.CliError, match="does not chain"):
-        cli.verified_identity(DEPLOYMENT, _identity(encryption=key))
+    with pytest.raises(trust.TrustError, match="does not chain"):
+        trust.verified_identity(DEPLOYMENT, _identity(encryption=key))
 
 
 def test_cli_refuses_until_deployed(tmp_path):
     path = tmp_path / "deployment.json"
     path.write_text(json.dumps(dict(DEPLOYMENT, url=None)))
-    with pytest.raises(cli.CliError, match="not deployed"):
-        cli.load_deployment(path)
-    assert json.loads(cli.DEPLOYMENT_FILE.read_text())["url"] is None
+    with pytest.raises(trust.TrustError, match="not deployed"):
+        trust.load_deployment(path)
+    assert json.loads(trust.DEPLOYMENT_FILE.read_text())["url"] is None
 
 
 def test_cli_seals_both_openrouter_keys_to_the_verified_vault():
@@ -565,8 +565,8 @@ def test_re_verifying_leaves_requests_in_flight_alone(served_vault, monkeypatch)
 
     deployment, _ = served_vault
     verified = []
-    real_connect = vault_client.vault_cli.connect
-    monkeypatch.setattr(vault_client.vault_cli, "connect", lambda d: verified.append(1) or real_connect(d))
+    real_connect = vault_client.trust.connect
+    monkeypatch.setattr(vault_client.trust, "connect", lambda d: verified.append(1) or real_connect(d))
     client = VaultClient(deployment, TOKEN)
     first = client._pinned()
     # Two threads saw the same connect failure: one re-verifies, the other reuses its result.
@@ -675,22 +675,15 @@ def test_pre_failure_headers_that_echo_the_key_are_dropped():
     assert vault.call(_call())["observed_headers"] == []
 
 
-def test_only_the_vaults_own_refusals_prove_nothing_was_sent():
+def test_a_vault_fault_leaves_it_unknown_whether_the_call_was_sent():
     import httpx
 
-    from lab_arena.lead_orders.vault_client import VaultClient, VaultTransport, VaultTransportError
+    from lab_arena.lead_orders.vault_client import VaultClient, VaultUnavailable
 
-    def answer(status, document):
-        handler = lambda request: httpx.Response(status, json=document)
-        return VaultTransport(VaultClient(DEPLOYMENT, TOKEN,
-                                          client=httpx.Client(transport=httpx.MockTransport(handler))))
-
-    cases = [(400, {"error": "path_not_allowed"}, False), (408, {"error": "timeout"}, None),
-             (504, {"message": "gateway timeout"}, None), (500, {"error": "vault_error"}, None)]
-    for status, document, forwarded in cases:
-        with pytest.raises(VaultTransportError) as raised:
-            _send(answer(status, document))
-        assert raised.value.forwarded is forwarded, (status, document)
+    for status, document in ((500, {"error": "vault_error"}), (503, {"error": "check_unavailable"}), (200, [])):
+        with pytest.raises(VaultUnavailable) as raised:
+            VaultClient._document(httpx.Response(status, json=document))
+        assert raised.value.forwarded is None, status
 
 
 def test_a_withheld_answer_keeps_the_generation_id():
@@ -744,9 +737,9 @@ def test_the_cli_trusts_only_a_tls_session_the_vault_ends_itself():
     vault, tls = _tls_vault()
     server, spki, deployment = _tls_server(vault.identity, tls)
     try:
-        identity, certificate = cli.connect(deployment)
+        identity, certificate = trust.connect(deployment)
         assert identity["tls"]["document"]["spki_sha256"] == spki
-        context = cli.pinned_context(certificate)
+        context = trust.tls_context(certificate)
         with urllib.request.urlopen(deployment["url"] + "/v1/identity", context=context) as response:
             assert json.loads(response.read())["boot_id"] == vault.boot_id
         # After a restart the vault has a new TLS key: the old pin fails closed.
@@ -767,8 +760,8 @@ def test_a_gateway_that_ends_tls_itself_is_refused():
     # The gateway relays the vault's real, KMS-signed identity over its own TLS key.
     gateway, _, deployment = _tls_server(vault.identity)
     try:
-        with pytest.raises(cli.CliError, match="does not end in the vault"):
-            cli.connect(deployment)
+        with pytest.raises(trust.TrustError, match="does not end in the vault"):
+            trust.connect(deployment)
     finally:
         gateway.shutdown()
         gateway.server_close()
@@ -787,8 +780,8 @@ def test_a_gateway_cannot_rebind_the_tls_key_without_the_receipts_key():
 
     gateway, _, deployment = _tls_server(forged, (context, spki))
     try:
-        with pytest.raises(cli.CliError, match="not signed by its receipts key"):
-            cli.connect(deployment)
+        with pytest.raises(trust.TrustError, match="not signed by the vault.s receipts key"):
+            trust.connect(deployment)
     finally:
         gateway.shutdown()
         gateway.server_close()

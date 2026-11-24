@@ -118,6 +118,9 @@ class MinerKeyRegistrar:
         expected = {"envelope", "management_envelope"} if provider == "openrouter" else {"envelope"}
         if not isinstance(credentials, Mapping) or set(credentials) != expected:
             raise LeadOrderKeyError("credentials_invalid")
+        # The vault checks these headers again. Reading them here first means
+        # an envelope that is not this miner's never makes the vault probe a
+        # provider.
         for name, purpose in (("envelope", "runtime"), ("management_envelope", "management")):
             if name not in expected:
                 continue
@@ -142,6 +145,8 @@ class MinerKeyRegistrar:
                 or not isinstance(fingerprint, str) or not _FINGERPRINT_RE.fullmatch(fingerprint):
             raise LeadOrderKeyError("vault_answer_invalid", retryable=True)
         key_id = self._new_key_id()
+        # The column names predate the vault: ``ciphertext_b64`` holds the
+        # envelope, and ``submission_id`` only scopes the key id.
         return {
             "key_id": key_id,
             "provider": provider,

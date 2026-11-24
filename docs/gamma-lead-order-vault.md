@@ -53,7 +53,8 @@ Each forwarded call returns a receipt signed by the vault's receipts key. It
 carries the boot id, the key fingerprint, the miner hotkey, host and path,
 SHA-256 of the target, headers and bodies, and a per-key sequence number.
 A miner checks the sequence numbers in the receipts Leadpoet reports: a gap
-is a call Leadpoet did not report. Check receipts against the receipts key
+is a call Leadpoet did not report, or one of the rarer cases under Known
+limits. Check receipts against the receipts key
 from `cli verify`, never against the `public_key` a receipt carries.
 
 ## Who you are trusting
@@ -65,6 +66,7 @@ trust point. Approvals are public on Base, but Phala has no timelock.
 ## Miner steps
 
 ```bash
+pip install cryptography pycryptodome
 python -m lead_order_vault.cli verify
 python -m lead_order_vault.cli seal --provider openrouter --hotkey <your hotkey>
 python -m lead_order_vault.cli receipts page1.json page2.json
@@ -79,11 +81,15 @@ something is wrong. All commands refuse until the vault is deployed.
 
 ## Known limits
 
+- A vault fault after a call is numbered, before its receipt is signed,
+  also leaves a gap. So does a receipt Leadpoet failed to store; the
+  gateway logs each one.
 - Sequence numbers restart with the vault. A hidden call just before a
   restart, or after a key's last reported call, leaves no gap.
 - If Phala rotates its KMS root, miners must seal their keys again, with a
   new provider key: a key is registered once, and a revoked key cannot
-  return.
+  return. Keys registered before the vault have an older fingerprint, so
+  a key revoked then can be registered again once.
 - A second vault instance of the same app numbers calls under its own boot
   id. Hidden calls made only there leave no gap. Only the app's owner can
   start one.

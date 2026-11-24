@@ -205,16 +205,22 @@ def rank_keys(
     return ranked
 
 
+def json_document(body: bytes) -> Any:
+    """A provider's JSON body, or None when it is not JSON. A deeply nested
+    body raises RecursionError, not ValueError, and must not skip settling."""
+
+    try:
+        return json.loads(bytes(body).decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return None
+
+
 def failover_reason(provider: str, response: "arena_broker.ProviderResponse") -> Optional[str]:
     """Why the broker must move to the next key for the rest of the order."""
 
     status = int(response.status)
     if status == 402:
-        document: Any = None
-        try:
-            document = json.loads(bytes(response.body).decode("utf-8"))
-        except (UnicodeDecodeError, ValueError, RecursionError):
-            document = None
+        document = json_document(response.body)
         spent = (
             arena_broker._openrouter_account_credit_response(response)
             if provider == "openrouter"
@@ -243,6 +249,7 @@ __all__ = [
     "ProviderKey",
     "credential_fingerprint",
     "failover_reason",
+    "json_document",
     "leadpoet_keys",
     "rank_keys",
     "sealed_to",

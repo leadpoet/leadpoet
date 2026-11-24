@@ -58,8 +58,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from . import envelope as env
-# The wire contract the vault shares with cli, trust and the gateway.
-from .envelope import (CALLER_HEADER, CHECK_TIMEOUT_SECONDS, ENCRYPTION_DOMAIN, HOSTS, IDENTITY_SCHEMA,  # noqa: F401
+from .envelope import (CALLER_HEADER, CHECK_TIMEOUT_SECONDS, ENCRYPTION_DOMAIN, HOSTS, IDENTITY_SCHEMA,
                        KEY_ALGORITHM, RECEIPT_SCHEMA, RECEIPTS_DOMAIN, TLS_SCHEMA, canonical, spki_sha256)
 
 # Handshake, headers and body together; a per-read timeout alone would let a
@@ -86,6 +85,12 @@ DROPPED_HEADERS = frozenset({
     # Bodies pass through unchanged and http.client does not decompress, so
     # ask the provider for plain bytes.
     "accept-encoding",
+})
+# The only request headers sent on. Anything else the gateway adds, such as a
+# method or URL override a provider's front might honor, is dropped.
+FORWARDED_HEADERS = frozenset({
+    "authorization", "accept", "content-type", "user-agent",
+    "x-deepline-execute-response-contract", "x-deepline-execute-response-intent", "x-deepline-tool-error-schema",
 })
 MAX_REQUEST_BODY = 2 * 1024 * 1024  # vault request JSON; carries a <=1 MiB provider body
 MAX_PROVIDER_BODY = 1024 * 1024
@@ -445,7 +450,7 @@ def _parse_call(request: Mapping):
         lowered = name.lower()
         if lowered in headers:
             raise VaultError("headers_invalid")
-        if lowered not in DROPPED_HEADERS:
+        if lowered in FORWARDED_HEADERS:
             headers[lowered] = value
     body_b64 = request.get("body_b64")
     if body_b64 is None:
@@ -515,7 +520,7 @@ def make_handler(vault: Vault):
 
         def do_POST(self) -> None:
             routes = {"/v1/call": vault.call, "/v1/check": vault.check}
-            route = routes.get(self.path)
+            route = routes.get(urlsplit(self.path).path)
             if route is None:
                 self._handle(_not_found)
                 return

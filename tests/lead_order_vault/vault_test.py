@@ -346,13 +346,14 @@ def test_a_plain_key_is_refused():
         _vault().call(request)
 
 
-def test_caller_headers_cannot_smuggle_a_host_or_second_credential():
+def test_only_allowed_headers_reach_the_provider():
     provider = FakeProvider()
     request = _call()
-    request["headers"].update({"Host": "evil.example", "Cookie": "a=b", "Accept-Encoding": "gzip"})
+    request["headers"].update({"Host": "evil.example", "Cookie": "a=b", "Accept-Encoding": "gzip",
+                               "X-HTTP-Method-Override": "DELETE", "X-Original-URL": "/api/v1/keys",
+                               "Accept": "application/json"})
     _vault(provider).call(request)
-    sent = provider.requests[0]["headers"]
-    assert "host" not in sent and "cookie" not in sent and "accept-encoding" not in sent
+    assert set(provider.requests[0]["headers"]) == {"authorization", "content-type", "accept"}
     request["headers"]["Authorization"] = "Bearer x"
     with pytest.raises(VaultError, match="headers_invalid"):
         _vault(provider).call(request)
@@ -722,9 +723,13 @@ def test_every_request_the_broker_sends_fits_the_vault():
 
     assert _route_allowed("openrouter", "POST", "/" + broker.OPENROUTER_CHAT_PATH, "")
     assert _route_allowed("openrouter", "POST", "/" + broker.OPENROUTER_DECISIONS_PATH, "")
-    assert _route_allowed("openrouter", "GET", "/api/v1/generation", "id=gen-1")
-    from urllib.parse import quote
-    assert _route_allowed("openrouter", "GET", "/api/v1/generation", "id=" + quote("gen-1.a:b", safe=""))
+    from urllib.parse import quote, urlsplit
+    from lab_arena.broker import OPENROUTER_GENERATION_URL
+    for generation in ("gen-1", "gen-1.a:b"):
+        readback = urlsplit(OPENROUTER_GENERATION_URL + quote(generation, safe=""))
+        assert _route_allowed("openrouter", "GET", readback.path, readback.query)
+    from lead_order_vault.vault import FORWARDED_HEADERS
+    assert set(broker.DEEPLINE_FORWARDED_HEADERS) <= FORWARDED_HEADERS
     for tool in broker.DEEPLINE_OPERATIONS:
         assert _route_allowed("deepline", "POST", "/api/v2/integrations/%s/execute" % tool, "")
 

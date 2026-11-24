@@ -74,7 +74,15 @@ BEGIN
  INSERT INTO public.lead_order_vault_receipts(key_fingerprint,boot_id,key_sequence,call_id,kind,miner_hotkey,receipt)
  VALUES(doc->>'key_fingerprint',doc->>'boot_id',(doc->>'key_sequence')::BIGINT,p_call_id,p_kind,hotkey,p_receipt)
  ON CONFLICT DO NOTHING;
- RETURN jsonb_build_object('status',CASE WHEN FOUND THEN 'recorded' ELSE 'exists' END);
+ IF FOUND THEN
+  RETURN jsonb_build_object('status','recorded');
+ END IF;
+ -- A replay of the same receipt for the same call; any other conflict is a
+ -- receipt this table did not keep, which the broker logs.
+ RETURN jsonb_build_object('status',CASE WHEN EXISTS(SELECT 1 FROM public.lead_order_vault_receipts r
+   WHERE r.key_fingerprint=doc->>'key_fingerprint' AND r.boot_id=doc->>'boot_id'
+     AND r.key_sequence=(doc->>'key_sequence')::BIGINT AND r.call_id=p_call_id AND r.kind=p_kind
+     AND r.receipt=p_receipt) THEN 'exists' ELSE 'not_recordable' END);
 END;
 $record731$;
 

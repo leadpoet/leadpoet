@@ -83,6 +83,15 @@ LAB_ARENA_RESTART_GUARD_GENERATION="${LAB_ARENA_RESTART_GUARD_GENERATION:-}"
 LAB_ARENA_RESTART_DRAIN_PID=""
 LAB_ARENA_RESTART_DRAIN_REPORT=""
 LAB_ARENA_RESTART_DRAIN_PRIOR_JOBS=""
+LAB_ARENA_RESTART_RENEWAL_PID=""
+LAB_ARENA_RESTART_RENEWAL_ROOT=""
+# Well under the shortest supported guard lease, matching the paired
+# coordinator so one renewal failure is never one expired lease.
+LAB_ARENA_RESTART_RENEWAL_INTERVAL_SECONDS="${LAB_ARENA_RESTART_RENEWAL_INTERVAL_SECONDS:-30}"
+# A SIGKILLed controller cannot run its traps, so the renewal also stops on
+# its own: no legitimate gateway restart outlives this window, and past it an
+# orphaned renewal would be exactly the abandoned guard the lease exists to end.
+LAB_ARENA_RESTART_RENEWAL_MAX_SECONDS="${LAB_ARENA_RESTART_RENEWAL_MAX_SECONDS:-14400}"
 if [ -n "$GATEWAY_RESTART_AUTHORITY_ROOT" ]; then
   if ! [[ "$GATEWAY_RESTART_AUTHORITY_ROOT" =~ ^/tmp/gateway-restart-controller-bootstrap\.[A-Za-z0-9]+/authority$ ]] \
       || ! [[ "$GATEWAY_RESTART_AUTHORITY_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
@@ -1087,6 +1096,121 @@ drain_lab_arena_for_restart() {
   echo "Lab Arena claims paused and existing leases have durable completion receipts"
 }
 
+renew_lab_arena_restart_guard_once() {
+  local source_root="$1" state
+  state="$(run_lab_arena_restart_guard "$source_root" drain \
+    --scope "$GATEWAY_RESTART_GUARD_SCOPE" --timeout-seconds 30 \
+    --generation "$LAB_ARENA_RESTART_GUARD_GENERATION")" || return 1
+  # Renewal may only extend the exact guard this restart already owns. A
+  # changed generation or scope means the Arena is owned by someone else now;
+  # stop rather than let the helper acquire a fresh guard behind the restart.
+  "$GATEWAY_PYTHON_BIN" -B - "$state" "$LAB_ARENA_RESTART_GUARD_GENERATION" \
+      "$GATEWAY_RESTART_GUARD_SCOPE" <<'RENEWAL_GUARD' || return 2
+import json
+import sys
+state = json.loads(sys.argv[1])
+if (state.get("schema_version") != "leadpoet.lab_arena.restart_quiescence.v1"
+        or state.get("guard_active") is not True
+        or state.get("guard_generation") != int(sys.argv[2])
+        or state.get("restart_scope") != sys.argv[3]
+        or state.get("restart_phase") not in {
+            "gateway": ("gateway_destructive", "gateway_ready"),
+            "validator": ("validator_destructive", "validator_ready"),
+            "all": ("gateway_destructive", "gateway_ready",
+                    "validator_destructive", "validator_ready"),
+        }[sys.argv[3]]
+        or state.get("preserved") is not True):
+    raise SystemExit("Arena restart guard changed during renewal")
+RENEWAL_GUARD
+}
+
+start_lab_arena_restart_renewal() {
+  # The drain renews the guard lease only while it is running. Everything
+  # after it -- shutdown, activation, enclave builds, service start -- can
+  # outlast one lease, and an expired lease fails the later phase checks and
+  # strands the guard, which keeps paid review off until a later restart.
+  # Keep renewing the owned guard from here until the release.
+  local source_root="$1"
+  if [ "$GATEWAY_PAIRED_RESTART" = 1 ]; then
+    # The paired coordinator owns and renews the all-component guard.
+    return 0
+  fi
+  if [ -n "$LAB_ARENA_RESTART_RENEWAL_PID" ]; then
+    return 0
+  fi
+  if ! [[ "$LAB_ARENA_RESTART_GUARD_GENERATION" =~ ^[1-9][0-9]{0,18}$ ]]; then
+    echo "ERROR: Lab Arena guard generation is unavailable for lease renewal" >&2
+    return 1
+  fi
+  # The preflight tree is removed at shutdown and the canonical checkout is
+  # rewritten during activation, so neither survives the whole restart. Keep a
+  # private copy of the exact candidate helper, proved byte-identical to the
+  # tree it came from; it is stdlib-only and imports nothing from either tree.
+  local renewal_root helper="$source_root/scripts/lab_arena_restart_claim_guard.py"
+  if [ ! -r "$helper" ] || [ -L "$helper" ]; then
+    echo "ERROR: exact Lab Arena restart guard helper is unavailable for renewal" >&2
+    return 1
+  fi
+  renewal_root="$(mktemp -d /tmp/arena-guard-renewal.XXXXXX)" || return 1
+  LAB_ARENA_RESTART_RENEWAL_ROOT="$renewal_root"
+  if ! { mkdir -m 700 "$renewal_root/scripts" \
+      && cp -- "$helper" "$renewal_root/scripts/lab_arena_restart_claim_guard.py" \
+      && cmp -s -- "$helper" "$renewal_root/scripts/lab_arena_restart_claim_guard.py"; }; then
+    echo "ERROR: Lab Arena restart guard helper could not be staged for renewal" >&2
+    rm -rf -- "$renewal_root"
+    LAB_ARENA_RESTART_RENEWAL_ROOT=""
+    return 1
+  fi
+  (
+    # Only this exact owner may renew. A failed call is transient and is
+    # retried on the next tick; a guard that is no longer ours ends the loop
+    # without aborting or releasing anything the restart still depends on.
+    local_status=0
+    renewal_deadline=$(( $(date +%s) + LAB_ARENA_RESTART_RENEWAL_MAX_SECONDS ))
+    while sleep "$LAB_ARENA_RESTART_RENEWAL_INTERVAL_SECONDS"; do
+      if ! kill -0 "$$" 2>/dev/null; then
+        echo "ERROR: restart controller is gone; Lab Arena lease renewal stopped" >&2
+        break
+      fi
+      if [ "$(date +%s)" -ge "$renewal_deadline" ]; then
+        echo "ERROR: restart exceeded its guard renewal window; lease renewal stopped" >&2
+        break
+      fi
+      local_status=0
+      renew_lab_arena_restart_guard_once "$renewal_root" || local_status="$?"
+      if [ "$local_status" = 0 ]; then
+        continue
+      fi
+      if [ "$local_status" = 2 ]; then
+        echo "ERROR: Lab Arena restart guard changed; lease renewal stopped" >&2
+        break
+      fi
+      echo "WARNING: Lab Arena restart guard lease renewal failed; retrying" >&2
+    done
+  ) &
+  LAB_ARENA_RESTART_RENEWAL_PID=$!
+  echo "Lab Arena restart guard lease renewal started"
+}
+
+stop_lab_arena_restart_renewal() {
+  local renewal_pid="$LAB_ARENA_RESTART_RENEWAL_PID" running_pid
+  LAB_ARENA_RESTART_RENEWAL_PID=""
+  if [ -z "$renewal_pid" ]; then
+    return 0
+  fi
+  while read -r running_pid; do
+    if [ "$running_pid" = "$renewal_pid" ]; then
+      kill -s TERM "$renewal_pid" 2>/dev/null || true
+      break
+    fi
+  done < <(jobs -pr)
+  wait "$renewal_pid" 2>/dev/null || true
+  if [ -n "$LAB_ARENA_RESTART_RENEWAL_ROOT" ]; then
+    rm -rf -- "$LAB_ARENA_RESTART_RENEWAL_ROOT"
+    LAB_ARENA_RESTART_RENEWAL_ROOT=""
+  fi
+}
+
 # The N-1 controller can carry a stale process environment across the exact
 # candidate exec.  Once a timing ledger exists, its validated basename is the
 # per-invocation authority shared by both controller generations.
@@ -1899,6 +2023,7 @@ on_gateway_restart_exit() {
   fi
   emit_gateway_restart_sentry_summary "$status"
   cancel_gateway_offline_artifact_prepare
+  stop_lab_arena_restart_renewal
   if [ -n "$LAB_ARENA_RESTART_DRAIN_REPORT" ]; then
     rm -f -- "$LAB_ARENA_RESTART_DRAIN_REPORT"
   fi
@@ -1922,6 +2047,7 @@ trap on_gateway_restart_exit EXIT
 on_gateway_restart_signal() {
   local status="$1" running_pid drain_pid="$LAB_ARENA_RESTART_DRAIN_PID"
   trap '' HUP INT TERM
+  stop_lab_arena_restart_renewal
   if [ -z "$drain_pid" ] && [ -n "$LAB_ARENA_RESTART_DRAIN_REPORT" ]; then
     # A signal can arrive after launch but before the parent records $!.
     while read -r running_pid; do
@@ -3376,6 +3502,13 @@ if ! run_lab_arena_restart_guard "$GATEWAY_PREFLIGHT_TREE" authorize \
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 1
 fi
+# The destructive phase is authorized, so the guard can no longer be aborted
+# by its own helper. Hold the lease across shutdown, activation, the enclave
+# builds and service start, right up to the release below.
+if ! start_lab_arena_restart_renewal "$GATEWAY_PREFLIGHT_TREE"; then
+  echo "ERROR: Lab Arena restart guard lease renewal could not be started" >&2
+  exit 1
+fi
 if [ "$ARENA_CONTINUITY_ENABLED" = 1 ]; then
   # The provider gate is process-local. Keep the old API serving until the
   # durable claim drain and guard authorize prove no active paid lease work.
@@ -3958,6 +4091,10 @@ if [ "$ARENA_CONTINUITY_ENABLED" = 1 ]; then
   timeout 15 curl -fsS --resolve gateway.subnet71.com:443:127.0.0.1 \
     https://gateway.subnet71.com/build-info >/dev/null
 fi
+# The restart no longer needs the lease it has been holding: the release
+# below ends the guard outright, and a renewal racing it could only extend
+# a guard that is about to be cleared.
+stop_lab_arena_restart_renewal
 GATEWAY_DEPLOY_STAGE="lab_arena_claim_guard_release"
 export GATEWAY_DEPLOY_STAGE
 if [ "$GATEWAY_PAIRED_RESTART" = 1 ]; then

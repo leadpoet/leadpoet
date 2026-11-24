@@ -14,6 +14,7 @@ buyer, so no live order can be placed until a real mailer is wired in.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import secrets
 import time
@@ -662,7 +663,10 @@ class LeadOrderService:
         self.repay_uncertain()
         try:
             valuation = self._emission_price.valuation(epoch)
-        except rewards.EmissionPriceUnavailable:
+        except rewards.EmissionPriceUnavailable as exc:
+            # Say why, so a lasting fault cannot stop payouts unnoticed.
+            logging.getLogger(__name__).warning(
+                "lead order epoch %s has no emission price: %s (%r)", epoch, exc, exc.__cause__)
             if self.config.weights_rewards:
                 return None  # live: no payout, Arena weights unchanged
             valuation = None

@@ -127,8 +127,9 @@ and receipt always use that stored version, never the current one.
   carries forward in USD and converts to alpha at the paying epoch's price.
   Late rewards join the same queue by the epoch they were recorded in.
 - The epoch's miner emission is valued once, when the payout starts (Gavin,
-  Nov 23 2026: one read, no averaging): the alpha emitted to miners at the
-  epoch's first block, times the chain's alpha price in TAO at that block
+  Nov 23 2026: one read, no averaging): the alpha the chain handed to miners
+  at the epoch's first block (the distribution for the tempo that just ended,
+  used as the size of an epoch's emission), times the chain's alpha price in TAO at that block
   (`SwapRuntimeApi.current_alpha_price`), times one TAO/USD quote from
   CoinGecko no older than 15 minutes. It is the same valuation the collection
   lane uses (`lab_arena.collection_rewards.emission_valuation`). The payout

@@ -127,7 +127,10 @@ To check a release yourself, check out the commit in `release.json` and run
 `bash .github/scripts/lead_order_vault_build.sh` from the repository root
 (Docker with buildx). It prints the digest, which must match the image in
 the compose file. Then compare the compose file's hash with the one
-`cli verify` prints, which Base approved.
+`cli verify` prints, which Base approved. The vault reports that hash
+itself, so it only shows the hash is approved, not that it is the only
+one. Also check the app contract's `ComposeHashAdded` events on Basescan:
+every approved hash should be one you can rebuild.
 
 ## Known limits
 

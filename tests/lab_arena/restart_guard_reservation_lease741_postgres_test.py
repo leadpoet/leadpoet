@@ -10,7 +10,7 @@ from tests.lab_arena.prospective_admission660_postgres_test import migration_sta
 from tests.lab_arena import review_infrastructure_hold701_postgres_test as hold
 from tests.postgres_migration_harness import SCRIPTS
 
-MIGRATION = SCRIPTS / '706-lab-arena-review-reservation-guard-lease.sql'
+MIGRATION = SCRIPTS / '741-lab-arena-review-reservation-guard-lease.sql'
 PRIOR = ('705-lab-arena-review-guard-lease-expiry.sql',)
 GATE = 'lab_arena_begin_submission_review_v2(text,text,text,bigint,text,integer,bigint,text)'
 PROBE = 'lab_arena_submission_replacement_schema_v1()'
@@ -70,7 +70,7 @@ def database():
                 # The defect: an abandoned guard whose lease lapsed an hour ago
                 # still refuses every paid reservation, so review never resumes.
                 set_guard(connection, lease_seconds=-3600)
-                assert reserve(store, 'lease706-before')['status'] == 'paused'
+                assert reserve(store, 'lease741-before')['status'] == 'paused'
                 before = migration_state_snapshot(connection)
                 with connection.cursor() as cursor:
                     cursor.execute(MIGRATION.read_text())
@@ -111,31 +111,31 @@ def context(database):
 def test_an_expired_guard_no_longer_withholds_paid_review(context):
     store, connection = context
     set_guard(connection, lease_seconds=-1)
-    assert reserve(store, 'lease706-expired')['status'] == 'claimed'
+    assert reserve(store, 'lease741-expired')['status'] == 'claimed'
 
 
 def test_a_live_guard_still_withholds_paid_review(context):
     store, connection = context
     set_guard(connection, lease_seconds=900)
-    assert reserve(store, 'lease706-live')['status'] == 'paused'
+    assert reserve(store, 'lease741-live')['status'] == 'paused'
 
 
 def test_no_guard_reserves_as_before(context):
     store, _ = context
-    assert reserve(store, 'lease706-none')['status'] == 'claimed'
+    assert reserve(store, 'lease741-none')['status'] == 'claimed'
 
 
 def test_an_expiring_guard_releases_review_without_a_restart(context):
     store, connection = context
     set_guard(connection, lease_seconds=900)
-    assert reserve(store, 'lease706-holds')['status'] == 'paused'
+    assert reserve(store, 'lease741-holds')['status'] == 'paused'
     # Nothing restarts and the commitment is still recorded; only time passes.
     set_guard(connection, lease_seconds=-1)
     with connection.cursor() as cursor:
         cursor.execute("SELECT guard_commitment FROM public.lab_arena_restart_claim_control"
                        " WHERE singleton")
         assert cursor.fetchone()[0] == COMMITMENT
-    assert reserve(store, 'lease706-resumes')['status'] == 'claimed'
+    assert reserve(store, 'lease741-resumes')['status'] == 'claimed'
 
 
 def test_readiness_probes_accept_the_rewritten_gate(context):

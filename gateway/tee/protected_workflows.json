@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "dab4e6472919e169373d304a353c4633bfef9b70",
+  "baseline_commit": "b5c09ef88e6f1bb06b9d0b8034de96c1e6e23422",
   "entries": [
     {
       "ast_sha256": "sha256:0322239466f9d95f17c77713b5ddd188d15318676bb4e0cbd6d2cacbd19c74ad",
@@ -522,7 +522,7 @@
       "symbol": "verify_roles"
     },
     {
-      "ast_sha256": "sha256:236468f37961e58ab7919b0090bfb9b15f0f3f17fe35955b05c73b4338b01753",
+      "ast_sha256": "sha256:4157832d53108a3e823ac4cb6a596dbe3f90c16da7205701fd4a760044dd18e0",
       "path": "lab_arena/collection_rewards.py",
       "symbol": "__module__"
     },
@@ -637,7 +637,7 @@
       "symbol": "ArenaService.public_reward_basis"
     },
     {
-      "ast_sha256": "sha256:680c00f5740bc6c40102de5e671b7a5c88f69804977e23cd568e9f3ec1680dba",
+      "ast_sha256": "sha256:7eb031d2bf9f6529b387479ce2af877df27e2253ef900a91522cd25cbe5b434f",
       "path": "lab_arena/service.py",
       "symbol": "ArenaService.public_weight_state"
     },
@@ -647,19 +647,39 @@
       "symbol": "COLLECTION_BASIS_SCHEMA"
     },
     {
+      "ast_sha256": "sha256:e4df8a09418a88f8f45d8aeac672b78e9edceea9a63679f9ce9dcba041840b96",
+      "path": "leadpoet_canonical/arena_weights.py",
+      "symbol": "COLLECTION_EMISSION_SHARE"
+    },
+    {
+      "ast_sha256": "sha256:0414a7771b059b64aeb516e7c036f595db96af45f7c5c5daea536f7774575824",
+      "path": "leadpoet_canonical/arena_weights.py",
+      "symbol": "LEAD_ORDER_EMISSION_SHARE"
+    },
+    {
+      "ast_sha256": "sha256:610eac145e4c470928722f3774a62acd015a39f93228272643be5c34df459052",
+      "path": "leadpoet_canonical/arena_weights.py",
+      "symbol": "_LEAD_ORDERS_FIELD"
+    },
+    {
       "ast_sha256": "sha256:ddb8df46c33deff556f0a16e538c39ce0e7b73ef00329ea32f615bee57b28c76",
       "path": "leadpoet_canonical/arena_weights.py",
       "symbol": "_collection_basis"
     },
     {
-      "ast_sha256": "sha256:f8f2b3836a9b6a92e4d1002055157ee0e4681b79f01456c8a393a96cbc2a66d5",
+      "ast_sha256": "sha256:25c81d6b0e66d2916e850e90bfcd2784c2359e2b7b539858c9f76c104fcfef6a",
       "path": "leadpoet_canonical/arena_weights.py",
       "symbol": "derive_arena_weights"
     },
     {
-      "ast_sha256": "sha256:13a4c67616273a403884a3e5f5f611b767747387a6fa554507328caf307255e9",
+      "ast_sha256": "sha256:37e0822e449e2d743e1f404cdd7c1a1af7e5d3103e850c95d6572e757d377e90",
       "path": "leadpoet_canonical/arena_weights.py",
       "symbol": "validate_collection_basis"
+    },
+    {
+      "ast_sha256": "sha256:58018ad891d0356e6bbc6669d86395eca8392481e025be30a3598ff53f2b5f7b",
+      "path": "leadpoet_canonical/arena_weights.py",
+      "symbol": "validate_lead_orders"
     },
     {
       "ast_sha256": "sha256:9b6065349bbca6a219f23da8083fb926105743d350b65cccef4fd0b000006c6b",
@@ -992,7 +1012,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:c40553766f1d577eea8bd9ee10d625a5b8fe23c288db13d12270e47f0b146f59",
-  "protected_source_commit": "dab4e6472919e169373d304a353c4633bfef9b70",
+  "manifest_hash": "sha256:24988abcadd82e863a7ff7385e8c02f2a5074c3c632ccee8e7c2f1307dad1b49",
+  "protected_source_commit": "b5c09ef88e6f1bb06b9d0b8034de96c1e6e23422",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

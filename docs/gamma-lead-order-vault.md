@@ -18,13 +18,18 @@ which swaps the envelope for the key.
 
 ## Fixed rules in the vault
 
-- Hosts `openrouter.ai` and `code.deepline.com` only, HTTPS on 443, no
-  redirects. A key works only on its own provider's host.
-- The key goes only into `authorization: Bearer`. Account, key, credit and
-  team paths are refused.
+- Only the requests the lead-order broker sends: OpenRouter chat completions,
+  the Decisions route and the free generation cost read-back; Deepline
+  `integrations/<tool>/execute` for the listed tools. HTTPS on 443, no
+  redirects. A key works only on its own provider's host. Billing, plays,
+  monitors and key management are out of reach.
+- A new Deepline tool or OpenRouter route needs a new vault build and its
+  on-chain approval. A test keeps the vault's list equal to the broker's.
+- The key goes only into `authorization: Bearer`.
 - An OpenRouter management key is used once, at `/v1/check`, to prove the
   miner owns the runtime key. It can never make a call.
-- A response that contains the key is withheld.
+- A response that contains the whole key is withheld. A provider that shows a
+  few characters of a key (as OpenRouter's key labels do) is not caught.
 - Only Leadpoet's broker, with the caller token, may use `check` and `call`.
 - No database, no files, no request logs.
 
@@ -32,9 +37,21 @@ which swaps the envelope for the key.
 
 Every forwarded call returns a receipt signed by the vault's receipts key:
 boot id, global and per-key sequence numbers, key fingerprint, miner hotkey,
-host, path, and SHA-256 of the request and response bodies. `GET /v1/usage`
-returns a signed per-key call count for the current boot. A miner compares it
+host, path, and SHA-256 of the full target, the forwarded headers, and the
+request and response bodies. Check receipts against the receipts key from
+`cli verify`, never against the `public_key` a receipt carries. `GET /v1/usage`
+returns a signed per-key call count for the current boot; pass a random
+`nonce` to prove the answer is fresh. A miner compares it
 with the calls Leadpoet reports; a gap means a call Leadpoet did not report.
+
+## Who you are trusting
+
+The vault's keys belong to the app, not to one build. Any build the app's
+owner approves later can open every key sealed before it. So the owner of the
+approval contract is the real trust point. If Leadpoet alone controls it,
+Leadpoet could approve a build that reads keys; the approval would be public
+on Base, but there is no timelock to warn miners first. Watch the contract's
+approval events, and seal again only to builds you have checked.
 
 ## Miner steps
 

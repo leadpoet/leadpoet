@@ -116,12 +116,15 @@ def read_header(envelope: str) -> Tuple[Header, dict]:
     if not isinstance(envelope, str) or not envelope.startswith(PREFIX) or len(envelope) > MAX_ENVELOPE_CHARS:
         raise EnvelopeError("envelope_invalid")
     body = envelope[len(PREFIX):]
+    if any(c in body for c in "+/="):
+        raise EnvelopeError("envelope_invalid")
     try:
-        document = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        # Strict: one string per envelope, no ignored characters.
+        document = json.loads(base64.b64decode(body + "=" * (-len(body) % 4), altchars=b"-_", validate=True))
     except (ValueError, TypeError):
         raise EnvelopeError("envelope_invalid") from None
     expected = {"v", "provider", "purpose", "miner_hotkey", "vault_key", "epk", "nonce", "ct"}
-    if not isinstance(document, dict) or set(document) != expected or document["v"] != 1:
+    if not isinstance(document, dict) or set(document) != expected or type(document["v"]) is not int or document["v"] != 1:
         raise EnvelopeError("envelope_invalid")
     if not all(isinstance(document[name], str) for name in expected - {"v"}):
         raise EnvelopeError("envelope_invalid")

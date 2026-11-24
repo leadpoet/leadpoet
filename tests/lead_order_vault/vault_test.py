@@ -224,7 +224,7 @@ def test_usage_counts_calls_per_key_and_is_signed():
     vault = _vault()
     for _ in range(3):
         vault.call(_call())
-    vault.call(_call(url="https://code.deepline.com/api/v2/integrations/apollo/execute",
+    vault.call(_call(url="https://code.deepline.com/api/v2/integrations/harvestapi_get_profile/execute",
                      sealed=_seal(DEEPLINE_KEY, provider="deepline")))
     usage = _check_receipt(vault.usage({"fingerprint": [env.fingerprint("openrouter", OPENROUTER_KEY)]}))
     assert usage["calls"] == 3 and usage["last_sequence"] == 4 and usage["boot_id"] == vault.boot_id
@@ -241,6 +241,8 @@ def test_usage_counts_calls_per_key_and_is_signed():
     ("https://openrouter.ai/api/v1/credits/coinbase", "path_not_allowed"),
     ("https://openrouter.ai/api/v1/%6beys", "path_not_allowed"),
     ("https://openrouter.ai/api/v1/x/../keys", "path_not_allowed"),
+    ("https://openrouter.ai/api/v1/chat/completions?x=1", "path_not_allowed"),
+    ("https://openrouter.ai/api/v1/responses", "path_not_allowed"),
 ])
 def test_call_refuses_other_hosts_and_management_paths(url, code):
     provider = FakeProvider()
@@ -252,7 +254,7 @@ def test_call_refuses_other_hosts_and_management_paths(url, code):
 def test_a_key_works_only_on_its_own_provider_host():
     provider = FakeProvider()
     with pytest.raises(VaultError, match="provider_mismatch"):
-        _vault(provider).call(_call(url="https://code.deepline.com/api/v2/integrations/apollo/execute"))
+        _vault(provider).call(_call(url="https://code.deepline.com/api/v2/integrations/harvestapi_get_profile/execute"))
     assert provider.requests == []
 
 
@@ -403,3 +405,67 @@ def test_http_server_routes_authenticates_and_never_logs(capsys):
         server.server_close()
     captured = capsys.readouterr()
     assert captured.out == "" and captured.err == ""
+
+
+@pytest.mark.parametrize("method,url", [
+    ("POST", "https://code.deepline.com/api/v2/integrations/generic_http/execute"),
+    ("POST", "https://code.deepline.com/api/v2/billing/top-up"),
+    ("GET", "https://code.deepline.com/api/v2/billing/balance"),
+    ("POST", "https://code.deepline.com/api/v2/plays/run"),
+    ("POST", "https://code.deepline.com/api/v2/integrations/harvestapi_get_profile/execute/x"),
+    ("GET", "https://code.deepline.com/api/v2/integrations/harvestapi_get_profile/execute"),
+])
+def test_deepline_keys_reach_only_the_listed_tools(method, url):
+    provider = FakeProvider()
+    request = _call(url=url, sealed=_seal(DEEPLINE_KEY, provider="deepline"), method=method)
+    if method == "GET":
+        request.pop("body_b64")
+    with pytest.raises(VaultError, match="path_not_allowed"):
+        _vault(provider).call(request)
+    assert provider.requests == []
+
+
+def test_generation_read_back_is_allowed_with_only_an_id():
+    provider = FakeProvider()
+    request = _call(url="https://openrouter.ai/api/v1/generation?id=gen-abc_123", method="GET")
+    request.pop("body_b64")
+    receipt = _check_receipt(_vault(provider).call(request)["receipt"])
+    assert provider.requests[0]["target"] == "/api/v1/generation?id=gen-abc_123"
+    assert receipt["target_sha256"] == hashlib.sha256(b"/api/v1/generation?id=gen-abc_123").hexdigest()
+    for query in ("id=a&id=b", "id=a/b", ""):
+        request["url"] = "https://openrouter.ai/api/v1/generation" + ("?" + query if query else "")
+        with pytest.raises(VaultError, match="path_not_allowed"):
+            _vault(provider).call(request)
+
+
+@pytest.mark.parametrize("headers", [{"bad name": "x"}, {"x:y": "z"}, {"x-a": "caf\u00e9"}])
+def test_bad_headers_are_refused_before_the_call_is_counted(headers):
+    vault = _vault()
+    request = _call()
+    request["headers"].update(headers)
+    with pytest.raises(VaultError, match="headers_invalid"):
+        vault.call(request)
+    assert _check_receipt(vault.usage({"fingerprint": [env.fingerprint("openrouter", OPENROUTER_KEY)]}))["calls"] == 0
+
+
+def test_usage_signs_the_callers_nonce():
+    nonce = "ab" * 32
+    assert _check_receipt(_vault().usage({"fingerprint": ["sha256:" + "0" * 64], "nonce": [nonce]}))["nonce"] == nonce
+    with pytest.raises(VaultError, match="nonce_invalid"):
+        _vault().usage({"fingerprint": ["sha256:" + "0" * 64], "nonce": ["zz"]})
+
+
+def test_an_envelope_has_one_spelling():
+    sealed = _seal(OPENROUTER_KEY)
+    for variant in (sealed + "=", sealed[:10] + "!" + sealed[10:], sealed + "+"):
+        with pytest.raises(env.EnvelopeError):
+            env.open_envelope(variant, ENCRYPTION)
+
+
+def test_vault_allows_exactly_what_the_lead_order_broker_sends():
+    from lab_arena.lead_orders import broker
+    from lead_order_vault import vault
+
+    assert vault.DEEPLINE_TOOLS == broker.DEEPLINE_OPERATIONS
+    assert {path for _, path in vault.OPENROUTER_ROUTES} == {
+        "/" + broker.OPENROUTER_CHAT_PATH, "/" + broker.OPENROUTER_DECISIONS_PATH, "/api/v1/generation"}

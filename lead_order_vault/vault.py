@@ -13,8 +13,9 @@ Endpoints:
 * ``POST /v1/call``         open a key, attach it, forward the request, and
                             return the response with a signed receipt.
 
-Fixed rules: two provider hosts, the key only in the ``authorization``
-header, account and key-management paths refused, no redirects, bounded
+Fixed rules: only the requests the lead-order broker makes (three OpenRouter
+routes and the listed Deepline tools), the key only in the ``authorization``
+header, no redirects, bounded
 sizes, only Leadpoet's broker may call ``check`` and ``call``. No database,
 no files, no logs of requests or bodies. Counters live in memory and reset on
 restart; receipts carry the boot id so a restart is visible.
@@ -28,6 +29,7 @@ import hmac
 import http.client
 import json
 import os
+import re
 import socket
 import ssl
 import threading
@@ -51,12 +53,30 @@ USAGE_SCHEMA = "leadpoet.lead_order_vault.usage.v1"
 ATTESTATION_TAG = b"leadpoet.lead_order_vault.attestation.v1"
 
 HOSTS = {"openrouter.ai": "openrouter", "code.deepline.com": "deepline"}
-# Account, key, credit and team management. A runtime key may not reach these
-# through the vault, whatever the provider would allow.
-DENIED_SEGMENTS = frozenset({
-    "keys", "api-keys", "api_keys", "apikeys", "auth", "oauth", "admin", "credits",
-    "organization", "organizations", "members", "invites", "team", "teams",
+# The only requests a miner's key may make: the ones the lead-order broker
+# sends (lab_arena/lead_orders/broker.py). The vault does not trust the
+# gateway, so it repeats the list instead of relying on it. Anything else,
+# such as billing top-ups, monitors, plays or key management, is refused.
+OPENROUTER_ROUTES = frozenset({
+    ("POST", "/api/v1/chat/completions"),
+    ("POST", "/api/alpha/decisions"),
+    ("GET", "/api/v1/generation"),  # free cost read-back by generation id
 })
+# Same list as DEEPLINE_OPERATIONS in lab_arena/lead_orders/broker.py. Adding
+# a tool needs a new vault build and its on-chain approval.
+DEEPLINE_TOOLS = frozenset({
+    "harvestapi_search_jobs", "harvestapi_get_job", "harvestapi_get_company", "harvestapi_search_posts",
+    "harvestapi_get_post_reactions", "harvestapi_get_post_comments", "harvestapi_get_profile_posts",
+    "harvestapi_search_leads", "harvestapi_get_profile", "bloomberry_search_job_postings",
+    "parallel_run_task", "parallel_get_task_run_result", "search_contact",
+    "free_company_lookup", "crustdata_v3_company_identify", "crustdata_v3_company_enrich",
+    "crustdata_v3_person_search", "prospeo_enrich_person", "zerobounce_validate", "hunter_email_finder",
+    "dropleads_email_finder", "leadmagic_email_finder", "findymail_find_from_name",
+    "findymail_find_from_business_profile", "crustdata_v3_job_search", "quickenrich_employee_email_enrich",
+    "icypeas_email_verification", "icypeas_read_results", "firecrawl_scrape",
+})
+_GENERATION_QUERY = re.compile(r"id=[A-Za-z0-9_-]{1,128}")
+_HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}")
 METHODS = ("GET", "POST")
 DROPPED_HEADERS = frozenset({
     "connection", "keep-alive", "proxy-authorization", "proxy-authenticate", "proxy-connection",
@@ -155,6 +175,7 @@ class Vault:
         self._identity = dict(identity, schema="leadpoet.lead_order_vault.identity.v1",
                               boot_id=self.boot_id, booted_at=self.booted_at)
         self._lock = threading.Lock()
+        self._attest_lock = threading.Lock()
         self._sequence = 0
         self._calls: Dict[str, int] = {}
         self._checks: Dict[str, int] = {}
@@ -170,19 +191,31 @@ class Vault:
             raise VaultError("nonce_invalid")
         if self._attest is None:
             raise VaultError("attestation_unavailable", 503)
+        # Public, so one quote at a time: a flood waits instead of piling up.
+        if not self._attest_lock.acquire(timeout=10):
+            raise VaultError("attestation_busy", 503)
         report_data = hashlib.sha256(
             ATTESTATION_TAG + bytes.fromhex(self.encryption_public_key)
             + bytes.fromhex(self.receipts_public_key) + bytes.fromhex(nonce)).digest()
         return {"report_data": report_data.hex(), "nonce": nonce,
                 "encryption_public_key": self.encryption_public_key,
-                "receipts_public_key": self.receipts_public_key, "quote": self._attest(report_data)}
+                "receipts_public_key": self.receipts_public_key, "quote": self._quote(report_data)}
+
+    def _quote(self, report_data: bytes) -> Mapping:
+        try:
+            return self._attest(report_data)
+        finally:
+            self._attest_lock.release()
 
     def usage(self, query: Mapping[str, List[str]]) -> Mapping:
         key_fingerprint = _single(query, "fingerprint")
         if not (key_fingerprint.startswith("sha256:") and len(key_fingerprint) == 71 and _is_hex(key_fingerprint[7:])):
             raise VaultError("fingerprint_invalid")
+        nonce = (query.get("nonce") or [None])[0]
+        if nonce is not None and (len(nonce) != 64 or not _is_hex(nonce)):
+            raise VaultError("nonce_invalid")
         with self._lock:
-            document = {"schema": USAGE_SCHEMA, "boot_id": self.boot_id, "booted_at": self.booted_at,
+            document = {"schema": USAGE_SCHEMA, "nonce": nonce, "boot_id": self.boot_id, "booted_at": self.booted_at,
                         "key_fingerprint": key_fingerprint, "calls": self._calls.get(key_fingerprint, 0),
                         "checks": self._checks.get(key_fingerprint, 0), "last_sequence": self._sequence,
                         "at": int(self._clock())}
@@ -246,6 +279,10 @@ class Vault:
                    "key_sequence": key_sequence, "at": at,
                    "key_fingerprint": key_fingerprint, "miner_hotkey": header.miner_hotkey, "provider": provider,
                    "method": method, "host": parts.hostname, "path": parts.path,
+                   "target_sha256": hashlib.sha256(target.encode("ascii")).hexdigest(),
+                   # The miner's key is not in this hash: the forwarded
+                   # headers as sent, with authorization left out.
+                   "headers_sha256": hashlib.sha256(canonical(headers)).hexdigest(),
                    "request_sha256": hashlib.sha256(body).hexdigest()}
         try:
             response = self._upstream(method, parts.hostname, target, outbound, body, timeout, max_bytes)
@@ -340,6 +377,16 @@ def _is_hex(value: str) -> bool:
     return bool(value) and all(c in "0123456789abcdef" for c in value)
 
 
+def _route_allowed(provider: str, method: str, path: str, query: str) -> bool:
+    if provider == "openrouter":
+        if (method, path) not in OPENROUTER_ROUTES:
+            return False
+        return _GENERATION_QUERY.fullmatch(query) is not None if method == "GET" else query == ""
+    parts = path.split("/")
+    return (method == "POST" and query == "" and len(parts) == 6 and parts[:4] == ["", "api", "v2", "integrations"]
+            and parts[4] in DEEPLINE_TOOLS and parts[5] == "execute")
+
+
 def _parse_call(request: Mapping):
     allowed = {"method", "url", "headers", "body_b64", "timeout_seconds", "max_response_bytes"}
     if not isinstance(request, Mapping) or not set(request) <= allowed or not {"method", "url", "headers"} <= set(request):
@@ -359,15 +406,17 @@ def _parse_call(request: Mapping):
             or parts.username is not None or parts.password is not None or parts.fragment
             or parts.netloc.lower() not in (parts.hostname, parts.hostname + ":443")):
         raise VaultError("host_not_allowed")
-    segments = [segment.lower() for segment in parts.path.split("/")]
-    if any(segment in (".", "..") or "%" in segment or segment in DENIED_SEGMENTS for segment in segments):
+    if not _route_allowed(HOSTS[parts.hostname], method, parts.path, parts.query):
         raise VaultError("path_not_allowed")
     raw_headers = request["headers"]
     if not isinstance(raw_headers, Mapping) or len(raw_headers) > 64:
         raise VaultError("headers_invalid")
     headers: Dict[str, str] = {}
     for name, value in raw_headers.items():
-        if not isinstance(name, str) or not isinstance(value, str) or any(c in name + value for c in "\r\n\x00"):
+        # Checked here, before the call is counted, so http.client never
+        # refuses a header after the count went up.
+        if (not isinstance(name, str) or not isinstance(value, str) or not _HEADER_NAME.fullmatch(name)
+                or len(value) > 8192 or any(c in value for c in "\r\n\x00") or not value.isascii()):
             raise VaultError("headers_invalid")
         lowered = name.lower()
         if lowered in headers:
@@ -403,6 +452,7 @@ def _parse_call(request: Mapping):
 def make_handler(vault: Vault):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        timeout = 30  # a slow client cannot hold a thread for long
         server_version = "lead-order-vault/1"
         sys_version = ""
 
@@ -455,6 +505,33 @@ def make_handler(vault: Vault):
             self._handle(action)
 
     return Handler
+
+
+class BoundedServer(ThreadingHTTPServer):
+    """At most ``MAX_CONNECTIONS`` requests at once; the rest are closed."""
+
+    daemon_threads = True
+    MAX_CONNECTIONS = 128
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._slots = threading.BoundedSemaphore(self.MAX_CONNECTIONS)
+
+    def process_request(self, request, client_address) -> None:
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
 
 def _not_found() -> Mapping:
@@ -518,8 +595,7 @@ def main() -> None:
     identity.update(encryption=encryption, receipts=receipts)
     vault = Vault(encryption_key=encryption_key, receipts_key=receipts_key, identity=identity,
                   caller_token=caller_token, attest=dstack.attest)
-    server = ThreadingHTTPServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), make_handler(vault))
-    server.daemon_threads = True
+    server = BoundedServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), make_handler(vault))
     server.serve_forever()
 
 

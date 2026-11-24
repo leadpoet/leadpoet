@@ -529,7 +529,11 @@ def main() -> int:
     parser.add_argument("--scope", choices=("gateway", "validator", "all"))
     parser.add_argument("--generation", type=int, default=0)
     parser.add_argument("--phase")
-    parser.add_argument("--lease-seconds", type=int, default=14400)
+    # The guard lease is the only bound on an abandoned restart: a live
+    # drain renews it every 30s (min(30, lease/3)), so 15 minutes is 30
+    # consecutive missed renewals, while the previous 4-hour default left
+    # paid review withheld for four hours after a controller died.
+    parser.add_argument("--lease-seconds", type=int, default=900)
     parser.add_argument("--timeout-seconds", type=float, default=900.0)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--environment-file", type=Path)

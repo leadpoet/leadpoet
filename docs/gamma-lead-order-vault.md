@@ -75,6 +75,10 @@ python -m lead_order_vault.cli seal --provider openrouter --hotkey <your hotkey>
 python -m lead_order_vault.cli receipts page1.json page2.json
 ```
 
+Give the OpenRouter key a credit limit you can afford to lose: if the
+vault's keys were ever taken, that limit is what a thief could spend. If
+you see spend you did not expect, revoke the key at the provider.
+
 Seal a Deepline key from a workspace with no connected integrations. The
 vault lets the gateway call any Deepline tool, and some tools act on the
 accounts a workspace connected.

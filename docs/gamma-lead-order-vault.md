@@ -116,6 +116,8 @@ key. Compare it with what Leadpoet reports now and then.
 - A second vault instance of the same app numbers calls under its own boot
   id. Hidden calls made only there leave no gap. Only the app's owner can
   start one.
+- `cli` reads only epoch-0 approvals. If the app's owner advances the app's
+  epoch on Base, every command refuses until `cli` learns epochs.
 - One instance, no high availability. Anyone can open connections to it,
   and Phala's passthrough gives no per-address limit, so a flood of
   connections can keep it busy. Orders on miner keys fail while it lasts.

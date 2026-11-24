@@ -95,11 +95,11 @@ local hotkey. The existing runtime, nonce, mortal transaction, and exact
 transaction checks still apply.
 
 Finney signing profiles list measured runtime versions and transaction version
-changes. Runtime 494 keeps the `commit_timelocked_mechanism_weights` call and
+changes. Runtimes 494 and 495 keep the `commit_timelocked_mechanism_weights` call and
 signature payload layout, with transaction version 2 and a 32-block mortality
 window. The signer still rejects any era that extends beyond the accepted
 weight state's validity. Unknown transaction versions remain rejected until
-their metadata is measured.
+their metadata is measured. The runtime 495 profile was measured from the parent metadata of finalized block 9,578,566. That block contains SN71 reveals for validator UIDs 0 and 155.
 
 Reward-basis v2 uses the [improvement reward slots](arena_reward_slots.md).
 The gateway and validator use the same canonical slot allocation code. Keep

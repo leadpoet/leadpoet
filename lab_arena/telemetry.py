@@ -285,13 +285,20 @@ def record_gate(
 
 
 class StageResult:
-    """Mutable handle a stage body uses to report magnitude and idleness."""
+    """Mutable handle a stage body uses to report magnitude and idleness.
 
-    __slots__ = ("count", "idle")
+    ``idle`` means the stage ran and found nothing to do. ``disabled`` means
+    configuration has switched the stage off, so it will keep finding nothing
+    to do until an operator changes that — a different fact, and the only one
+    that explains a permanently quiet lane.
+    """
+
+    __slots__ = ("count", "idle", "disabled")
 
     def __init__(self) -> None:
         self.count = 0
         self.idle = False
+        self.disabled = False
 
 
 @contextmanager
@@ -320,7 +327,7 @@ def stage(name: str, *, billing_lookup: Optional[Mapping[str, Any]] = None) -> I
         raise
     record(
         name,
-        "idle" if result.idle else "ok",
+        "disabled" if result.disabled else ("idle" if result.idle else "ok"),
         count=int(result.count or 0),
         duration_ms=(time.monotonic() - start_mono) * 1000.0,
         start_ns=start_ns,

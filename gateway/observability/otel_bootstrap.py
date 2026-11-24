@@ -154,8 +154,11 @@ ARENA_TASK_STAGES = frozenset(
     }
 )
 
-# The only outcomes a stage may report.
-ARENA_TASK_OUTCOMES = frozenset({"ok", "idle", "failed"})
+# The only outcomes a stage may report. "disabled" is distinct from "idle":
+# idle means the stage ran and found no work, disabled means the stage is
+# switched off by configuration and will never do work until that changes.
+# Collapsing the two made a deliberate cutover indistinguishable from a wedge.
+ARENA_TASK_OUTCOMES = frozenset({"ok", "idle", "failed", "disabled"})
 
 # An exception CLASS name is code-controlled, not client-controlled, but it is
 # still shape-checked so no message, path, or value can ever ride along.

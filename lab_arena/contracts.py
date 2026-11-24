@@ -933,6 +933,7 @@ ROUND_CONFIGURATION_FIELDS = (
     F("runner_slot_ceiling", "int", minimum=1),
     # New daily rounds can make both ten-ICP execution stages claimable before
     # stage-one scoring. Absence preserves every historical round's schedule.
+    F("dispatch_window_policy", "str", required=False, choices=("late_predecessor_v1",)),
     F("parallel_twenty_icp_execution", "bool", required=False),
     F(
         "execution_sequence_policy",

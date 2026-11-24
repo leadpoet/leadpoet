@@ -1,4 +1,4 @@
-"""Independently decode Finney runtime 494's measured SN71 reveal events."""
+"""Decode measured SN71 reveal events using their finalized Finney runtime metadata."""
 
 import json
 from pathlib import Path
@@ -14,17 +14,17 @@ from leadpoet_canonical.subtensor_events_v2 import (
 from scripts.measure_subtensor_events_profile import profile_from_fixture
 
 
-@pytest.mark.parametrize("block", [9573884, 9573886])
-def test_measured_runtime494_reveal(block):
+@pytest.mark.parametrize(("spec", "block"), [(494, 9573884), (494, 9573886), (495, 9578566)])
+def test_measured_runtime_reveal(spec, block):
     fixture = json.loads((Path(__file__).parent / "fixtures" /
-                          f"subtensor_events_spec494_block{block}.json").read_bytes())
-    registered = load_subtensor_events_profile_v2(spec_version=494)
+                          f"subtensor_events_spec{spec}_block{block}.json").read_bytes())
+    registered = load_subtensor_events_profile_v2(spec_version=spec)
     measured = profile_from_fixture(fixture)
     assert {k: v for k, v in measured.items() if k != "measurement"} == {
         k: v for k, v in registered.items() if k != "measurement"}
-    if block == 9573884:
+    if block in (9573884, 9578566):
         assert registered == measured
-    observed = dict(genesis_hash=fixture["genesis_hash"], spec_version=494,
+    observed = dict(genesis_hash=fixture["genesis_hash"], spec_version=spec,
                     transaction_version=2, metadata_raw=bytes.fromhex(fixture["metadata_hex"][2:]),
                     runtime_code_hash=fixture["runtime_code_storage_hash"])
     validate_subtensor_events_profile_v2(registered, **observed)

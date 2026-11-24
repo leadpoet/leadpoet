@@ -2747,7 +2747,10 @@ class ArenaService:
         if mode == "off":
             raise ServiceError("collection_inactive", 404)
         try:
-            return collection_intake.terms(mode, task_scope)
+            document = collection_intake.terms(mode, task_scope)
+            if mode == "live" and task_scope == collection_intake.CORRECTION_SCOPE:
+                document["fixed_quotes"] = collection_intake.open_correction_quotes(self._store._transport)
+            return document
         except collection_intake.IntakeError as exc:
             raise ServiceError(exc.code, exc.status) from None
 

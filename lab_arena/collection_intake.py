@@ -65,11 +65,12 @@ TERMS_HASH = contracts.hash_bytes(TERMS.encode())
 CORRECTION_SCOPE = "synthetic_corrections"
 # This candidate text is available to miners only when the operator publishes
 # its exact digest after counsel review. An unset or stale digest closes intake.
-CORRECTION_TERMS = (
+_CORRECTION_AUTHORIZATION = (
     "I authorize Leadpoet to charge my dedicated OpenRouter key up to my signed rolling 24-hour limit "
     "for operator-assigned experiments on synthetic sales tasks. Experiments may repeat tasks or continue "
     "an earlier model's run from a saved state. Failed or partial attempts can incur charges. "
-    "The pilot pays no emissions. Leadpoet pays for private verification. "
+)
+_CORRECTION_RIGHTS = (
     "Leadpoet may record the original reasoning that the provider exposes, messages, tool calls and results, "
     "task states, scores, labels, costs and outcomes, including mistakes and corrections. "
     "I assign to Leadpoet any rights I hold in those outputs. To the extent assignment is unavailable, "
@@ -80,9 +81,21 @@ CORRECTION_TERMS = (
     "input/output logging, sharing and external trace broadcast on the enrolled key. "
     "The management key is used only to verify the runtime key. I may revoke access at any time. "
     "Revocation blocks new calls; already dispatched calls may still be billed. "
-    "This authorization covers only synthetic tasks on OpenRouter. Live research, hosted search, "
-    "Deepline charges and compensated work require separate signed authorization."
+    "This authorization covers only synthetic tasks on OpenRouter. "
 )
+CORRECTION_TERMS = (
+    _CORRECTION_AUTHORIZATION + "The pilot pays no emissions. Leadpoet pays for private verification. "
+    + _CORRECTION_RIGHTS + "Live research, hosted search, Deepline charges and compensated work require separate signed authorization."
+)
+LIVE_CORRECTION_TERMS = (
+    _CORRECTION_AUTHORIZATION + "This is a compensated assignment. Each authentic completed run earns its approved fixed quote "
+    "for the measured experiment class. The quote is set before the run and is independent of how "
+    "much I spend or how well the model performs. If total quotes exceed the epoch's available "
+    "emissions, each quote is scaled proportionally. Unpaid differences do not carry forward. "
+    "An incomplete run may cost credits without earning a quote. Leadpoet pays for private verification. "
+    + _CORRECTION_RIGHTS + "Live research, hosted search, and Deepline charges require separate signed authorization."
+)
+
 LABEL = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 SHA = re.compile(r"sha256:[0-9a-f]{64}")
 MAX_MICROUSD = 10_000_000_000
@@ -149,9 +162,13 @@ def mode_from_environment():
     return mode
 
 
-def correction_terms_hash():
-    digest = contracts.hash_bytes(CORRECTION_TERMS.encode())
-    if os.getenv("LAB_ARENA_CORRECTION_TERMS_SHA256") != digest:
+def correction_terms_hash(mode="pilot"):
+    if mode not in ("pilot", "live"):
+        raise IntakeError("collection_scope_unavailable", 422)
+    text = CORRECTION_TERMS if mode == "pilot" else LIVE_CORRECTION_TERMS
+    setting = "LAB_ARENA_CORRECTION_TERMS_SHA256" if mode == "pilot" else "LAB_ARENA_LIVE_CORRECTION_TERMS_SHA256"
+    digest = contracts.hash_bytes(text.encode())
+    if os.getenv(setting) != digest:
         raise IntakeError("collection_correction_terms_unavailable", 503)
     return digest
 
@@ -159,8 +176,8 @@ def correction_terms_hash():
 def terms(mode, task_scope=TASK_SCOPE):
     if task_scope == TASK_SCOPE:
         text, digest = TERMS, TERMS_HASH
-    elif task_scope == CORRECTION_SCOPE and mode == "pilot":
-        text, digest = CORRECTION_TERMS, correction_terms_hash()
+    elif task_scope == CORRECTION_SCOPE and mode in ("pilot", "live"):
+        text, digest = (CORRECTION_TERMS if mode == "pilot" else LIVE_CORRECTION_TERMS), correction_terms_hash(mode)
     else:
         raise IntakeError("collection_scope_unavailable", 422)
     return {
@@ -171,6 +188,14 @@ def terms(mode, task_scope=TASK_SCOPE):
         "network": "finney",
         "netuid": 71,
     }
+
+
+def open_correction_quotes(transport):
+    register_signatures()
+    quotes = transport.rpc("collection_open_correction_quotes_v1", {})
+    if not isinstance(quotes, list) or not quotes:
+        raise IntakeError("collection_compensated_corrections_unavailable", 503)
+    return quotes
 
 
 def scope_id(mode):
@@ -194,6 +219,10 @@ def _uuid(value):
 
 
 def register_signatures():
+    store.FUNCTION_SIGNATURES.setdefault("collection_open_correction_quotes_v1", ())
+    store.FUNCTION_SIGNATURES.setdefault("collection_correction_tariff_v1", (("p_batch", "text"),))
+    store.FUNCTION_SIGNATURES.setdefault("collection_experiment_costs_v1", (("p_batch", "text"),))
+    store.FUNCTION_SIGNATURES.setdefault("collection_correction_measurement_v1", (("p_batch", "text"),))
     store.FUNCTION_SIGNATURES.setdefault(
         "collection_reward_statement_v1", (("p_hotkey", "text"),)
     )
@@ -238,6 +267,8 @@ class CollectionIntake:
             or body["credentials_sha256"] != contracts.document_hash(credentials)
         ):
             raise IntakeError("collection_consent_invalid")
+        if self.mode == "live" and body["task_scope"] == CORRECTION_SCOPE:
+            open_correction_quotes(self.transport)
         cap = _micros(body["daily_cap_microusd"], 1)
         registration = str(uuid.UUID(hex=signed["request_id"]))
         prefix = "collection:" + registration
@@ -331,11 +362,14 @@ class CollectionIntake:
         )
         return dict(job, lease_token=token) if job else None
 
-    def claim_experiment(self, experiment, harness_commit):
-        """Claim an unpaid, explicitly scheduled correction with fresh consent."""
-        if self.mode != "pilot" or not re.fullmatch(r"xp-[0-9a-f]{64}", experiment.batch_id):
+    def claim_experiment(self, experiment, harness_commit, *, fixed_quote=0):
+        """Claim exactly one frozen slot under its own mode and signed consent."""
+        if self.mode != experiment.raw["mode"] or not re.fullmatch(r"xp-[0-9a-f]{64}", experiment.batch_id):
             raise IntakeError("collection_correction_pilot_required")
-        terms_hash = correction_terms_hash()
+        terms_hash = correction_terms_hash(self.mode)
+        _micros(fixed_quote, 0 if self.mode == "pilot" else 1)
+        if self.mode == "pilot" and fixed_quote:
+            raise IntakeError("pilot_quote_must_be_zero")
         if experiment.raw["terms_sha256"] != terms_hash:
             raise IntakeError("collection_correction_terms_changed")
         if not re.fullmatch("[0-9a-f]{40}", harness_commit):
@@ -346,7 +380,7 @@ class CollectionIntake:
             "claim", job=str(uuid.uuid4()), token_hash=store.hash_lease_token(token),
             batch=experiment.batch_id, mode=self.mode, commit=harness_commit,
             scenarios=[case["scenario_id"] for case, _, _ in experiment.slots], models=models,
-            prices=dict.fromkeys(models, 0),
+            prices=dict.fromkeys(models, fixed_quote),
             budgets={arm["model"]:arm["budget_microusd"] for _, arm, _ in experiment.slots},
             terms_hash=terms_hash,
         )

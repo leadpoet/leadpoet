@@ -358,3 +358,12 @@ def test_deepline_cost_reads_cost_usd_first_then_credits_like_the_site():
     assert broker()._cost("deepline", bill({"cost_usd": "x"})) is None
     # Arena's own reader is unchanged: credits only.
     assert arena_broker.deepline_cost_microusd(bytes(only_usd.body)) is None
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "deepline"])
+def test_a_deeply_nested_answer_settles_uncertain_instead_of_crashing(provider):
+    # json.loads raises RecursionError, not ValueError, on deep nesting; the
+    # call must still settle and keep its receipt.
+    nested = ProviderResponse(status=200, headers={}, body=b"[" * 200_000 + b"]" * 200_000)
+    assert broker()._cost(provider, nested) is None
+    assert broker()._request_id(provider, nested, None) is None

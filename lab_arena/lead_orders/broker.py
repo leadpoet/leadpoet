@@ -26,6 +26,7 @@ the Arena broker's (``lab_arena.broker``), reused rather than copied.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import math
 import time
@@ -37,7 +38,7 @@ from urllib.parse import urlencode
 
 from lab_arena import broker as arena_broker
 from lab_arena import operations, provider_costs
-from lab_arena.broker import BrokerError, ProviderResponse, ProviderTransport, ProviderTransportError
+from lab_arena.broker import ProviderResponse, ProviderTransport, ProviderTransportError
 from lab_arena.lead_orders import keys as lead_keys
 from lab_arena.lead_orders.auth import order_token_hash
 from lab_arena.lead_orders.policy import LeadOrderPolicy
@@ -132,6 +133,8 @@ RESOLVE_BATCH = 10
 _INJECTED_MAX_PRICE = (("prompt", True), ("completion", True), ("request", False))
 _FORWARDED_RESPONSE_HEADERS = ("content-type",)
 
+_LOG = logging.getLogger(__name__)
+
 
 def deepline_cost_microusd(body: bytes) -> Optional[int]:
     """A Deepline bill as the site reads it: ``billing.cost_usd``, else credits.
@@ -141,15 +144,14 @@ def deepline_cost_microusd(body: bytes) -> Optional[int]:
     unchanged and still reads credits only.
     """
 
-    try:
-        document = json.loads(bytes(body).decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        document = None
+    document = lead_keys.json_document(body)
     billing = document.get("billing") if isinstance(document, Mapping) else None
     cost = billing.get("cost_usd") if isinstance(billing, Mapping) else None
     if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0:
         return int((Decimal(str(cost)) * Decimal(1_000_000)).to_integral_value(rounding=ROUND_CEILING))
-    return arena_broker.deepline_cost_microusd(bytes(body))
+    credits = provider_costs.deepline_cost(document)
+    return None if credits is None else credits.microusd
+
 
 
 def _nonnegative_number(value: Any) -> bool:
@@ -201,6 +203,22 @@ def _json_response(status: int, code: str) -> ProviderResponse:
     )
 
 
+class _ReceiptCapture:
+    """Pass-through transport that keeps what its one send returned or raised."""
+
+    def __init__(self, transport: ProviderTransport) -> None:
+        self._transport = transport
+        self.result: Any = None
+
+    def send(self, **request: Any) -> ProviderResponse:
+        try:
+            self.result = self._transport.send(**request)
+        except ProviderTransportError as error:
+            self.result = error
+            raise
+        return self.result
+
+
 class LeadOrderBroker:
     def __init__(
         self,
@@ -212,10 +230,15 @@ class LeadOrderBroker:
         leadpoet_secrets: Mapping[str, str],
         price_table: Callable[[], Mapping[str, Any]],
         current_epoch: Callable[[], int],
+        miner_transport: Optional[ProviderTransport] = None,
     ) -> None:
         self._store = store
         self._policy = policy
         self._transport = transport
+        # Miner keys go only through the key vault; the credential is the envelope.
+        if registrar is not None and miner_transport is None:
+            raise ValueError("miner keys need the vault transport")
+        self._miner_transport = miner_transport
         self._registrar = registrar
         self._leadpoet_secrets = {k: v for k, v in leadpoet_secrets.items() if v}
         self._leadpoet_keys = lead_keys.leadpoet_keys(
@@ -237,7 +260,7 @@ class LeadOrderBroker:
                 raise LeadOrderBrokerError(404, "route_not_allowed")
             try:
                 params = json.loads(request.body.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError):
+            except (UnicodeDecodeError, ValueError, RecursionError):
                 raise LeadOrderBrokerError(400, "invalid_json") from None
             if not isinstance(params, dict):
                 raise LeadOrderBrokerError(400, "model_required")
@@ -339,7 +362,7 @@ class LeadOrderBroker:
             raise LeadOrderBrokerError(413, "request_too_large")
         try:
             params = json.loads(request.body.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
+        except (UnicodeDecodeError, ValueError, RecursionError):
             raise LeadOrderBrokerError(400, "invalid_json") from None
         if not isinstance(params, dict) or set(params) != {"model", "state", "questions", "provider"}:
             raise LeadOrderBrokerError(400, "decision_request_invalid")
@@ -442,10 +465,7 @@ class LeadOrderBroker:
 
         status = int(response.status)
         if provider == "openrouter":
-            try:
-                document = json.loads(bytes(response.body).decode("utf-8"))
-            except (UnicodeDecodeError, ValueError):
-                document = None
+            document = lead_keys.json_document(response.body)
             # Admission already checked the catalog. The provider reports the
             # actual charge, including fallback models, in the response.
             bill = provider_costs.openrouter_cost(document)
@@ -471,10 +491,7 @@ class LeadOrderBroker:
                 return error.openrouter_generation_id
             if response is None:
                 return None
-            try:
-                document = json.loads(bytes(response.body).decode("utf-8"))
-            except (UnicodeDecodeError, ValueError):
-                document = None
+            document = lead_keys.json_document(response.body)
             return arena_broker._openrouter_generation_identity(document, dict(response.headers))[1]
         if error is not None:
             return error.deepline_job_id
@@ -509,15 +526,19 @@ class LeadOrderBroker:
                 ciphertext_b64=row["ciphertext_b64"],
             )
             try:
-                secret = self._registrar.decrypt(key)
+                credential = self._registrar.credential(key)
             except lead_keys.LeadOrderKeyError as exc:
                 self._store.record_readback(call_id=str(row["call_id"]),
                                             outcome="retry" if exc.retryable else "terminal")
                 continue
+            # The read-back is a call on the miner's key too, so its vault
+            # receipt is kept: an unreported one would look like a hidden call.
+            capture = _ReceiptCapture(self._miner_transport)
             state, cost = arena_broker._openrouter_generation_readback_once(
-                transport=self._transport, secret=secret, generation_id=str(row["provider_request_id"]),
+                transport=capture, secret=credential, generation_id=str(row["provider_request_id"]),
                 timeout_seconds=min(RESOLVE_LOOKUP_SECONDS, remaining),
             )
+            self._keep_receipt(str(row["call_id"]), "readback", capture.result)
             found = state == "found" and cost is not None
             self._store.record_readback(call_id=str(row["call_id"]),
                                         outcome="found" if found else ("terminal" if state == "terminal" else "retry"))
@@ -526,6 +547,21 @@ class LeadOrderBroker:
                                                   epoch=int(self._current_epoch()))
                 resolved += result.get("status") == "resolved"
         return resolved
+
+    def _keep_receipt(self, call_id: str, kind: str, result: Any) -> None:
+        """Store the vault receipt a send's response or error carries. A failed
+        write must not lose an answer the provider already billed; it is
+        logged, and the miner's audit shows the gap."""
+
+        receipt = getattr(result, "vault_receipt", None)
+        if receipt is None:
+            return
+        try:
+            status = self._store.record_vault_receipt(call_id=call_id, kind=kind, receipt=receipt).get("status")
+        except Exception as error:  # noqa: BLE001 (store outage; nothing secret is in the receipt)
+            status = type(error).__name__
+        if status not in ("recorded", "exists"):
+            _LOG.error("lead-order vault receipt not kept: call %s, %s, %s", call_id, kind, status)
 
     # -- the call -------------------------------------------------------------
     def call(self, token: str, request: BrokerRequest) -> ProviderResponse:
@@ -563,7 +599,9 @@ class LeadOrderBroker:
         )
         for key in ranked:
             try:
-                secret = self._leadpoet_secrets[provider] if key.is_leadpoet else self._registrar.decrypt(key)
+                # The key itself for Leadpoet's keys; the sealed envelope, which
+                # only the vault opens, for a miner's.
+                credential = self._leadpoet_secrets[provider] if key.is_leadpoet else self._registrar.credential(key)
             except lead_keys.LeadOrderKeyError as exc:
                 if exc.retryable:
                     raise LeadOrderBrokerError(503, exc.code) from None
@@ -586,8 +624,9 @@ class LeadOrderBroker:
             response: Optional[ProviderResponse] = None
             error: Optional[ProviderTransportError] = None
             try:
-                url, headers = arena_broker.inject_credential(outbound, secret)
-                response = self._transport.send(
+                url, headers = arena_broker.inject_credential(outbound, credential)
+                transport = self._transport if key.is_leadpoet else self._miner_transport
+                response = transport.send(
                     method=outbound.target.method, url=url, headers=headers, body=outbound.body,
                     timeout_seconds=(JEV_TIMEOUT_SECONDS if provider == "openrouter"
                                      and request.path == OPENROUTER_DECISIONS_PATH else TIMEOUT_SECONDS[provider]),
@@ -595,18 +634,26 @@ class LeadOrderBroker:
                 )
             except ProviderTransportError as exc:
                 error = exc
+                if not key.is_leadpoet:
+                    # A safe vault code, such as vault_caller_unauthorized.
+                    _LOG.warning("lead-order vault call failed: call %s, %s", call_id, exc)
             finally:
                 # Always settle the reservation, whatever happened in between.
-                cost = None if response is None else self._cost(provider, response)
-                request_id = self._request_id(provider, response, error)
-                if request_id and secret in request_id:
-                    request_id = None
-                self._store.settle_call(
-                    call_id=call_id, cost_microusd=cost,
-                    http_status=None if response is None else int(response.status), epoch=epoch,
-                    provider_request_id=request_id,
-                )
-            if response is None or arena_broker._response_contains_credential(response, secret):
+                # A call the vault refused never reached the provider: nothing to pay.
+                try:
+                    not_sent = response is None and getattr(error, "forwarded", None) is False
+                    cost = 0 if not_sent else (None if response is None else self._cost(provider, response))
+                    request_id = self._request_id(provider, response, error)
+                    if request_id and credential in request_id:
+                        request_id = None
+                    self._store.settle_call(
+                        call_id=call_id, cost_microusd=cost,
+                        http_status=None if response is None else int(response.status), epoch=epoch,
+                        provider_request_id=request_id,
+                    )
+                finally:
+                    self._keep_receipt(call_id, "call", response if response is not None else error)
+            if response is None or arena_broker._response_contains_credential(response, credential):
                 return _json_response(502, "provider_unreachable")
             reason = lead_keys.failover_reason(provider, response)
             if reason is not None:

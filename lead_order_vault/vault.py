@@ -113,9 +113,13 @@ class VaultError(Exception):
 class UpstreamError(Exception):
     """The provider could not be reached or did not answer in full."""
 
-    def __init__(self, message: str, observed_status: Optional[int] = None) -> None:
+    def __init__(self, message: str, observed_status: Optional[int] = None,
+                 observed_headers: Optional[List[Tuple[str, str]]] = None) -> None:
         super().__init__(message)
         self.observed_status = observed_status
+        # Headers that arrived before the failure; they carry the provider's
+        # request id, which the broker needs to read the cost back.
+        self.observed_headers = observed_headers or []
 
 
 @dataclass(frozen=True)
@@ -126,6 +130,14 @@ class UpstreamResponse:
 
 
 Upstream = Callable[[str, str, str, Mapping[str, str], bytes, float, int], UpstreamResponse]
+
+
+# Provider request ids, kept on a withheld answer so its cost can be read back.
+REQUEST_ID_HEADERS = frozenset({"x-generation-id", "x-deepline-request-id", "x-vercel-id"})
+
+
+def _kept_headers(headers) -> List[List[str]]:
+    return [[name.lower(), value] for name, value in headers if name.lower() not in DROPPED_HEADERS]
 
 
 def echoes(secret: str, data: bytes) -> bool:
@@ -174,11 +186,12 @@ def https_upstream(method: str, host: str, target: str, headers: Mapping[str, st
     connection = http.client.HTTPSConnection(host, port, timeout=timeout,
                                              context=context or ssl.create_default_context())
     status: Optional[int] = None
+    seen: List[Tuple[str, str]] = []
 
     def time_left() -> float:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise UpstreamError("upstream_timeout", status)
+            raise UpstreamError("upstream_timeout", status, seen)
         return remaining
 
     try:
@@ -188,7 +201,7 @@ def https_upstream(method: str, host: str, target: str, headers: Mapping[str, st
         sock = connection.sock
         sock.settimeout(time_left())
         response = connection.getresponse()
-        status = response.status
+        status, seen = response.status, list(response.getheaders())
         chunks: List[bytes] = []
         size = 0
         # The response closes the socket once the body is in.
@@ -201,15 +214,15 @@ def https_upstream(method: str, host: str, target: str, headers: Mapping[str, st
                 break
             size += len(chunk)
             if size > max_bytes:
-                raise UpstreamError("response_too_large", status)
+                raise UpstreamError("response_too_large", status, seen)
             chunks.append(chunk)
-        return UpstreamResponse(status, list(response.getheaders()), b"".join(chunks))
+        return UpstreamResponse(status, seen, b"".join(chunks))
     except UpstreamError:
         raise
     except TimeoutError:
-        raise UpstreamError("upstream_timeout", status) from None
+        raise UpstreamError("upstream_timeout", status, seen) from None
     except (OSError, http.client.HTTPException, ssl.SSLError):
-        raise UpstreamError("upstream_unavailable", status) from None
+        raise UpstreamError("upstream_unavailable", status, seen) from None
     finally:
         connection.close()
 
@@ -306,13 +319,16 @@ class Vault:
         except Exception as caught:  # the call is counted, so every failure must get a receipt
             error = caught if isinstance(caught, UpstreamError) else UpstreamError("upstream_unavailable")
             receipt.update(outcome="transport_error", response_status=error.observed_status, response_sha256=None)
+            observed = _kept_headers(error.observed_headers)
             return {"transport_error": str(error), "observed_status": error.observed_status,
+                    "observed_headers": [] if header_echoes(secret, observed) else observed,
                     "receipt": self._signed(receipt)}
-        response_headers = [[name.lower(), value] for name, value in response.headers
-                            if name.lower() not in DROPPED_HEADERS]
+        response_headers = _kept_headers(response.headers)
         if echoes(secret, response.body) or header_echoes(secret, response_headers):
             receipt.update(outcome="key_echo_withheld", response_status=response.status, response_sha256=None)
-            return _refusal(502, "vault_response_withheld", self._signed(receipt))
+            ids = [[name, value] for name, value in response_headers
+                   if name in REQUEST_ID_HEADERS and not echoes(secret, value.encode("utf-8", errors="surrogatepass"))]
+            return _refusal(502, "vault_response_withheld", self._signed(receipt), ids)
         receipt.update(outcome="response", response_status=response.status,
                        response_sha256=hashlib.sha256(response.body).hexdigest())
         return {"status": response.status, "headers": response_headers,

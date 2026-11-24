@@ -214,6 +214,11 @@ async def miner_statement(request: Request, since: str = "") -> Response:
     return await _handle(request, lambda s, b, who, body: s.statement(who.hotkey, since), auth="buyer")
 
 
+@router.get("/lead-orders/vault-receipts")
+async def miner_vault_receipts(request: Request, since: str = "") -> Response:
+    return await _handle(request, lambda s, b, who, body: s.vault_receipts(who.hotkey, since), auth="buyer")
+
+
 @router.post("/lead-orders")
 async def place_order(request: Request) -> Response:
     return await _handle(request, lambda s, b, who, body: s.place_order(who.hotkey, _json(body)), auth="buyer")

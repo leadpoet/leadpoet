@@ -462,10 +462,10 @@ def _tls_vault(provider=None):
 
 
 @contextlib.contextmanager
-def _serving(handler, tls, server_class=BoundedServer):
+def _serving(handler, tls, server_class=BoundedServer, port=0):
     """``handler`` behind the vault's own HTTPS server on a loopback port."""
 
-    server = server_class(("127.0.0.1", 0), handler, tls[0])
+    server = server_class(("127.0.0.1", port), handler, tls[0])
     thread = threading.Thread(target=server.serve_forever, args=(0.05,))
     thread.start()
     try:
@@ -734,6 +734,173 @@ def test_every_request_the_broker_sends_fits_the_vault():
         assert _route_allowed("deepline", "POST", "/api/v2/integrations/%s/execute" % tool, "")
 
 
+# -- the gateway's client, against the real HTTP server ---------------------------
+
+
+@pytest.fixture
+def served_vault():
+    """The real vault server, ending TLS itself, with a KMS-issued identity."""
+
+    provider = FakeProvider({"/api/v2/integrations/boom/execute": UpstreamError("reset", observed_status=None)})
+    vault, tls = _tls_vault(provider)
+    with _serving(make_handler(vault), tls) as (_, url):
+        yield dict(DEPLOYMENT, url=url), provider
+
+
+def _send(transport, url="https://openrouter.ai/api/v1/chat/completions", sealed=None):
+    return transport.send(method="POST", url=url, body=b'{"model":"x"}', timeout_seconds=30,
+                          headers={"authorization": "Bearer " + (sealed or _seal(OPENROUTER_KEY)),
+                                   "content-type": "application/json"})
+
+
+def test_vault_transport_returns_the_answer_and_its_receipt(served_vault):
+    from lab_arena.lead_orders.vault_client import VaultClient, VaultResponse, VaultTransport
+
+    url, provider = served_vault
+    response = _send(VaultTransport(VaultClient(url, TOKEN)))
+    assert isinstance(response, VaultResponse) and response.status == 200 and response.body == b'{"ok":true}'
+    assert _check_receipt(response.vault_receipt)["key_sequence"] == 1
+    assert provider.requests[0]["headers"]["authorization"] == "Bearer " + OPENROUTER_KEY
+
+
+def test_vault_transport_says_whether_the_provider_was_reached(served_vault):
+    from lab_arena.lead_orders.vault_client import VaultClient, VaultTransport, VaultTransportError
+
+    deployment, provider = served_vault
+    with pytest.raises(VaultTransportError) as refused:
+        _send(VaultTransport(VaultClient(deployment, TOKEN)), url="https://openrouter.ai/api/v1/keys")
+    assert refused.value.forwarded is False and refused.value.vault_receipt is None and not provider.requests
+    with pytest.raises(VaultTransportError) as unauthorized:
+        _send(VaultTransport(VaultClient(deployment, "x" * 40)))
+    assert unauthorized.value.forwarded is False
+    with pytest.raises(VaultTransportError) as lost:
+        _send(VaultTransport(VaultClient(deployment, TOKEN)), url="https://code.deepline.com/api/v2/integrations/boom/execute",
+              sealed=_seal(DEEPLINE_KEY, "deepline"))
+    assert lost.value.forwarded is True and _check_receipt(lost.value.vault_receipt)["outcome"] == "transport_error"
+    with pytest.raises(VaultTransportError) as down:
+        _send(VaultTransport(VaultClient(dict(deployment, url="https://127.0.0.1:9"), TOKEN)))
+    assert down.value.forwarded is False
+
+
+def test_vault_client_checks_a_sealed_key(served_vault):
+    from lab_arena.lead_orders.vault_client import VaultClient
+
+    url, _ = served_vault
+    checked = VaultClient(url, TOKEN).check(provider="deepline", envelope=_seal(DEEPLINE_KEY, "deepline"),
+                                            management_envelope=None)
+    assert checked["status"] == "valid" and checked["key_fingerprint"] == env.fingerprint("deepline", DEEPLINE_KEY)
+
+
+def test_re_verifying_leaves_requests_in_flight_alone(served_vault, monkeypatch):
+    from lab_arena.lead_orders import vault_client
+    from lab_arena.lead_orders.vault_client import VaultClient
+
+    deployment, _ = served_vault
+    verified = []
+    real_connect = vault_client.trust.connect
+    monkeypatch.setattr(vault_client.trust, "connect", lambda d: verified.append(1) or real_connect(d))
+    client = VaultClient(deployment, TOKEN)
+    first = client._pinned()
+    # Two threads saw the same connect failure: one re-verifies, the other reuses its result.
+    second = client._pinned(failed=first)
+    assert client._pinned(failed=first) is second and len(verified) == 2
+    # The replaced client stays open for requests still running on it.
+    assert not first.is_closed and first.get(deployment["url"] + "/healthz").json() == {"ok": True}
+
+
+def test_vault_client_follows_a_restarted_vault_to_its_new_tls_key():
+    from lab_arena.lead_orders.vault_client import VaultClient, VaultTransport
+
+    first, tls = _tls_vault()
+    with _serving(make_handler(first), tls) as (server, url):
+        port = server.server_address[1]
+        transport = VaultTransport(VaultClient(dict(DEPLOYMENT, url=url), TOKEN))
+        assert _check_receipt(_send(transport).vault_receipt)["key_sequence"] == 1
+    # Same address, new boot: a new TLS key and a new boot id.
+    restarted, tls = _tls_vault()
+    with _serving(make_handler(restarted), tls, port=port):
+        assert _check_receipt(_send(transport).vault_receipt)["boot_id"] == restarted.boot_id
+
+
+# -- the miner's receipts check ---------------------------------------------------
+
+
+def _receipts_page(count=3):
+    vault = _vault()
+    rows = [{"sequence": n + 1, "call_id": "c%d" % n, "kind": "call", "receipt": vault.call(_call())["receipt"]}
+            for n in range(count)]
+    keys = [{"key_id": "k1", "provider": "openrouter", "key_fingerprint": env.fingerprint("openrouter", OPENROUTER_KEY),
+             "sealed_to": VAULT_KEY}]
+    return {"receipts": rows, "keys": keys}
+
+
+def test_receipts_check_passes_a_complete_history():
+    report = cli.audit_receipts(_receipts_page(), _identity())
+    assert report["ok"] and report["sequences"][0]["highest"] == 3 and report["sequences"][0]["missing"] == []
+
+
+def test_receipts_check_finds_a_hidden_call_a_forgery_and_a_stale_seal():
+    page = _receipts_page(4)
+    del page["receipts"][1]  # a call Leadpoet did not report
+    forged = json.loads(json.dumps(page["receipts"][0]))
+    forged["receipt"]["document"]["key_sequence"] = 9
+    page["receipts"].append(forged)
+    page["keys"].append({"key_id": "old", "provider": "deepline", "key_fingerprint": "sha256:" + "0" * 64,
+                         "sealed_to": None})
+    report = cli.audit_receipts(page, _identity())
+    assert not report["ok"] and report["sequences"][0]["missing"] == [2]
+    assert report["bad_signatures"] == [1] and report["keys_to_seal_again"] == ["old"]
+
+
+def test_receipts_check_trusts_only_the_verified_receipts_key():
+    page = _receipts_page(1)
+    impostor = _key(0x9999)
+    document = page["receipts"][0]["receipt"]["document"]
+    page["receipts"][0]["receipt"] = {"document": document, "public_key": _compressed(impostor).hex(),
+                                      "signature": impostor.sign(canonical(document), ec.ECDSA(hashes.SHA256())).hex()}
+    assert cli.audit_receipts(page, _identity())["bad_signatures"] == [1]
+
+
+def test_a_timeout_after_headers_keeps_the_generation_id_for_the_cost_read_back():
+    from lab_arena.lead_orders.vault_client import VaultTransport, VaultTransportError
+
+    seen = [("X-Generation-Id", "gen-abc.1"), ("Set-Cookie", "drop")]
+    vault = _vault(FakeProvider({"/api/v1/chat/completions": UpstreamError("reset", 200, seen)}))
+    result = vault.call(_call())
+    assert result["observed_headers"] == [["x-generation-id", "gen-abc.1"]]
+
+    class Direct:
+        def call(self, document, timeout):
+            return vault.call(document)
+
+    with pytest.raises(VaultTransportError) as lost:
+        _send(VaultTransport(Direct()))
+    assert lost.value.forwarded is True and lost.value.openrouter_generation_id == "gen-abc.1"
+
+
+def test_pre_failure_headers_that_echo_the_key_are_dropped():
+    vault = _vault(FakeProvider({"/api/v1/chat/completions": UpstreamError("reset", 200, [("x-echo", OPENROUTER_KEY)])}))
+    assert vault.call(_call())["observed_headers"] == []
+
+
+def test_a_vault_fault_leaves_it_unknown_whether_the_call_was_sent():
+    import httpx
+
+    from lab_arena.lead_orders.vault_client import VaultClient, VaultUnavailable
+
+    for status, document in ((500, {"error": "vault_error"}), (503, {"error": "check_unavailable"}), (200, [])):
+        with pytest.raises(VaultUnavailable) as raised:
+            VaultClient._document(httpx.Response(status, json=document))
+        assert raised.value.forwarded is None, status
+
+
+def test_a_withheld_answer_keeps_the_generation_id():
+    echo = UpstreamResponse(200, [("X-Generation-Id", "gen-9"), ("X-Other", "x")], OPENROUTER_KEY.encode())
+    result = _vault(FakeProvider({"/api/v1/chat/completions": echo})).call(_call())
+    assert result["status"] == 502 and ["x-generation-id", "gen-9"] in result["headers"]
+    assert OPENROUTER_KEY not in json.dumps(result)
+
+
 # -- the vault ends TLS itself ------------------------------------------------------
 
 
@@ -774,11 +941,17 @@ def test_the_cli_trusts_only_a_tls_session_the_vault_ends_itself():
 
 
 def test_a_gateway_that_ends_tls_itself_is_refused():
+    from lab_arena.lead_orders.vault_client import VaultClient, VaultTransport, VaultTransportError
+
     vault, _ = _tls_vault()
     # The gateway relays the vault's real, KMS-signed identity over its own TLS key.
     with _tls_server(vault.identity) as (deployment, _):
         with pytest.raises(trust.TrustError, match="does not end in the vault"):
             trust.connect(deployment)
+        # Leadpoet's broker sends nothing through it either.
+        with pytest.raises(VaultTransportError) as refused:
+            _send(VaultTransport(VaultClient(deployment, TOKEN)))
+        assert refused.value.forwarded is False and str(refused.value) == "vault_unverified"
 
 
 def test_a_gateway_cannot_rebind_the_tls_key_without_the_receipts_key():

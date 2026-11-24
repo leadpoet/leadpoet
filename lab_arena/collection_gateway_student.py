@@ -12,8 +12,12 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from lab_arena import collection_judge as judge
-from lab_arena.collection_checkpoint import FILES, prepare_student_source
-from lab_arena.collection_quality import admit_split
+from lab_arena.collection_checkpoint import (
+    FILES,
+    prepare_student_source,
+    correction_scenario,
+)
+from lab_arena.collection_quality import admit_built_split
 from lab_arena.provider_costs import openrouter_generation_cost
 from lab_arena.collection_workflow import store_artifact
 
@@ -95,6 +99,12 @@ def read_owner_charge(transport, owner_key, response, provenance):
     return normalized
 
 
+def native_scenario(objects, run_id, digest):
+    native = _read(objects, run_id, "native", digest, 64 * 1024 * 1024)
+    trace = json.loads(native["original"]["trace.json"])
+    return f"{trace['task']}-s{trace['seed']}"
+
+
 def stage_gateway_source(
     objects, sources, *, run_id, native_sha256, split, transport, owner_key
 ):
@@ -116,7 +126,13 @@ def stage_gateway_source(
         )
     if source["rejected_fatal"] is not True:
         raise ValueError("a correction needs a genuine replayable first failure")
-    admit_split(source["split"], split)
+    scenario = correction_scenario(sources[1], source)
+    admit_built_split(
+        sources[1],
+        scenario,
+        json.loads(native["original"]["trace.json"]).get("shape"),
+        split,
+    )
     charges = [
         read_owner_charge(transport, owner_key, c["response"], provenance)
         for c in provenance["calls"]

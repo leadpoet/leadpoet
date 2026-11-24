@@ -59,7 +59,18 @@ def main(argv=None):
         action.add_argument("--model", choices=tuple(GENERATOR_ROUTES), required=True)
         action.add_argument("--cap-microusd", type=int, required=True)
         action.add_argument("--max-steps", type=int, required=True)
-        action.add_argument("--max-generated-tokens", type=int, required=True)
+        action.add_argument(
+            "--max-generated-tokens",
+            type=int,
+            required=True,
+            help="Maximum output tokens per provider call",
+        )
+        action.add_argument(
+            "--max-run-tokens",
+            type=int,
+            default=65536,
+            help="Maximum output tokens across one run",
+        )
         action.add_argument("--repeat", type=int, default=1)
         action.add_argument(
             "--min-pricing-runs",
@@ -159,6 +170,7 @@ def main(argv=None):
     raw = {
         "schema": SCHEMA,
         "mode": "pilot",
+        "capture_version": "collection.workflow-events.v2",
         "claim_protocol": "collection.fresh-claims.v2",
         "id": args.experiment_id,
         "question": args.question,
@@ -179,6 +191,7 @@ def main(argv=None):
                 "budget_microusd": args.cap_microusd,
                 "max_steps": args.max_steps,
                 "max_tokens": args.max_generated_tokens,
+                "max_run_tokens": args.max_run_tokens,
             }
         ],
     }

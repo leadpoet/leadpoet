@@ -88,6 +88,7 @@ class CollectionBroker:
         self.catalog = catalog
         self.judge_key = judge_key
         self.panel_qualification = None
+        self.record_generation = None
 
     def _rpc(self, name, request_id, **params):
         return self.database.rpc(
@@ -222,6 +223,16 @@ class CollectionBroker:
         ):
             if provider == "judge":
                 raise JudgeUnavailable(model, request_id, "unverified_receipt")
+            if provider == "openrouter" and self.record_generation:
+                self.record_generation(
+                    request_id,
+                    digest(content),
+                    digest(response.body),
+                    response.status,
+                    cost,
+                    upstream_id,
+                    None,
+                )
             raise CollectionCallError("provider reply unavailable or unverified")
         if model:
             metadata = body.get("openrouter_metadata")
@@ -242,9 +253,30 @@ class CollectionBroker:
             ):
                 if provider == "judge":
                     raise JudgeUnavailable(model, request_id, "identity_mismatch")
+                if provider == "openrouter" and self.record_generation:
+                    self.record_generation(
+                        request_id,
+                        digest(content),
+                        digest(response.body),
+                        response.status,
+                        cost,
+                        upstream_id,
+                        None,
+                    )
                 raise CollectionCallError(
                     "assigned model revision did not serve the response"
                 )
+        if provider == "openrouter" and self.record_generation:
+            # No headers, secrets, or output from an unverified route leave this method.
+            self.record_generation(
+                request_id,
+                digest(content),
+                digest(response.body),
+                response.status,
+                cost,
+                upstream_id,
+                response.body,
+            )
         return body
 
     def model_call(self, request_id, parameters, *, judge=None, api="chat"):

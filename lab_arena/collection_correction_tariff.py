@@ -62,6 +62,11 @@ def class_definition(spec, inputs):
         "harness": source_revisions(spec.raw),
         "prompt": spec.policy.prompt_sha256,
         "reader_protocol": protocol_of(spec.raw),
+        **(
+            {"capture_version": spec.raw["capture_version"]}
+            if "capture_version" in spec.raw
+            else {}
+        ),
         "reader_rubric": judge.digest(
             KEYED_RUBRIC if protocol_of(spec.raw) == KEYED_V2 else CLAIM_RUBRIC
         ),

@@ -49,6 +49,8 @@ def pilot(tmp_path, request):
         "anthropic/claude-fable-5.2": "test", "openai/gpt-6.2-astra": "test"
     }
     roles = judge.QUALIFICATION_ROLES if candidate else judge.JUDGES
+    judge_families = {judge.model_family(m) for m in models}
+    drift_slots = [i for i in range(130) if judge.model_family(MODELS[i % len(MODELS)]) not in judge_families][-30:]
     raw = {
         "name": "test",
         "split_manifest": SPLIT,
@@ -66,7 +68,7 @@ def pilot(tmp_path, request):
         "control_slots": {"130": True, "131": False},
         "drift_slots": {
             str(i): {v: dict.fromkeys(judge.PARTS, 3) for v in roles}
-            for i in range(100, 130)
+            for i in drift_slots
         },
     }
     private_cases = {}
@@ -74,7 +76,7 @@ def pilot(tmp_path, request):
         "prior-drift-baseline", "earlier-seed", judge.digest(PROMPT), pilot=True,
         fable_version=tuple(models)[0], astra_version=tuple(models)[1],
     )
-    for i in range(100, 132):
+    for i in [*drift_slots, 130, 131]:
         src = f"reference-{i}"
         sid = raw["scenario_ids"][i // 6]
         original = dict(

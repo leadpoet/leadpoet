@@ -120,7 +120,7 @@ def test_variable_pilot_schedule_requires_new_consent_and_never_pays(
     miner = intake.CollectionIntake(db, ifx.manager(), "pilot")
     legacy, credentials = ifx.registration("A", "pilot")
     miner.register(legacy, legacy["hotkey"], credentials)
-    monkeypatch.delenv("LAB_ARENA_CORRECTION_TERMS_SHA256", raising=False)
+    monkeypatch.setenv("LAB_ARENA_CORRECTION_TERMS_SHA256", "off")
     with pytest.raises(
         intake.IntakeError, match="collection_correction_terms_unavailable"
     ):
@@ -307,7 +307,7 @@ def test_correction_first_polling_falls_through_only_when_idle_or_inactive(
     monkeypatch.setattr(
         runner, "_run_options", lambda args, p, v, **kw: seen.append(v) or 0
     )
-    monkeypatch.delenv("LAB_ARENA_CORRECTION_TERMS_SHA256", raising=False)
+    monkeypatch.setenv("LAB_ARENA_CORRECTION_TERMS_SHA256", "off")
     assert runner.main(argv) == 0 and seen == [{"name": "legacy"}]
     monkeypatch.setenv("LAB_ARENA_CORRECTION_TERMS_SHA256", raw["terms_sha256"])
     seen.clear()

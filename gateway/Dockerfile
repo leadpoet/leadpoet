@@ -56,6 +56,8 @@ COPY gateway/ ./gateway/
 # Gateway runtime imports shared canonical and qualification packages from the
 # repository root. Keep the image aligned with the production package layout.
 COPY lab_arena/ ./lab_arena/
+# Lead orders read the public header of envelopes sealed to the key vault.
+COPY lead_order_vault/ ./lead_order_vault/
 COPY docs/gamma-lead-orders-miner-terms.md ./docs/gamma-lead-orders-miner-terms.md
 COPY leadpoet_canonical/ ./leadpoet_canonical/
 COPY leadpoet_verifier/ ./leadpoet_verifier/

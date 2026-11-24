@@ -1,10 +1,9 @@
 """Provider key registry, ranking and failover rules for lead orders.
 
-Miner keys are stored with the Arena credential encryption
-(``lab_arena.credentials``): the same KMS key and validation probes, with a
-``lead-order:`` submission id in the encryption context so a lead-order
-ciphertext can never be decrypted as an Arena submission's key or the
-reverse. Leadpoet's own keys come from the environment and are always last.
+Miner keys are sealed to the lead-order key vault (``lead_order_vault``) on
+the miner's own machine. Leadpoet stores only the envelope and sends it to
+the vault as each request's credential; it never sees the key. Leadpoet's
+own keys come from the environment and are always last.
 """
 
 from __future__ import annotations
@@ -17,8 +16,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from lab_arena import broker as arena_broker
-from lab_arena import credentials as arena_credentials
-from lab_arena.credentials import CredentialError, CredentialManager
+from lab_arena.lead_orders.vault_client import VaultClient, VaultUnavailable
+from lead_order_vault import envelope as vault_envelope
 
 PROVIDERS = ("openrouter", "deepline")
 LEADPOET_KEY_PREFIX = "leadpoet-"
@@ -31,6 +30,7 @@ FAILOVER_RATE_LIMITED = "rate_limited_no_retry"
 FAILOVER_SPENT_LIMIT = "spent_limit"
 
 _KEY_ID_RE = re.compile(r"^[a-z0-9-]{1,64}$")
+_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class LeadOrderKeyError(RuntimeError):
@@ -97,74 +97,79 @@ def leadpoet_keys(openrouter_key: str, deepline_key: str) -> Dict[str, ProviderK
 
 
 class MinerKeyRegistrar:
-    """Validate and encrypt one miner key per provider with the Arena manager."""
+    """Register miner keys sealed to the lead-order key vault.
 
-    def __init__(self, manager: CredentialManager, *, new_key_id: Callable[[], str] = lambda: str(uuid.uuid4())) -> None:
-        self._manager = manager
+    The miner seals the key on their own machine (``lead_order_vault.cli
+    seal``). Leadpoet stores the envelope, which only the vault can open, and
+    the vault checks the key with its provider before it is accepted.
+    """
+
+    def __init__(self, vault: "VaultClient", *, new_key_id: Callable[[], str] = lambda: str(uuid.uuid4())) -> None:
+        self._vault = vault
         self._new_key_id = new_key_id
 
     def register(self, *, miner_hotkey: str, provider: str, credentials: Mapping[str, Any]) -> Dict[str, Any]:
-        """Return the row to store. Plaintext never leaves this call."""
+        """Return the row to store: the envelope and the vault's key fingerprint."""
 
         if provider not in PROVIDERS:
             raise LeadOrderKeyError("provider_invalid")
-        key_id = self._new_key_id()
-        submission_id = submission_id_for(key_id)
-        # Reuse the Arena probes. OpenRouter needs the runtime key and its
-        # management key (admission-only proof, never stored); Deepline needs
-        # only its workspace key.
+        # OpenRouter also needs the management key's envelope: the vault uses
+        # it once to prove the miner owns the runtime key, and it is not stored.
+        expected = {"envelope", "management_envelope"} if provider == "openrouter" else {"envelope"}
+        if not isinstance(credentials, Mapping) or set(credentials) != expected:
+            raise LeadOrderKeyError("credentials_invalid")
+        for name, purpose in (("envelope", "runtime"), ("management_envelope", "management")):
+            if name not in expected:
+                continue
+            try:
+                header, _ = vault_envelope.read_header(credentials[name])
+            except vault_envelope.EnvelopeError as exc:
+                raise LeadOrderKeyError(str(exc)) from None
+            if header.provider != provider or header.purpose != purpose:
+                raise LeadOrderKeyError("envelope_mismatch")
+            if header.miner_hotkey != miner_hotkey:
+                raise LeadOrderKeyError("envelope_hotkey_mismatch")
         try:
-            if provider == "openrouter":
-                runtime = arena_broker_secret(credentials, "openrouter_api_key")
-                management = arena_broker_secret(credentials, "openrouter_management_key")
-                self._manager._validate_openrouter(runtime, management)
-                secret = runtime
-            else:
-                secret = arena_broker_secret(credentials, "deepline_api_key")
-                self._manager._validate_deepline(secret)
-            ciphertext = self._manager._encrypt(
-                secret, submission_id=submission_id, miner_hotkey=miner_hotkey, provider=provider
-            )
-        except CredentialError as exc:
+            checked = self._vault.check(provider=provider, envelope=credentials["envelope"],
+                                        management_envelope=credentials.get("management_envelope"))
+        except VaultUnavailable as exc:
+            # A 4xx is the envelope's fault (malformed, sealed elsewhere); try again on the rest.
             raise LeadOrderKeyError(exc.code, retryable=exc.retryable) from None
+        if checked.get("status") != "valid":
+            raise LeadOrderKeyError(str(checked.get("reason") or "key_invalid"))
+        fingerprint = checked.get("key_fingerprint")
+        if checked.get("miner_hotkey") != miner_hotkey or checked.get("provider") != provider \
+                or not isinstance(fingerprint, str) or not _FINGERPRINT_RE.fullmatch(fingerprint):
+            raise LeadOrderKeyError("vault_answer_invalid", retryable=True)
+        key_id = self._new_key_id()
         return {
             "key_id": key_id,
             "provider": provider,
             "miner_hotkey": miner_hotkey,
-            "submission_id": submission_id,
-            "ciphertext_b64": ciphertext,
-            "internal_fingerprint": credential_fingerprint(secret),
+            "submission_id": submission_id_for(key_id),
+            "ciphertext_b64": credentials["envelope"],
+            "internal_fingerprint": fingerprint,
         }
 
-    def decrypt(self, key: ProviderKey) -> str:
-        if key.is_leadpoet or key.ciphertext_b64 is None or key.miner_hotkey is None:
+    @staticmethod
+    def credential(key: ProviderKey) -> str:
+        """The envelope the broker sends as the request's credential."""
+
+        if key.is_leadpoet or key.miner_hotkey is None or key.ciphertext_b64 is None:
             raise LeadOrderKeyError("miner_credentials_unavailable")
-        try:
-            return self._manager.runtime_key(
-                {
-                    "provider": key.provider,
-                    "submission_id": submission_id_for(key.key_id),
-                    "miner_hotkey": key.miner_hotkey,
-                    "ciphertext_b64": key.ciphertext_b64,
-                },
-                key.provider,
-            )
-        except CredentialError as exc:
-            raise LeadOrderKeyError(exc.code, retryable=exc.retryable) from None
+        if sealed_to(key.ciphertext_b64) is None:
+            # Stored before the vault: the miner must seal it again.
+            raise LeadOrderKeyError("key_needs_reseal")
+        return key.ciphertext_b64
 
 
-def arena_broker_secret(credentials: Mapping[str, Any], field: str) -> str:
-    """Shape-check one submitted secret with the Arena validators."""
+def sealed_to(stored: Optional[str]) -> Optional[str]:
+    """The vault key an envelope was sealed to, or ``None`` for anything else."""
 
-    if not isinstance(credentials, Mapping) or set(credentials) - {
-        "openrouter_api_key", "openrouter_management_key", "deepline_api_key"
-    }:
-        raise CredentialError("submission_credentials_invalid")
-    code = "%s_invalid" % field
-    value = credentials.get(field)
-    if field.startswith("openrouter_"):
-        return arena_credentials._openrouter_key(value, code)
-    return arena_credentials._bounded_secret(value, code)
+    try:
+        return vault_envelope.read_header(stored)[0].vault_key
+    except vault_envelope.EnvelopeError:
+        return None
 
 
 def rank_keys(
@@ -234,5 +239,6 @@ __all__ = [
     "failover_reason",
     "leadpoet_keys",
     "rank_keys",
+    "sealed_to",
     "submission_id_for",
 ]

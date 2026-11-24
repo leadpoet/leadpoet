@@ -2,11 +2,17 @@
 
     python -m lead_order_vault.cli verify
     python -m lead_order_vault.cli seal --provider openrouter --hotkey <ss58>
+    python -m lead_order_vault.cli receipts receipts.json
 
 ``seal`` reads the key from the terminal (never from arguments, so it stays
 out of shell history), checks that the vault's encryption key was issued by
 Phala's KMS to the app named in ``deployment.json``, and prints an envelope.
 Submit the envelope to ``POST /lead-orders/keys``. Only the vault can open it.
+
+``receipts`` reads every page of ``GET /lead-orders/vault-receipts`` from
+``since=0`` (saved files, or ``-`` for stdin), checks every receipt's signature against the
+vault's receipts key, and reports any gap in each key's sequence numbers and
+any key that must be sealed again because the vault's key changed.
 
 The check needs nothing from Leadpoet: the app id and the KMS root key in
 ``deployment.json`` can be compared with the on-chain records on Base.
@@ -20,11 +26,15 @@ import json
 import sys
 import urllib.request
 from pathlib import Path
-from typing import Callable, Mapping, Optional
+from typing import Callable, Dict, List, Mapping, Optional, Tuple
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from . import chain
 from . import envelope as env
-from .vault import ENCRYPTION_DOMAIN, KEY_ALGORITHM, RECEIPTS_DOMAIN
+from .vault import ENCRYPTION_DOMAIN, KEY_ALGORITHM, RECEIPTS_DOMAIN, RECEIPT_SCHEMA, canonical
 
 DEPLOYMENT_FILE = Path(__file__).with_name("deployment.json")
 _DEPLOYMENT_FIELDS = ("url", "app_id", "kms_root_public_key", "kms_contract", "chain")
@@ -80,6 +90,44 @@ def seal_key(*, provider: str, hotkey: str, identity: Mapping, read_secret: Call
     return sealed
 
 
+def audit_receipts(page: Mapping, identity: Mapping) -> Mapping:
+    """Check signatures and per-key sequences in one vault-receipts answer.
+
+    Only the receipts key from the verified identity is trusted, never the
+    ``public_key`` a receipt carries. Numbers restart with each vault boot,
+    so a sequence is checked per key and boot.
+    """
+
+    receipts_key = ec.EllipticCurvePublicKey.from_encoded_point(
+        ec.SECP256K1(), bytes.fromhex(identity["receipts"]["public_key"]))
+    bad: List[int] = []
+    seen: Dict[Tuple[str, str], List[int]] = {}
+    for row in page.get("receipts") or []:
+        signed = row.get("receipt") if isinstance(row, Mapping) else None
+        document = signed.get("document") if isinstance(signed, Mapping) else None
+        try:
+            if not isinstance(document, Mapping) or document.get("schema") != RECEIPT_SCHEMA:
+                raise InvalidSignature
+            receipts_key.verify(bytes.fromhex(str(signed.get("signature"))), canonical(document),
+                                ec.ECDSA(hashes.SHA256()))
+        except (InvalidSignature, ValueError, TypeError):
+            bad.append(row.get("sequence") if isinstance(row, Mapping) else None)
+            continue
+        seen.setdefault((document["key_fingerprint"], document["boot_id"]), []).append(int(document["key_sequence"]))
+    sequences = []
+    for (fingerprint, boot_id), numbers in sorted(seen.items()):
+        numbers.sort()
+        have = set(numbers)
+        missing = [n for n in range(1, numbers[-1] + 1) if n not in have]
+        sequences.append({"key_fingerprint": fingerprint, "boot_id": boot_id, "receipts": len(numbers),
+                          "highest": numbers[-1], "missing": missing[:100], "missing_count": len(missing)})
+    current = identity["encryption"]["public_key"]
+    reseal = [key.get("key_id") for key in page.get("keys") or []
+              if isinstance(key, Mapping) and key.get("sealed_to") != current]
+    return {"ok": not bad and not reseal and not any(s["missing_count"] for s in sequences),
+            "bad_signatures": bad, "sequences": sequences, "keys_to_seal_again": reseal}
+
+
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(prog="lead_order_vault")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -87,6 +135,9 @@ def main(argv: Optional[list] = None) -> int:
     seal = commands.add_parser("seal", help="encrypt a provider key to the vault")
     seal.add_argument("--provider", choices=env.PROVIDERS, required=True)
     seal.add_argument("--hotkey", required=True)
+    receipts = commands.add_parser("receipts", help="check the receipts Leadpoet reports for your keys")
+    receipts.add_argument("files", nargs="+",
+                          help="every page of GET /lead-orders/vault-receipts from since=0, or - for stdin")
     args = parser.parse_args(argv)
     try:
         deployment = load_deployment()
@@ -96,9 +147,16 @@ def main(argv: Optional[list] = None) -> int:
                               "encryption_public_key": identity["encryption"]["public_key"],
                               "receipts_public_key": identity["receipts"]["public_key"]}, indent=2))
             return 0
+        if args.command == "receipts":
+            pages = [json.loads(sys.stdin.read() if name == "-" else Path(name).read_text()) for name in args.files]
+            merged = {"receipts": [row for page in pages for row in page.get("receipts") or []],
+                      "keys": pages[-1].get("keys") or []}
+            report = audit_receipts(merged, identity)
+            print(json.dumps(report, indent=2))
+            return 0 if report["ok"] else 2
         sealed = seal_key(provider=args.provider, hotkey=args.hotkey, identity=identity,
                           read_secret=lambda prompt: getpass.getpass(prompt).strip())
-    except (CliError, env.EnvelopeError) as error:
+    except (CliError, env.EnvelopeError, OSError, ValueError) as error:
         print("error: %s" % error, file=sys.stderr)
         return 1
     print(json.dumps(sealed, indent=2))

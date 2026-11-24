@@ -62,16 +62,26 @@ trust point. Approvals are public on Base, but Phala has no timelock.
 ```bash
 python -m lead_order_vault.cli verify
 python -m lead_order_vault.cli seal --provider openrouter --hotkey <your hotkey>
+python -m lead_order_vault.cli receipts page1.json page2.json
 ```
 
-`seal` reads the key from the terminal and prints the envelope to submit.
-Both commands refuse until the vault is deployed.
+`seal` reads the key from the terminal and prints the envelope to submit as
+`credentials` to `POST /lead-orders/keys`. `receipts` takes every page of
+`GET /lead-orders/vault-receipts` from `since=0`. It checks each signature
+against the vault's receipts key, lists any gap in each key's sequence, and
+names any key to seal again because the vault's key changed. It exits 2 when
+something is wrong. All commands refuse until the vault is deployed.
 
 ## Known limits
 
 - Sequence numbers restart with the vault. A hidden call just before a
   restart, or after a key's last reported call, leaves no gap.
-- If Phala rotates its KMS root, miners must seal their keys again.
+- If Phala rotates its KMS root, miners must seal their keys again, with a
+  new provider key: a key is registered once, and a revoked key cannot
+  return.
+- A second vault instance of the same app numbers calls under its own boot
+  id. Hidden calls made only there leave no gap. Only the app's owner can
+  start one.
 - One instance, no high availability.
 - The vault does not judge which Deepline tools are worth paying for; the
   gateway does, and the receipts show every call.

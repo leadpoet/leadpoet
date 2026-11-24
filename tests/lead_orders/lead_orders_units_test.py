@@ -6,15 +6,18 @@ import json
 from fractions import Fraction
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from lab_arena import signing
 from lab_arena.broker import ProviderResponse
 from lab_arena.chain import BlockRef
-from lab_arena.credentials import CredentialError
 from lab_arena.lead_orders import auth, keys, money, receipts, rewards
 from lab_arena.lead_orders.config import LeadOrdersConfigError, load_config
 from lab_arena.lead_orders.gamma import GammaBalanceReader, GammaReadError
 from lab_arena.lead_orders.policy import unsigned_policy
+from lab_arena.lead_orders.vault_client import VaultUnavailable
+from lead_order_vault import envelope as vault_envelope
 
 POLICY = unsigned_policy()
 ALICE = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
@@ -187,38 +190,90 @@ def test_failover_reasons(status, headers, body, reason):
         assert got == reason
 
 
-class FakeManager:
-    def __init__(self):
-        self.encrypted = []
-
-    def _validate_openrouter(self, runtime, management):
-        if runtime.endswith("bad"):
-            raise CredentialError("openrouter_key_rejected")
-
-    def _validate_deepline(self, secret):
-        pass
-
-    def _encrypt(self, secret, *, submission_id, miner_hotkey, provider):
-        self.encrypted.append((submission_id, miner_hotkey, provider))
-        return "Y2lwaGVy"
-
-    def runtime_key(self, row, provider):
-        assert row["submission_id"].startswith("lead-order:")
-        return "decrypted"
+VAULT_PRIVATE = ec.generate_private_key(ec.SECP256K1())
+VAULT_KEY = VAULT_PRIVATE.public_key().public_bytes(
+    serialization.Encoding.X962, serialization.PublicFormat.CompressedPoint).hex()
 
 
-def test_registrar_binds_ciphertext_to_a_lead_order_submission_id():
-    manager = FakeManager()
-    registrar = keys.MinerKeyRegistrar(manager, new_key_id=lambda: "k1")
-    row = registrar.register(miner_hotkey=ALICE, provider="deepline", credentials={"deepline_api_key": "d" * 40})
-    assert row["submission_id"] == "lead-order:k1" and manager.encrypted == [("lead-order:k1", ALICE, "deepline")]
+def sealed(secret, provider="deepline", purpose="runtime", hotkey=ALICE, vault_key=VAULT_KEY):
+    return vault_envelope.seal(secret, vault_envelope.Header(provider, purpose, hotkey, vault_key))
+
+
+class FakeVault:
+    """Answers /v1/check the way the vault does, opening the real envelope."""
+
+    def __init__(self, status="valid", error=None):
+        self.status, self.error, self.checked = status, error, []
+
+    def check(self, *, provider, envelope, management_envelope):
+        if self.error is not None:
+            raise self.error
+        secret, header = vault_envelope.open_envelope(envelope, VAULT_PRIVATE)
+        self.checked.append((provider, management_envelope is not None))
+        answer = {"status": self.status, "provider": provider, "miner_hotkey": header.miner_hotkey,
+                  "key_fingerprint": vault_envelope.fingerprint(provider, secret)}
+        return dict(answer, reason="deepline_api_key_invalid") if self.status != "valid" else answer
+
+
+def test_registrar_stores_only_the_envelope_and_the_vaults_fingerprint():
+    vault = FakeVault()
+    registrar = keys.MinerKeyRegistrar(vault, new_key_id=lambda: "k1")
+    envelope = sealed("d" * 40)
+    row = registrar.register(miner_hotkey=ALICE, provider="deepline", credentials={"envelope": envelope})
+    assert row["submission_id"] == "lead-order:k1" and row["ciphertext_b64"] == envelope
+    assert row["internal_fingerprint"] == vault_envelope.fingerprint("deepline", "d" * 40)
     assert "d" * 40 not in json.dumps(row)
     stored = keys.ProviderKey("k1", "deepline", ALICE, 1, row["internal_fingerprint"], row["ciphertext_b64"])
-    assert registrar.decrypt(stored) == "decrypted"
-    with pytest.raises(keys.LeadOrderKeyError):
-        registrar.register(miner_hotkey=ALICE, provider="scrapingdog", credentials={})
-    with pytest.raises(keys.LeadOrderKeyError):
-        registrar.register(miner_hotkey=ALICE, provider="deepline", credentials={"other": "x"})
+    assert registrar.credential(stored) == envelope
+    assert keys.sealed_to(envelope) == VAULT_KEY
+
+
+def test_registrar_needs_the_management_envelope_for_openrouter():
+    vault = FakeVault()
+    registrar = keys.MinerKeyRegistrar(vault, new_key_id=lambda: "k2")
+    credentials = {"envelope": sealed("sk-or-v1-" + "a" * 64, "openrouter"),
+                   "management_envelope": sealed("sk-or-v1-" + "b" * 64, "openrouter", "management")}
+    registrar.register(miner_hotkey=ALICE, provider="openrouter", credentials=credentials)
+    assert vault.checked == [("openrouter", True)]
+    with pytest.raises(keys.LeadOrderKeyError, match="credentials_invalid"):
+        registrar.register(miner_hotkey=ALICE, provider="openrouter", credentials={"envelope": credentials["envelope"]})
+    swapped = {"envelope": credentials["management_envelope"], "management_envelope": credentials["envelope"]}
+    with pytest.raises(keys.LeadOrderKeyError, match="envelope_mismatch"):
+        registrar.register(miner_hotkey=ALICE, provider="openrouter", credentials=swapped)
+
+
+@pytest.mark.parametrize("credentials,code", [
+    ({"deepline_api_key": "d" * 40}, "credentials_invalid"),
+    ({"envelope": "not-an-envelope"}, "envelope_invalid"),
+    ({"envelope": sealed("d" * 40, hotkey=BOB)}, "envelope_hotkey_mismatch"),
+    ({"envelope": sealed("sk-or-v1-" + "a" * 64, "openrouter")}, "envelope_mismatch"),
+])
+def test_registrar_refuses_envelopes_that_are_not_this_miners_key(credentials, code):
+    vault = FakeVault()
+    with pytest.raises(keys.LeadOrderKeyError, match=code):
+        keys.MinerKeyRegistrar(vault).register(miner_hotkey=ALICE, provider="deepline", credentials=credentials)
+    assert vault.checked == []
+
+
+def test_registrar_reports_vault_refusals_and_outages():
+    with pytest.raises(keys.LeadOrderKeyError, match="deepline_api_key_invalid") as invalid:
+        keys.MinerKeyRegistrar(FakeVault(status="invalid")).register(
+            miner_hotkey=ALICE, provider="deepline", credentials={"envelope": sealed("d" * 40)})
+    assert not invalid.value.retryable
+    foreign = VaultUnavailable("vault_sealed_to_another_vault", forwarded=False, status=400)
+    down = VaultUnavailable("vault_unreachable", forwarded=False)
+    for error, retryable in ((foreign, False), (down, True)):
+        with pytest.raises(keys.LeadOrderKeyError) as raised:
+            keys.MinerKeyRegistrar(FakeVault(error=error)).register(
+                miner_hotkey=ALICE, provider="deepline", credentials={"envelope": sealed("d" * 40)})
+        assert raised.value.code == error.code and raised.value.retryable is retryable
+
+
+def test_a_key_stored_before_the_vault_must_be_sealed_again():
+    old = keys.ProviderKey("k1", "deepline", ALICE, 1, "sha256:" + "0" * 64, "Y2lwaGVy")
+    with pytest.raises(keys.LeadOrderKeyError, match="key_needs_reseal") as raised:
+        keys.MinerKeyRegistrar(FakeVault()).credential(old)
+    assert not raised.value.retryable and keys.sealed_to("Y2lwaGVy") is None
 
 
 # -- auth -----------------------------------------------------------------------

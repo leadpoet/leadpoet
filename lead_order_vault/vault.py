@@ -96,9 +96,13 @@ class VaultError(Exception):
 class UpstreamError(Exception):
     """The provider could not be reached or did not answer in full."""
 
-    def __init__(self, message: str, observed_status: Optional[int] = None) -> None:
+    def __init__(self, message: str, observed_status: Optional[int] = None,
+                 observed_headers: Optional[List[Tuple[str, str]]] = None) -> None:
         super().__init__(message)
         self.observed_status = observed_status
+        # Headers that arrived before the failure; they carry the provider's
+        # request id, which the broker needs to read the cost back.
+        self.observed_headers = observed_headers or []
 
 
 @dataclass(frozen=True)
@@ -109,6 +113,14 @@ class UpstreamResponse:
 
 
 Upstream = Callable[[str, str, str, Mapping[str, str], bytes, float, int], UpstreamResponse]
+
+
+# Provider request ids, kept on a withheld answer so its cost can be read back.
+REQUEST_ID_HEADERS = frozenset({"x-generation-id", "x-deepline-request-id", "x-vercel-id"})
+
+
+def _kept_headers(headers) -> List[List[str]]:
+    return [[name.lower(), value] for name, value in headers if name.lower() not in DROPPED_HEADERS]
 
 
 def canonical(document: Mapping) -> bytes:
@@ -126,18 +138,19 @@ def https_upstream(method: str, host: str, target: str, headers: Mapping[str, st
 
     connection = http.client.HTTPSConnection(host, 443, timeout=timeout, context=ssl.create_default_context())
     status: Optional[int] = None
+    seen: List[Tuple[str, str]] = []
     try:
         connection.request(method, target, body=body if method == "POST" else None, headers=dict(headers))
         response = connection.getresponse()
-        status = response.status
+        status, seen = response.status, list(response.getheaders())
         data = response.read(max_bytes + 1)
         if len(data) > max_bytes:
-            raise UpstreamError("response_too_large", status)
-        return UpstreamResponse(status, list(response.getheaders()), data)
+            raise UpstreamError("response_too_large", status, seen)
+        return UpstreamResponse(status, seen, data)
     except UpstreamError:
         raise
     except (OSError, http.client.HTTPException, ssl.SSLError):
-        raise UpstreamError("upstream_unavailable", status) from None
+        raise UpstreamError("upstream_unavailable", status, seen) from None
     finally:
         connection.close()
 
@@ -235,14 +248,17 @@ class Vault:
             response = self._upstream(method, parts.hostname, target, outbound, body, timeout, max_bytes)
         except UpstreamError as error:
             receipt.update(outcome="transport_error", response_status=error.observed_status, response_sha256=None)
+            observed = _kept_headers(error.observed_headers)
             return {"transport_error": str(error), "observed_status": error.observed_status,
+                    "observed_headers": [] if any(secret in value for _, value in observed) else observed,
                     "receipt": self._signed(receipt)}
-        response_headers = [[name.lower(), value] for name, value in response.headers
-                            if name.lower() not in DROPPED_HEADERS]
+        response_headers = _kept_headers(response.headers)
         secret_bytes = secret.encode("utf-8")
         if secret_bytes in response.body or any(secret in value for _, value in response_headers):
             receipt.update(outcome="key_echo_withheld", response_status=response.status, response_sha256=None)
-            return {"status": 502, "headers": [["content-type", "application/json"]],
+            ids = [[name, value] for name, value in response_headers
+                   if name in REQUEST_ID_HEADERS and secret not in value]
+            return {"status": 502, "headers": [["content-type", "application/json"]] + ids,
                     "body_b64": base64.b64encode(canonical({"error": {"code": "vault_response_withheld"}})).decode(),
                     "receipt": self._signed(receipt)}
         receipt.update(outcome="response", response_status=response.status,

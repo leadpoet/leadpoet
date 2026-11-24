@@ -20,20 +20,20 @@ import pytest
 
 from lab_arena import signing
 from lab_arena.broker import ProviderResponse, ProviderTransportError, price_table_from_models_response
-from lab_arena.credentials import CredentialError
 from lab_arena.lead_orders import money, receipts, suppressions
 from lab_arena.lead_orders.auth import BuyerIdentity, order_token_hash
 from lab_arena.lead_orders.broker import BrokerRequest, LeadOrderBroker, LeadOrderBrokerError
 from lab_arena.lead_orders.config import LeadOrdersConfig
 from lab_arena.lead_orders.gamma import GammaReading
-from lab_arena.lead_orders.keys import MinerKeyRegistrar, ProviderKey
+from lab_arena.lead_orders.keys import ProviderKey
+from lab_arena.lead_orders.vault_client import VaultResponse, VaultTransportError
 from lab_arena.lead_orders.policy import DEFAULT_POLICY_BODY, sign_policy, load_policy, unsigned_policy
 from lab_arena.lead_orders.service import LeadOrderService, LeadOrderServiceError
 from lab_arena.lead_orders.store import LeadOrderStore
 from lab_arena.store import ArenaStoreError, PsycopgTransport
 from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
 
-MIGRATIONS = ("179-lab-arena-v1.sql", "707-lead-orders.sql")
+MIGRATIONS = ("179-lab-arena-v1.sql", "707-lead-orders.sql", "731-lead-order-vault-receipts.sql")
 USD = 1_000_000
 B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 MODEL = "openai/gpt-test"
@@ -135,7 +135,7 @@ class FakeRegistrar:
     def __init__(self, secrets):
         self.secrets = secrets
 
-    def decrypt(self, key):
+    def credential(self, key):
         return self.secrets[key.key_id]
 
     def register(self, *, miner_hotkey, provider, credentials):
@@ -184,9 +184,9 @@ def make(store, mode, *, staff=(), gamma=None, registrar=None, epoch=None):
     return config, service, epoch
 
 
-def broker_for(store, transport, *, registrar=None, epoch=None):
+def broker_for(store, transport, *, registrar=None, epoch=None, miner_transport=None):
     return LeadOrderBroker(
-        store=store, policy=POLICY, transport=transport, registrar=registrar,
+        store=store, policy=POLICY, transport=transport, registrar=registrar, miner_transport=miner_transport,
         leadpoet_secrets={"openrouter": SECRET, "deepline": SECRET},
         price_table=lambda: PRICE_TABLE, current_epoch=epoch or Epoch(),
     )
@@ -209,7 +209,7 @@ def test_tables_are_append_only_rls_on_and_not_granted(owner, store):
         cur.execute("""SELECT c.relname, c.relrowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
                        WHERE n.nspname='public' AND c.relkind='r' AND c.relname LIKE 'lead_order%'""")
         tables = dict(cur.fetchall())
-        assert len(tables) == 24 and all(tables.values())
+        assert len(tables) == 25 and all(tables.values())
         for role in ("anon", "authenticated", "service_role", "lab_arena_service"):
             cur.execute("""SELECT count(*) FROM information_schema.role_table_grants
                            WHERE grantee=%s AND table_name LIKE 'lead_order%%'""", (role,))
@@ -1478,52 +1478,111 @@ def test_openrouter_settlement_uses_paid_result_after_catalog_expires(store):
 
 
 @pytest.mark.parametrize("phase", ["dispatch", "readback"])
-def test_transient_kms_failure_keeps_miner_key_eligible(store, owner, phase):
+def test_a_vault_outage_costs_nothing_and_keeps_the_miner_key_eligible(store, owner, phase):
     service, registrar, buyer, epoch, _ = live(store, owner, epoch_value=9402)
     miner = hotkey()
     accept_terms(service, miner)
     key = service.register_key(miner, KEY)
-    fixture_key = "test-runtime-key"
-    registrar.secrets[key["key_id"]] = fixture_key
+    registrar.secrets[key["key_id"]] = "lov1.test-envelope"
     service.place_order(buyer, {"leads": 10, **ORDER})
     token, order_id = claim(service)
     generation = "gen-transient-1"
+    down = VaultTransportError("vault_unreachable", forwarded=False)
     transport = FakeTransport([ProviderTransportError("timeout", openrouter_generation_id=generation)])
     broker = broker_for(store, transport, registrar=registrar, epoch=epoch)
-    if phase == "readback":
-        broker.call(token, dear_chat())
-        service.finish(order_id, {"status": "failed"})
-
-    class RecoveringKms:
-        available = False
-
-        def runtime_key(self, row, provider):
-            if not self.available:
-                raise CredentialError("credential_kms_unavailable", retryable=True)
-            return fixture_key
-
-    kms = RecoveringKms()
-    broker = broker_for(store, transport, registrar=MinerKeyRegistrar(kms), epoch=epoch)
     if phase == "dispatch":
-        with pytest.raises(LeadOrderBrokerError) as unavailable:
-            broker.call(token, dear_chat())
-        assert unavailable.value.status == 503
-        assert store.exhausted_keys(order_id) == [] and not transport.sent
-        kms.available = True
-        transport.responses = [openrouter_ok("0.01")]
+        transport.responses = [down, openrouter_ok("0.01")]
+        assert broker.call(token, dear_chat()).status == 502
+        refused, = store.calls(order_id)
+        # Nothing reached the provider, so nothing is owed and nothing stays uncertain.
+        assert refused["status"] == "settled" and refused["cost_microusd"] == 0
+        assert store.exhausted_keys(order_id) == []
         assert broker.call(token, dear_chat()).status == 200
-        assert store.calls(order_id)[0]["key_id"] == key["key_id"]
+        assert [row["key_id"] for row in store.calls(order_id)] == [key["key_id"]] * 2
         service.finish(order_id, {"status": "failed"})
     else:
+        broker.call(token, dear_chat())
+        service.finish(order_id, {"status": "failed"})
+        transport.responses = [down]
         assert broker.resolve_uncertain() == 0
         row, = store.calls(order_id)
         assert sql(owner, "SELECT outcome FROM lead_order_call_readbacks WHERE call_id=%s",
                    (row["call_id"],)) == [("retry",)]
         backdate(owner, "lead_order_call_readbacks", "attempted_at", row["call_id"], 601)
-        kms.available = True
         record = {"data": {"id": generation, "total_cost": "0.01"}}
         transport.responses = [ProviderResponse(200, {}, json.dumps(record).encode())]
         assert broker.resolve_uncertain() == 1
+
+
+def vault_receipt(miner, sequence, fingerprint, *, readback=False, boot_id="boot-1"):
+    """The signed receipt shape the vault returns (signatures are the miner's to check)."""
+    path = "/api/v1/generation" if readback else "/api/v1/chat/completions"
+    return {"document": {"schema": "leadpoet.lead_order_vault.receipt.v1", "boot_id": boot_id,
+                         "key_sequence": sequence, "key_fingerprint": fingerprint, "miner_hotkey": miner,
+                         "method": "GET" if readback else "POST", "path": path},
+            "signature": "30" * 35, "public_key": "02" + "ab" * 32}
+
+
+def test_vault_receipts_are_kept_for_calls_and_read_backs_and_shown_only_to_their_miner(store, owner):
+    service, registrar, buyer, epoch, _ = live(store, owner, epoch_value=9500)
+    miner, other = hotkey(), hotkey()
+    accept_terms(service, miner)
+    key = service.register_key(miner, KEY)
+    registrar.secrets[key["key_id"]] = "lov1.test-envelope"
+    fp, = [row["internal_fingerprint"] for row in store.keys("openrouter") if row["key_id"] == key["key_id"]]
+    service.place_order(buyer, {"leads": 10, **ORDER})
+    token, order_id = claim(service)
+    paid = openrouter_ok("0.40")
+    miner_transport = FakeTransport([
+        VaultResponse(paid.status, paid.headers, paid.body, vault_receipt=vault_receipt(miner, 1, fp)),
+        VaultTransportError("provider_unreachable", forwarded=True, vault_receipt=vault_receipt(miner, 2, fp),
+                            openrouter_generation_id="gen-vault-1"),
+    ])
+    leadpoet_transport = FakeTransport([])
+    broker = broker_for(store, leadpoet_transport, registrar=registrar, epoch=epoch, miner_transport=miner_transport)
+    assert broker.call(token, dear_chat()).status == 200
+    assert broker.call(token, dear_chat()).status == 502
+    assert not leadpoet_transport.sent  # miner keys never take the direct path
+    assert miner_transport.sent[0]["headers"]["authorization"] == "Bearer lov1.test-envelope"
+    first, lost = store.calls(order_id)
+    assert lost["status"] == "uncertain"  # the vault forwarded it: the cost is read back, not assumed
+    service.finish(order_id, {"status": "delivered", "leads_delivered": 10, "delivery_url": "https://f.example/x"})
+    record = {"data": {"id": "gen-vault-1", "total_cost": "0.01"}}
+    miner_transport.responses = [VaultResponse(200, {}, json.dumps(record).encode(),
+                                               vault_receipt=vault_receipt(miner, 3, fp, readback=True))]
+    assert broker.resolve_uncertain() == 1
+    assert miner_transport.sent[-1]["url"].endswith("gen-vault-1")
+
+    # The read-back is a call on the miner's key too, so its receipt is kept.
+    page = service.vault_receipts(miner, "0")
+    got = [(row["call_id"], row["kind"], row["receipt"]["document"]["key_sequence"]) for row in page["receipts"]]
+    assert got == [(first["call_id"], "call", 1), (lost["call_id"], "call", 2), (lost["call_id"], "readback", 3)]
+    assert page["keys"] == [{"key_id": key["key_id"], "provider": "openrouter",
+                             "key_fingerprint": page["keys"][0]["key_fingerprint"], "sealed_to": None}]
+    assert service.vault_receipts(other, "0") == {"receipts": [], "keys": []}
+    assert service.vault_receipts(miner, str(page["receipts"][-1]["sequence"]))["receipts"] == []
+
+    # The same receipt twice is one row; a receipt naming another miner is refused.
+    assert store.record_vault_receipt(call_id=first["call_id"], kind="call",
+                                      receipt=vault_receipt(miner, 1, fp))["status"] == "exists"
+    # A hidden call's receipt cannot be filed under a reported call, another key, or the wrong kind.
+    other_key = "sha256:" + "e" * 64
+    for kind, bad in (("call", vault_receipt(miner, 9, fp)), ("call", vault_receipt(other, 9, fp)),
+                      ("call", vault_receipt(miner, 0, fp)), ("call", vault_receipt(miner, 9, other_key)),
+                      ("readback", vault_receipt(miner, 9, fp)), ("call", vault_receipt(miner, 9, fp, readback=True))):
+        assert store.record_vault_receipt(call_id=first["call_id"], kind=kind, receipt=bad)["status"] == "not_recordable"
+    with pytest.raises(LeadOrderServiceError):
+        service.vault_receipts(miner, "-1")
+
+    # The same provider key, sealed again after a revoke, is a clear 409.
+    revoke_all_keys(store)
+    duplicate = {"key_id": "k" + uuid.uuid4().hex[:20], "provider": "openrouter", "miner_hotkey": miner,
+                 "ciphertext_b64": "Y2lwaGVy", "internal_fingerprint": fp}
+    duplicate["submission_id"] = "lead-order:" + duplicate["key_id"]
+    registrar.register = lambda **_: duplicate
+    with pytest.raises(LeadOrderServiceError) as again:
+        service.register_key(miner, KEY)
+    assert (again.value.status, again.value.code) == (409, "key_already_registered")
 
 
 def test_read_back_records_attempts_skips_terminal_and_backs_off(store, owner):

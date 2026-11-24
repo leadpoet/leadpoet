@@ -104,7 +104,7 @@ class MinerKeyRegistrar:
     the vault checks the key with its provider before it is accepted.
     """
 
-    def __init__(self, vault: "VaultClient", *, new_key_id: Callable[[], str] = lambda: str(uuid.uuid4())) -> None:
+    def __init__(self, vault: VaultClient, *, new_key_id: Callable[[], str] = lambda: str(uuid.uuid4())) -> None:
         self._vault = vault
         self._new_key_id = new_key_id
 
@@ -136,7 +136,8 @@ class MinerKeyRegistrar:
             checked = self._vault.check(provider=provider, envelope=credentials["envelope"],
                                         management_envelope=credentials.get("management_envelope"))
         except VaultUnavailable as exc:
-            # A 4xx is the envelope's fault (malformed, sealed elsewhere); try again on the rest.
+            # A 4xx is the envelope's fault (malformed, sealed elsewhere), so the
+            # miner must fix it; an outage, or our caller token, is retried.
             raise LeadOrderKeyError(exc.code, retryable=exc.retryable) from None
         if checked.get("status") != "valid":
             raise LeadOrderKeyError(str(checked.get("reason") or "key_invalid"))

@@ -39,6 +39,7 @@ import http.client
 import json
 import os
 import re
+import signal
 import socket
 import ssl
 import sys
@@ -184,19 +185,28 @@ def https_upstream(method: str, host: str, target: str, headers: Mapping[str, st
                                              context=context or ssl.create_default_context())
     status: Optional[int] = None
     seen: List[Tuple[str, str]] = []
+
+    def time_left() -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise UpstreamError("upstream_timeout", status, seen)
+        return remaining
+
     try:
         connection.request(method, target, body=body if method == "POST" else None, headers=dict(headers))
+        # Our own handle: getresponse() drops the connection's socket when
+        # the answer says it will close the connection.
+        sock = connection.sock
+        sock.settimeout(time_left())
         response = connection.getresponse()
         status, seen = response.status, list(response.getheaders())
         chunks: List[bytes] = []
         size = 0
-        while True:
-            # Each socket read gets only the time left, so a provider that
-            # trickles its answer cannot outlast the caller's timeout.
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise UpstreamError("upstream_timeout", status, seen)
-            connection.sock.settimeout(remaining)
+        # The response closes the socket once the body is in.
+        while not response.isclosed():
+            # Each read gets only the time left, so a provider that trickles
+            # its answer cannot outlast the caller's timeout.
+            sock.settimeout(time_left())
             chunk = response.read1(65536)
             if not chunk:
                 break
@@ -278,8 +288,7 @@ class Vault:
     def call(self, request: Mapping) -> Mapping:
         """Forward one provider request with the miner's key in place of its envelope."""
 
-        method, url, headers, body, timeout, max_bytes = _parse_call(request)
-        parts = urlsplit(url)
+        method, parts, headers, body, timeout, max_bytes = _parse_call(request)
         provider = HOSTS[parts.hostname]
         sealed = headers.pop("authorization", "")
         if not sealed.startswith("Bearer " + env.PREFIX):
@@ -291,9 +300,7 @@ class Vault:
                 raise
             # The key cannot be used. Answer like the provider would, so the
             # broker retires this key and moves on; nothing was sent or billed.
-            return {"status": 401, "headers": [["content-type", "application/json"]],
-                    "body_b64": base64.b64encode(canonical({"error": {"code": "vault_key_unusable"}})).decode(),
-                    "receipt": None}
+            return _refusal(401, "vault_key_unusable", None)
         key_fingerprint = env.fingerprint(provider, secret)
         target = parts.path + ("?" + parts.query if parts.query else "")
         outbound = dict(headers, authorization="Bearer " + secret)
@@ -310,7 +317,8 @@ class Vault:
                    "request_sha256": hashlib.sha256(body).hexdigest()}
         try:
             response = self._upstream(method, parts.hostname, target, outbound, body, timeout, max_bytes)
-        except UpstreamError as error:
+        except Exception as caught:  # the call is counted, so every failure must get a receipt
+            error = caught if isinstance(caught, UpstreamError) else UpstreamError("upstream_unavailable")
             receipt.update(outcome="transport_error", response_status=error.observed_status, response_sha256=None)
             observed = _kept_headers(error.observed_headers)
             return {"transport_error": str(error), "observed_status": error.observed_status,
@@ -321,9 +329,7 @@ class Vault:
             receipt.update(outcome="key_echo_withheld", response_status=response.status, response_sha256=None)
             ids = [[name, value] for name, value in response_headers
                    if name in REQUEST_ID_HEADERS and not echoes(secret, value.encode("utf-8", errors="surrogatepass"))]
-            return {"status": 502, "headers": [["content-type", "application/json"]] + ids,
-                    "body_b64": base64.b64encode(canonical({"error": {"code": "vault_response_withheld"}})).decode(),
-                    "receipt": self._signed(receipt)}
+            return _refusal(502, "vault_response_withheld", self._signed(receipt), ids)
         receipt.update(outcome="response", response_status=response.status,
                        response_sha256=hashlib.sha256(response.body).hexdigest())
         return {"status": response.status, "headers": response_headers,
@@ -403,6 +409,14 @@ def _route_allowed(provider: str, method: str, path: str, query: str) -> bool:
             and _DEEPLINE_TOOL.fullmatch(parts[4]) is not None and parts[5] == "execute")
 
 
+def _refusal(status: int, code: str, receipt: Optional[Mapping], headers=()) -> Mapping:
+    """An answer the vault gives in the provider's place."""
+
+    return {"status": status, "headers": [["content-type", "application/json"], *headers],
+            "body_b64": base64.b64encode(canonical({"error": {"code": code}})).decode("ascii"),
+            "receipt": receipt}
+
+
 def _parse_call(request: Mapping):
     allowed = {"method", "url", "headers", "body_b64", "timeout_seconds", "max_response_bytes"}
     if not isinstance(request, Mapping) or not set(request) <= allowed or not {"method", "url", "headers"} <= set(request):
@@ -459,7 +473,7 @@ def _parse_call(request: Mapping):
         max_bytes = MAX_RESPONSE_BYTES
     if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or not 0 < max_bytes <= MAX_RESPONSE_BYTES:
         raise VaultError("max_response_bytes_invalid")
-    return method, url, headers, body, float(timeout), max_bytes
+    return method, parts, headers, body, float(timeout), max_bytes
 
 
 # -- HTTP -------------------------------------------------------------------------
@@ -509,12 +523,14 @@ def make_handler(vault: Vault):
                 return
 
             def action() -> Mapping:
-                vault.authorize(self.headers.get(CALLER_HEADER))
                 length = self.headers.get("content-length", "")
                 if not length.isdigit() or int(length) > MAX_REQUEST_BODY:
                     raise VaultError("request_too_large", 413)
+                # Read before refusing: closing on unread data resets the
+                # connection, and the caller would lose the answer.
                 body = self.rfile.read(int(length))
                 self.server.request_read()
+                vault.authorize(self.headers.get(CALLER_HEADER))
                 try:
                     request = json.loads(body)
                 except ValueError:
@@ -536,7 +552,9 @@ class BoundedServer(ThreadingHTTPServer):
     it has.
     """
 
-    daemon_threads = True
+    # Not daemons: server_close() waits for calls in flight, so a restart
+    # does not cut a billed call or lose its receipt.
+    daemon_threads = False
     MAX_CONNECTIONS = 128
     ssl_context: Optional[ssl.SSLContext] = None
 
@@ -696,7 +714,11 @@ def main() -> None:
                   caller_token=caller_token, tls_spki_sha256=tls_spki)
     server = BoundedServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), make_handler(vault))
     server.ssl_context = tls_context
+    # On stop, refuse new connections and let calls in flight finish; each
+    # ends within MAX_TIMEOUT_SECONDS plus REQUEST_READ_SECONDS.
+    signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown).start())
     server.serve_forever()
+    server.server_close()
 
 
 if __name__ == "__main__":

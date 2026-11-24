@@ -69,7 +69,7 @@ trust point. Approvals are public on Base, but Phala has no timelock.
 ## Miner steps
 
 ```bash
-pip install cryptography==48.0.1 pycryptodome==4.4.0
+pip install --require-hashes --only-binary=:all: --no-deps -r lead_order_vault/requirements-verify.txt
 python -m lead_order_vault.cli verify
 python -m lead_order_vault.cli seal --provider openrouter --hotkey <your hotkey>
 python -m lead_order_vault.cli receipts page1.json page2.json

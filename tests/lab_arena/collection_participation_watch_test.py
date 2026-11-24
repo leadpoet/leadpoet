@@ -63,3 +63,16 @@ def test_desktop_retries_failed_delivery_and_only_notifies_on_change(tmp_path):
     assert len(calls) == 3
     assert "unavailable" in calls[1]
     assert "restored" in calls[2]
+
+
+def test_zero_champion_share_requires_collection_job_basis_and_all_three_vectors():
+    weights = {"epoch": 100, "signed_state": True, "basis_schema": "legacy",
+               "champion_ppb": 0, "quoted_jobs_match": True, "unweighted_funders": 0,
+               "validators": {"primary": "matches", "rizzo": "matches", "yuma": "matches"}}
+    data = {"collection": {"first_epoch": 100}, "weights": weights}
+    verified = "post-cutover collection basis and zero champion component verified on all three validators"
+    assert not notices(data).get(verified)
+    weights["basis_schema"] = "leadpoet.collection.fixed_run_quotes.v1"
+    assert notices(data)[verified]
+    weights["validators"]["rizzo"] = "differs"
+    assert notices(data)["inspect post-cutover reward evidence"] and not notices(data).get(verified)

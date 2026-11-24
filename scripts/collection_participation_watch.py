@@ -53,7 +53,14 @@ def validator_snapshot(env, db):
         storage = weights_storage_key(netuid=71, validator_uid=hotkeys.index(hotkey))
         vector = decode_weights_storage(rpc.call(method="state_getStorage", params=[storage, block], request_id=2))
         matches[name] = "matches" if compare_weights_hash(71, epoch, vector) == expected["weights_hash"] else "differs"
-    return {"block": snap.current_block, "block_hash": block, "epoch": epoch, "signed_state": True,
+    basis = doc["reward_basis"]
+    proof = {"basis_schema": basis["schema_version"], "quoted_jobs_match": None, "unweighted_funders": None}
+    if "collection_share_ppb" in expected:
+        quotes = db.rpc("collection_reward_quotes_v1", {"p_epoch": epoch})
+        proof["quoted_jobs_match"] = {k: v for k, v in basis.items() if k != "valuation"} == quotes
+        weighted = {hotkeys[i] for i in expected["sparse_uids"]}
+        proof["unweighted_funders"] = len(set(quotes["quotes_microusd"]) - weighted)
+    return {"block": snap.current_block, "block_hash": block, "epoch": epoch, "signed_state": True, **proof,
             "validators": matches, "champion_ppb": expected["champion_share_ppb"],
             "collection_ppb": expected.get("collection_share_ppb", 0), "burn_ppb": expected["burned_residual_ppb"]}
 
@@ -133,7 +140,15 @@ def notices(data):
             if state != "matches":
                 signals[validator + " finalized vector " + state] = 1
         signals["collection allocation is nonzero; verify recipients"] = bool(weights.get("collection_ppb"))
-        signals["champion allocation is zero"] = weights["signed_state"] and weights.get("champion_ppb") == 0
+        cutover = collection.get("first_epoch")
+        if cutover is not None and weights["signed_state"] and weights["epoch"] >= cutover:
+            matches = weights.get("validators", {})
+            verified = (weights.get("basis_schema") == "leadpoet.collection.fixed_run_quotes.v1"
+                        and weights.get("quoted_jobs_match") is True and weights.get("unweighted_funders") == 0
+                        and weights.get("champion_ppb") == 0
+                        and all(matches.get(name) == "matches" for name in VALIDATORS))
+            signals["post-cutover collection basis and zero champion component verified on all three validators"] = verified
+            signals["inspect post-cutover reward evidence"] = not verified
     return {key: value for key, value in signals.items() if value}
 
 

@@ -397,6 +397,33 @@ def test_http_server_routes_authenticates_and_never_logs(capsys):
     assert captured.out == "" and captured.err == ""
 
 
+def test_a_refusal_before_the_body_is_read_closes_the_connection():
+    import http.client
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from lead_order_vault.vault import CALLER_HEADER, make_handler
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(_vault()))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+    try:
+        body = json.dumps(_call()).encode()
+        connection.request("POST", "/v1/call", body=body)
+        refused = connection.getresponse()
+        refused.read()
+        assert refused.status == 401 and refused.will_close
+        connection.close()
+        connection.request("POST", "/v1/call", body=body, headers={CALLER_HEADER: TOKEN})
+        answered = connection.getresponse()
+        answered.read()
+        assert answered.status == 200 and not answered.will_close
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+
+
 @pytest.mark.parametrize("method,url", [
     ("POST", "https://code.deepline.com/api/v2/integrations/Bad-Tool/execute"),
     ("POST", "https://code.deepline.com/api/v2/billing/top-up"),

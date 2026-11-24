@@ -413,6 +413,8 @@ def make_handler(vault: Vault):
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(data)))
             self.send_header("cache-control", "no-store")
+            if self.close_connection:
+                self.send_header("connection", "close")
             self.end_headers()
             self.wfile.write(data)
 
@@ -438,12 +440,17 @@ def make_handler(vault: Vault):
                 return
 
             def action() -> Mapping:
+                # A refusal before the body is read closes the connection, so
+                # the unread body is never parsed as the next request.
+                keep_alive, self.close_connection = not self.close_connection, True
                 vault.authorize(self.headers.get(CALLER_HEADER))
                 length = self.headers.get("content-length", "")
                 if not length.isdigit() or int(length) > MAX_REQUEST_BODY:
                     raise VaultError("request_too_large", 413)
+                body = self.rfile.read(int(length))
+                self.close_connection = not keep_alive
                 try:
-                    request = json.loads(self.rfile.read(int(length)))
+                    request = json.loads(body)
                 except ValueError:
                     raise VaultError("request_invalid") from None
                 return route(request)
@@ -583,7 +590,6 @@ class Dstack:
 
     def info(self) -> Mapping:
         return self._post("Info", {})
-
 
 
 def main() -> None:

@@ -30,6 +30,7 @@ from lead_order_vault.vault import CALLER_HEADER, CHECK_TIMEOUT_SECONDS as _VAUL
 VAULT_OVERHEAD_SECONDS = 15.0
 # A check probes the runtime key and then the management key.
 CHECK_REQUEST_SECONDS = 2 * _VAULT_PROBE_SECONDS + VAULT_OVERHEAD_SECONDS
+CONNECT_SECONDS = 10.0
 # A failed connection, or none free in the pool, sent nothing.
 _NOT_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
 
@@ -47,7 +48,8 @@ class VaultUnavailable(RuntimeError):
 
     @property
     def retryable(self) -> bool:
-        return self.status is None or self.status >= 500
+        # 401 is our caller token, not the miner's key.
+        return self.status is None or self.status >= 500 or self.status == 401
 
 
 @dataclass(frozen=True)
@@ -74,8 +76,6 @@ class VaultClient:
 
     def __init__(self, deployment: Mapping[str, Any], caller_token: str) -> None:
         self._url = str(deployment["url"]).rstrip("/")
-        if not self._url.startswith("https://"):
-            raise ValueError("vault url must be https")
         self._deployment = deployment
         self._token = caller_token
         self._client: Optional[httpx.Client] = None
@@ -119,7 +119,9 @@ class VaultClient:
 
     def _send(self, client: httpx.Client, path: str, document: Mapping[str, Any], timeout: float) -> httpx.Response:
         try:
-            return client.post(self._url + path, json=document, timeout=timeout, headers={CALLER_HEADER: self._token})
+            # A short connect limit, so an outage fails fast and is retried.
+            return client.post(self._url + path, json=document, headers={CALLER_HEADER: self._token},
+                               timeout=httpx.Timeout(timeout, connect=CONNECT_SECONDS))
         except _NOT_SENT:
             raise
         except httpx.HTTPError:

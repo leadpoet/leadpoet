@@ -78,8 +78,8 @@ END;
 $record731$;
 
 -- A miner's receipts after ``p_since`` (this table's sequence), plus the
--- vault key each of their active keys is sealed to, read from the envelope's
--- public header, so the miner can see which keys need sealing again.
+-- envelope of each of their active keys; the service reads from it which
+-- vault key it is sealed to, so the miner can see which need sealing again.
 CREATE FUNCTION public.lead_order_vault_receipts_v1(p_hotkey TEXT,p_since BIGINT,p_limit INTEGER)
 RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $receipts731$
  SELECT jsonb_build_object(

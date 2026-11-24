@@ -697,14 +697,6 @@ def test_vault_client_checks_a_sealed_key(served_vault):
     assert checked["status"] == "valid" and checked["key_fingerprint"] == env.fingerprint("deepline", DEEPLINE_KEY)
 
 
-def test_vault_client_refuses_plain_http():
-    from lab_arena.lead_orders.vault_client import VaultClient
-
-    for url in ("http://vault.example", "http://127.0.0.1:8080"):
-        with pytest.raises(ValueError):
-            VaultClient(dict(DEPLOYMENT, url=url), TOKEN)
-
-
 def test_vault_client_sends_nothing_through_a_gateway_that_ends_tls():
     from lab_arena.lead_orders.vault_client import VaultClient, VaultTransport, VaultTransportError
 

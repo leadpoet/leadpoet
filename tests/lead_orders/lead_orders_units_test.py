@@ -262,7 +262,9 @@ def test_registrar_reports_vault_refusals_and_outages():
     assert not invalid.value.retryable
     foreign = VaultUnavailable("vault_sealed_to_another_vault", forwarded=False, status=400)
     down = VaultUnavailable("vault_unreachable", forwarded=False)
-    for error, retryable in ((foreign, False), (down, True)):
+    # Our caller token was refused: not the miner's fault.
+    token = VaultUnavailable("vault_caller_unauthorized", forwarded=False, status=401)
+    for error, retryable in ((foreign, False), (down, True), (token, True)):
         with pytest.raises(keys.LeadOrderKeyError) as raised:
             keys.MinerKeyRegistrar(FakeVault(error=error)).register(
                 miner_hotkey=ALICE, provider="deepline", credentials={"envelope": sealed("d" * 40)})

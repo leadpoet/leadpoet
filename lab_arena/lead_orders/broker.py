@@ -645,6 +645,9 @@ class LeadOrderBroker:
                 )
             except ProviderTransportError as exc:
                 error = exc
+                if not key.is_leadpoet:
+                    # A safe vault code, such as vault_caller_unauthorized.
+                    _LOG.warning("lead-order vault call failed: call %s, %s", call_id, exc)
             finally:
                 # Always settle the reservation, whatever happened in between.
                 # A call the vault refused never reached the provider: nothing to pay.
@@ -653,13 +656,15 @@ class LeadOrderBroker:
                 request_id = self._request_id(provider, response, error)
                 if request_id and secret in request_id:
                     request_id = None
-                self._store.settle_call(
-                    call_id=call_id, cost_microusd=cost,
-                    http_status=None if response is None else int(response.status), epoch=epoch,
-                    provider_request_id=request_id,
-                )
-                self._keep_receipt(call_id, "call", getattr(response if response is not None else error,
-                                                            "vault_receipt", None))
+                try:
+                    self._store.settle_call(
+                        call_id=call_id, cost_microusd=cost,
+                        http_status=None if response is None else int(response.status), epoch=epoch,
+                        provider_request_id=request_id,
+                    )
+                finally:
+                    self._keep_receipt(call_id, "call", getattr(response if response is not None else error,
+                                                                "vault_receipt", None))
             if response is None or arena_broker._response_contains_credential(response, secret):
                 return _json_response(502, "provider_unreachable")
             reason = lead_keys.failover_reason(provider, response)

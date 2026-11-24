@@ -20,11 +20,18 @@ from lab_arena.collection_intake import (
 )
 from lab_arena.collection_workflow import store_artifact
 from lab_arena.collection_journal import WorkflowJournal
+from lab_arena.collection_generation import (
+    CAPTURE_V2,
+    MAX_RUN_TOKENS,
+    OutputLimitReached,
+    output_charge,
+)
 
 SCHEMA = "collection.experiment.v1"
 SHA = re.compile(r"sha256:[0-9a-f]{64}")
 NAME = re.compile(r"[a-zA-Z0-9_-]{1,64}")
-MAX_SLOTS = 12
+DEFAULT_MAX_SLOTS = 12
+MAX_EXPERIMENT_SLOTS = 4096
 
 
 def _hash(value):
@@ -61,7 +68,7 @@ def load_experiment(raw, prompt):
     protocol_of(raw)
 
     if (
-        set(raw) - {"claim_protocol", "min_pricing_runs", "pricing_pilot"}
+        set(raw) - {"claim_protocol", "min_pricing_runs", "pricing_pilot", "max_slots", "provenance_sha256", "capture_version"}
         != {
             "schema",
             "id",
@@ -73,8 +80,8 @@ def load_experiment(raw, prompt):
             "cases",
             "split_sha256",
             "terms_sha256",
-            "provenance_sha256",
         }
+        or ("capture_version" in raw and raw["capture_version"] != CAPTURE_V2)
         or raw["schema"] != SCHEMA
         or raw["mode"] not in {"pilot", "live"}
     ):
@@ -87,26 +94,34 @@ def load_experiment(raw, prompt):
         )
         or not all(
             SHA.fullmatch(raw[k])
-            for k in ("split_sha256", "terms_sha256", "provenance_sha256")
+            for k in ("split_sha256", "terms_sha256")
         )
     ):
         raise ValueError("missing experiment question, pass mark, split or consent")
     cases, arms = raw["cases"], raw["arms"]
-    if not all(isinstance(v, list) and 1 <= len(v) <= MAX_SLOTS for v in (cases, arms)):
-        raise ValueError("invalid experiment size")
-    if any(
-        set(c) != {"scenario_id", "source_sha256"}
-        or not SYNTHETIC_SCENARIO.fullmatch(c["scenario_id"])
-        or not SHA.fullmatch(c["source_sha256"])
-        for c in cases
+    slot_limit = raw.get("max_slots", DEFAULT_MAX_SLOTS)
+    if not _integer(slot_limit, 1, MAX_EXPERIMENT_SLOTS) or not all(
+        isinstance(items, list) and 1 <= len(items) <= slot_limit for items in (cases, arms)
     ):
-        raise ValueError("invalid experiment source")
-    if len({c["source_sha256"] for c in cases}) != len(cases):
-        raise ValueError("duplicate student source")
+        raise ValueError("invalid experiment size")
+    for case in cases:
+        if (not isinstance(case, dict) or set(case) not in ({"scenario_id"}, {"scenario_id", "source_sha256"})
+                or not isinstance(case["scenario_id"], str) or not SYNTHETIC_SCENARIO.fullmatch(case["scenario_id"])
+                or ("source_sha256" in case and (not isinstance(case["source_sha256"], str)
+                    or not SHA.fullmatch(case["source_sha256"])))):
+            raise ValueError("invalid experiment source")
+    source_ids = [case["source_sha256"] for case in cases if "source_sha256" in case]
+    native_ids = [case["scenario_id"] for case in cases if "source_sha256" not in case]
+    if len(set(source_ids)) != len(source_ids) or len(set(native_ids)) != len(native_ids):
+        raise ValueError("duplicate experiment case; use the arm repeat count")
+    if bool(source_ids) != ("provenance_sha256" in raw) or (
+        source_ids and not SHA.fullmatch(str(raw["provenance_sha256"]))
+    ):
+        raise ValueError("student sources require their original provenance")
     caps = {}
     arm_names = set()
     for arm in arms:
-        if set(arm) != {
+        if set(arm) - {"max_run_tokens"} != {
             "id",
             "role",
             "model",
@@ -124,9 +139,12 @@ def load_experiment(raw, prompt):
             or arm["id"] in arm_names
             or arm["role"] not in {"expert", "continuation"}
             or model not in GENERATOR_ROUTES
-            or not _integer(arm["repeats"], 1, MAX_SLOTS)
+            or not _integer(arm["repeats"], 1, slot_limit)
             or not _integer(arm["max_steps"], 1, 90)
             or not _integer(arm["max_tokens"], 1, 8192)
+            or not _integer(
+                arm.get("max_run_tokens", arm["max_tokens"]), 1, MAX_RUN_TOKENS
+            )
             or not _integer(arm["budget_microusd"], 1, MAX_MICROUSD)
             or caps.setdefault(model, arm["budget_microusd"]) != arm["budget_microusd"]
             or arm["reasoning_effort"] not in {"low", "medium", "high"}
@@ -134,7 +152,11 @@ def load_experiment(raw, prompt):
         ):
             raise ValueError("invalid or unapproved experiment arm")
         arm_names.add(arm["id"])
-    # Compare arms on the same fixed student case before moving to a new case.
+    if native_ids and any(arm["role"] == "continuation" for arm in arms):
+        raise ValueError("a continuation requires a verified student failure for every case")
+    if len(cases) * sum(arm["repeats"] for arm in arms) > slot_limit:
+        raise ValueError("experiment exceeds its configured slot limit")
+    # Present the same task to all arms before advancing to the next case.
     slots = tuple(
         (case, arm, repeat)
         for case in cases
@@ -144,8 +166,7 @@ def load_experiment(raw, prompt):
     )
     liability = sum(a["budget_microusd"] for _, a, _ in slots)
     if (
-        len(slots) > MAX_SLOTS
-        or not _integer(raw["budget_microusd"], 1, MAX_MICROUSD)
+        not _integer(raw["budget_microusd"], 1, MAX_MICROUSD)
         or liability > raw["budget_microusd"]
     ):
         raise ValueError("experiment exceeds canary slots or budget")
@@ -220,7 +241,7 @@ def verify_provenance(spec, receipt, sources, *, objects=None):
         or not NAME.fullmatch(body["producer"])
         or body["split_sha256"] != spec.raw["split_sha256"]
         or not isinstance(body["sources"], dict)
-        or set(body["sources"]) != {c["source_sha256"] for c in spec.raw["cases"]}
+        or set(body["sources"]) != {c["source_sha256"] for c in spec.raw["cases"] if "source_sha256" in c}
         or _hash(receipt) != spec.raw["provenance_sha256"]
     ):
         raise ValueError("Poet source attestation differs from the experiment")
@@ -259,6 +280,7 @@ def read_inputs(spec, directory, sources, *, objects=None):
     from lab_arena.collection_workflow import (
         validate_student_source,
         correction_scenario,
+        build_scenario,
     )
     from lab_arena.collection_quality import admit_built_split
 
@@ -277,6 +299,11 @@ def read_inputs(spec, directory, sources, *, objects=None):
     split = read(spec.raw["split_sha256"])
     resolved = {}
     for case in spec.raw["cases"]:
+        if "source_sha256" not in case:
+            sid = case["scenario_id"]
+            task = build_scenario(sources[1], sid)
+            resolved[sid] = (None, admit_built_split(sources[1], task, None, split))
+            continue
         source = read(case["source_sha256"])
         validate_student_source(*sources, source)
         if source["scenario_id"] != case["scenario_id"]:
@@ -295,8 +322,10 @@ def read_inputs(spec, directory, sources, *, objects=None):
             split,
         )
         resolved[case["source_sha256"]] = (source, stamp)
-    provenance = read(spec.raw["provenance_sha256"])
-    verify_provenance(spec, provenance, {k: v[0] for k, v in resolved.items()}, objects=objects)
+    provenance = None
+    if "provenance_sha256" in spec.raw:
+        provenance = read(spec.raw["provenance_sha256"])
+        verify_provenance(spec, provenance, {k: v[0] for k, v in resolved.items() if v[0] is not None}, objects=objects)
     return resolved, split, provenance
 
 
@@ -306,13 +335,13 @@ class ExperimentMeter:
     def __init__(self, broker, arm):
         self.broker = broker
         self.arm = arm
-        self.remaining = arm["max_tokens"]
+        self.remaining = arm.get("max_run_tokens", arm["max_tokens"])
         self.calls = []
 
     def model_call(self, request_id, body):
         if self.remaining < 1 or len(self.calls) >= self.arm["max_steps"]:
-            raise ValueError("experiment generation cap reached")
-        limit = min(self.remaining, body["max_tokens"])
+            raise OutputLimitReached("experiment generation cap reached")
+        limit = min(self.remaining, self.arm["max_tokens"], body["max_tokens"])
         params = dict(
             body,
             max_tokens=limit,
@@ -322,10 +351,14 @@ class ExperimentMeter:
             },
         )
         result = self.broker.model_call(request_id, params)
-        usage = result.get("usage") or {}
-        counter = usage.get("completion_tokens")
-        # Missing token counts stop subsequent dispatch; the provider receipt survives.
-        self.remaining = self.remaining - counter if _integer(counter, 0, limit) else 0
+        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        counter = output_charge(usage, limit)
+        # Unknown output is privately labelled and charged its maximum only for admission.
+        reported = usage.get("completion_tokens")
+        if type(reported) is int and reported > limit:
+            self.remaining = 0
+        else:
+            self.remaining -= limit if counter is None else counter
         self.calls.append(
             {
                 "request_id": request_id,
@@ -333,6 +366,7 @@ class ExperimentMeter:
                 "model": result["model"],
                 "revision": self.broker.versions[result["model"]],
                 "provider": result.get("provider"),
+                "output_allowance": limit,
                 "usage": {
                     k: usage[k]
                     for k in (
@@ -433,11 +467,14 @@ def run_experiment(
                 or owner_lookup(job["miner_hotkey"]).coldkey != job["owner_coldkey"]
             ):
                 raise ValueError("invalid experiment assignment or funding owner")
-            source, stamp = stored[case["source_sha256"]]
-            source_ref = save("student-source", source)
+            source, stamp = stored[case.get("source_sha256", case["scenario_id"])]
+            source_refs = {}
+            if source is not None:
+                source_refs["student_source"] = save("student-source", source)
+                source_refs["producer_attestation"] = save("producer-attestation", provenance)
             settings = save("settings", spec.raw)
             split_ref = save("split", split)
-            provenance_ref = save("producer-attestation", provenance)
+            save("split-stamp", stamp)
             adapter = CollectionBroker(
                 intake,
                 database,
@@ -460,7 +497,9 @@ def run_experiment(
                 max_steps=arm["max_steps"],
                 max_tokens=arm["max_tokens"],
                 record=journal.append,
-                **{role_option: source},
+                save=save,
+                capture_version=spec.raw.get("capture_version"),
+                **({role_option: source} if source is not None else {}),
             )
             if (
                 row["run"] != run_id
@@ -470,7 +509,7 @@ def run_experiment(
             ):
                 raise ValueError("experiment output identity mismatch")
             generator_finished = True
-            row_ref = save("generator", row)
+            row_ref = archived.get("generator") or save("generator", row)
             calls_ref = save("generation-receipts", meter.calls)
             save("pre-claim-input", packet)
             if all(packet["checks"].values()):
@@ -498,10 +537,9 @@ def run_experiment(
                 "experiment": meta,
                 "generator": row_ref,
                 "packet": packet_ref,
-                "student_source": source_ref,
+                **source_refs,
                 "split": split_ref,
                 "split_stamp": stamp,
-                "producer_attestation": provenance_ref,
                 "settings": settings,
                 "calls": calls_ref,
                 "claim_verdict": claim,

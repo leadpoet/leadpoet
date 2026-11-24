@@ -113,6 +113,7 @@ def database():
         733,
         738,
         740,
+        744,
     ):
         (script,) = Path("scripts").glob(str(prefix) + "-*.sql")
         migrated.append(script.name)
@@ -578,6 +579,33 @@ def test_real_harness_checkpoint_and_archive_under_funded_job_contract(
     )
     assert j["miner_cost_microusd"] == 10 * j["generator_calls"]
     rid = j["job_id"]
+    # The private wire reply is bound to the original billing receipt. Its bytes
+    # are retained before reasoning alias normalization, grading, or claim review.
+    wire_ids = []
+    total_billed = 0
+    for number in range(1, j["generator_calls"] + 1):
+        import hashlib
+
+        k = f"wire-generate-{number}"
+        ref = json.loads(
+            objects.get_bounded(
+                f"collection/{spec.batch_id}/{rid}/saved/{k}.json", 4096
+            )
+        )
+        raw = objects.get_bounded(ref["key"], 1024 * 1024)
+        assert "sha256:" + hashlib.sha256(raw).hexdigest() == ref["sha256"]
+        wire = json.loads(raw)
+        assert (
+            hashlib.sha256(wire["body_utf8"].encode()).hexdigest()
+            == wire["response_sha256"]
+        )
+        assert json.loads(wire["body_utf8"])["id"] == wire["provider_generation_id"]
+        total_billed += wire["miner_cost_microusd"]
+        wire_ids.append(wire["provider_generation_id"])
+    assert (
+        len(set(wire_ids)) == j["generator_calls"]
+        and total_billed == j["miner_cost_microusd"]
+    )
     out = tmp_path / "audit.zip"
     audit = exports.write_dataset(spec, db, objects, out)
     assert audit["schema"] == exports.AUDIT and audit["rows"] == 0

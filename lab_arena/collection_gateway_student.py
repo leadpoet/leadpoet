@@ -185,7 +185,7 @@ def verify_gateway_source(spec, receipt, sources, objects):
         or receipt["split_sha256"] != spec.raw["split_sha256"]
         or not isinstance(receipt["sources"], dict)
         or set(receipt["sources"])
-        != {case["source_sha256"] for case in spec.raw["cases"]}
+        != {case["source_sha256"] for case in spec.raw["cases"] if "source_sha256" in case}
         or "sha256:" + judge.digest(receipt) != spec.raw["provenance_sha256"]
     ):
         raise ValueError("gateway source receipt differs from frozen experiment")

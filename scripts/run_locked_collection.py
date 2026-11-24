@@ -16,7 +16,10 @@ from lab_arena import chain, collection_judge as judge
 from lab_arena.broker import HttpxProviderTransport
 from lab_arena.collection_prices import endpoint_prices
 from lab_arena.collection_broker import CollectionBroker, batch_versions
-from lab_arena.collection_intake import GENERATOR_ROUTES, MODELS, CollectionIntake, live_finney_arena
+from lab_arena.collection_intake import (
+    GENERATOR_ROUTES, LEGACY_COMPARISON_TERMS_HASH, MODELS, SYNTHETIC_TRAINING_TERMS_HASH,
+    CollectionIntake, live_finney_arena,
+)
 from lab_arena.collection_worker import process_job
 from lab_arena.collection_workflow import (
     CHAMPION_REV,
@@ -42,6 +45,7 @@ def load_batch(raw, prompt):
         "claim_protocol",
         "capture_version",
         "thresholds",
+        "terms_sha256",
         "control_artifacts",
         "claim_pack_sha256",
     } != {
@@ -60,6 +64,10 @@ def load_batch(raw, prompt):
     ):
         raise ValueError("invalid collection batch")
     scenarios = raw["scenario_ids"]
+    if "terms_sha256" in raw and raw["terms_sha256"] != SYNTHETIC_TRAINING_TERMS_HASH:
+        raise ValueError("unrecognized synthetic collection training terms")
+    if "terms_sha256" in raw and any(isinstance(s, str) and s.startswith("research-") for s in scenarios):
+        raise ValueError("synthetic funding terms cannot authorize research")
     if (
         type(scenarios) is not list
         or not 1 <= len(scenarios) <= 4096
@@ -417,7 +425,10 @@ def run_cohort(
                 return report_split_hold(policy, exc)
     completed = 0
     for _ in range(max_jobs):
-        job = intake.claim(policy.batch_id, raw["scenario_ids"], agent, fees, ceiling)
+        job = intake.claim(
+            policy.batch_id, raw["scenario_ids"], agent, fees, ceiling,
+            terms_hash=raw.get("terms_sha256", LEGACY_COMPARISON_TERMS_HASH),
+        )
         if not job:
             break
         try:
@@ -547,7 +558,7 @@ def main(argv=None):
             if base_mode == "live" and args.pilot_only:
                 p.error("pilot-only polling cannot run live work")
             try:
-                approved = funding.correction_terms_hash(base_mode)
+                funding.correction_terms_hash(base_mode)
             except funding.IntakeError as exc:
                 if exc.code != "collection_correction_terms_unavailable":
                     raise
@@ -560,8 +571,9 @@ def main(argv=None):
 
                 try:
                     candidate = json.loads(read_file(args.next_correction))
-                    if candidate.get("schema") != SCHEMA or candidate.get("mode") != base_mode or candidate.get("terms_sha256") != approved:
+                    if candidate.get("schema") != SCHEMA or candidate.get("mode") != base_mode:
                         raise ValueError("staged correction differs from the approved consent")
+                    funding.require_correction_grant(base_mode, candidate.get("terms_sha256"))
                     if _run_options(args, p, candidate, before_claim=before_claim):
                         return 0
                 except Exception as exc:

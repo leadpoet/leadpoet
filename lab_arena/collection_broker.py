@@ -356,7 +356,7 @@ class CollectionBroker:
             p_status=response.status,
             p_provider_id=upstream_id,
         )
-        if policy_proof and policy_ref and self.job["mode"] == "pilot":
+        if policy_proof and policy_ref and self.job["mode"] == "pilot" and self.job.get("attempt", 1) == 1:
             self._rpc(
                 "collection_record_throttle_hold_v1",
                 request_id,

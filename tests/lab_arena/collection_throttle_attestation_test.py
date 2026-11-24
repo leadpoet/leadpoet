@@ -252,3 +252,63 @@ def test_one_replacement_preserves_unknown_first_charge_and_uses_only_residual_s
         miner.complete(retry["job_id"], retry["lease_token"], "failed", {}, None, 7)
         assert claim(miner, "small-bound", "P1-s1001") is None
         db.close()
+
+
+def test_final_replacement_throttle_retains_the_native_failure_and_never_requests_another_retry():
+    from types import SimpleNamespace
+    from lab_arena.collection_broker import CollectionBroker, CollectionCallError
+    from lab_arena import contracts
+
+    req = approved()
+    calls = []
+    wire = response()
+
+    class Db:
+        def rpc(self, name, args):
+            calls.append(name)
+            if name == "collection_reserve_call_v1":
+                return {"status": "reserved"}
+            if name == "collection_record_call_v1":
+                return {"status": "recorded"}
+            raise AssertionError(
+                "a final replacement cannot obtain another retry admission"
+            )
+
+    class Http:
+        def send(self, **args):
+            return (
+                wire
+                if args["method"] == "POST"
+                else broker.ProviderResponse(404, {}, b"{}")
+            )
+
+    client = object.__new__(CollectionBroker)
+    client.database = Db()
+    client.intake = SimpleNamespace(credential=lambda *_: "test-only-token")
+    client.job = {
+        "mode": "pilot",
+        "attempt": 2,
+        "job_id": "00000000-0000-0000-0000-000000000001",
+        "lease_token": "t" * 64,
+    }
+    client.judge_key = None
+    client.transport = Http()
+    evidence = []
+
+    def save(*args, **kwargs):
+        if kwargs.get("policy_attestation"):
+            evidence.append(kwargs["policy_attestation"])
+        return {"sha256": "sha256:" + "d" * 64}
+
+    client.record_generation = save
+    with pytest.raises(CollectionCallError, match="unavailable|unverified"):
+        client._call(
+            "generate-4",
+            "openrouter",
+            "https://openrouter.ai/api/v1/chat/completions",
+            contracts.canonical_json(req).encode(),
+            100,
+            model=req["model"],
+        )
+    assert calls == ["collection_reserve_call_v1", "collection_record_call_v1"]
+    assert len(evidence) == 1 and evidence[0]["http_status"] == 429

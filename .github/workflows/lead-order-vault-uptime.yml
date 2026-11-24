@@ -1,8 +1,9 @@
 name: Lead-order vault uptime
 
 # Every 30 minutes, runs the same check a miner runs: `cli verify` fetches the
-# live vault's identity and checks both keys chain to the KMS root for the app
-# in deployment.json. A failed run is the alert. Does nothing until deployed.
+# live vault's identity, checks both keys chain to the KMS root for the app
+# in deployment.json, and reads Base to confirm that root, the app and its
+# approved build. A failed run is the alert. Does nothing until deployed.
 
 on:
   schedule:

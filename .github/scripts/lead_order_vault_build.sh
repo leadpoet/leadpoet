@@ -33,7 +33,6 @@ digest_of() {  # manifest digest from an OCI layout tarball
 }
 
 builder
-mkdir -p "$OUT"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
@@ -50,6 +49,7 @@ if [ "${1:-}" = "push" ]; then
   exit 0
 fi
 
+mkdir -p "$OUT"
 build "type=oci,dest=$work/a.tar,rewrite-timestamp=true"
 build "type=oci,dest=$work/b.tar,rewrite-timestamp=true"
 first="$(digest_of "$work/a.tar")"
@@ -61,5 +61,6 @@ grep -q "$IMAGE@$first" "$OUT/docker-compose.yml"
 printf '{"commit":"%s","image":"%s@%s","source_date_epoch":%s,"buildkit":"%s"}\n' \
   "$(git rev-parse HEAD)" "$IMAGE" "$first" "$SOURCE_DATE_EPOCH" "$BUILDKIT" > "$OUT/release.json"
 echo "reproducible digest $first"
-[ -n "${GITHUB_OUTPUT:-}" ] && echo "digest=$first" >> "$GITHUB_OUTPUT"
-exit 0
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  echo "digest=$first" >> "$GITHUB_OUTPUT"
+fi

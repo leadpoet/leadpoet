@@ -115,7 +115,16 @@ class GenerationCapture:
         return response, False
 
     def wire_response(
-        self, request_id, request_hash, response_hash, status, cost, generation, body
+        self,
+        request_id,
+        request_hash,
+        response_hash,
+        status,
+        cost,
+        generation,
+        body,
+        *,
+        policy_attestation=None,
     ):
         """Write the broker-verified original bytes before any provider normalization."""
         doc = {
@@ -127,6 +136,10 @@ class GenerationCapture:
             "miner_cost_microusd": cost,
             "provider_generation_id": generation,
         }
+        if policy_attestation is not None:
+            doc["billing_policy_attestation"] = policy_attestation
+            self.check(doc, "model-only-provider-rejection")
+            return self.save("billing-proof-" + request_id, doc)
         self.check(doc, "provider-metadata")
         if body is None:
             self.save("quarantine", dict(doc, stage="unverified-provider-response"))

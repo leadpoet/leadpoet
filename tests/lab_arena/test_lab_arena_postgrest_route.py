@@ -244,6 +244,8 @@ def stack(tmp_path_factory):
                     "743-retire-champion-rewards.sql",
                     "744-synthetic-training-consent.sql",
                     "745-collection-dispatch-settings.sql",
+                    "746-reconcile-collection-generation.sql",
+                    "747-bounded-collection-throttle-replacement.sql",
                 ):
                     cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / migration).read_text())
             # Install additive current readers before PostgREST takes its

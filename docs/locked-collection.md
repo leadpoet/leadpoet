@@ -43,6 +43,8 @@ For setup help or to volunteer for a blind workflow review, use the [public pilo
 
 The six slots in each comparison pack use the same scenario and the approved generator routes below. Each subsequent complete group advances to a fresh scenario. A provider receipt records known spend even when the run fails. Unknown bills retain their reservation. The worker cannot issue the same paid request identifier twice. Synthetic tools run locally. The miner funds the billed generator calls. Private verifier calls use an owner-controlled credential and count against the job budget.
 
+A verified model-only 429 may receive one replacement on its original pilot slot. The first charge can stay unknown. The worker reserves it in full and subtracts it from the replacement budget. This requires an authenticated refusal before generation and provable absence of hosted services or per-request charges. It makes no assumption about the eventual billed amount. [OpenRouter pricing](https://openrouter.ai/pricing) and [error semantics](https://openrouter.ai/docs/api/reference/errors-and-debugging).
+
 An unresolved miner charge retains its original reservation. If OpenRouter supplied a generation ID on a finished job, the gateway operator can run `python -m scripts.reconcile_collection_generation --job JOB_ID --request REQUEST_ID --environment-file GATEWAY_ENV`. This reads the original generation on its authorized account and records the exact charge once. A missing, revoked or unpriced generation keeps its reservation. The job's outcome and earnings stay tied to the original execution.
 
 ## Running one batch

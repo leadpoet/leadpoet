@@ -15,6 +15,14 @@ from lab_arena.lead_orders.broker import deepline_cost_microusd
 
 store.FUNCTION_SIGNATURES.update(
     {
+        "collection_record_throttle_hold_v1": (
+            ("p_job", "uuid"),
+            ("p_lease", "text"),
+            ("p_request", "text"),
+            ("p_original_request", "text"),
+            ("p_original_response", "text"),
+            ("p_proof", "text"),
+        ),
         "collection_job_usage_v1": (("p_job", "uuid"), ("p_lease", "text")),
         "collection_reserve_call_v1": (
             ("p_job", "uuid"),
@@ -63,6 +71,114 @@ class CollectionCallError(RuntimeError):
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def model_only_rejection(request, response):
+    """Recognise the provider's pre-generation policy, independently of delayed billing.
+
+    https://openrouter.ai/docs/api/reference/errors-and-debugging
+    https://openrouter.ai/pricing (failed model attempts and auxiliary charges)
+    """
+    if (
+        response.status != 429
+        or response.internal_provenance is not None
+        or not isinstance(request, dict)
+        or set(request)
+        - {"model", "messages", "tools", "max_tokens", "reasoning", "usage", "provider"}
+    ):
+        return None
+    model = request.get("model")
+    route = GENERATOR_ROUTES.get(model) if isinstance(model, str) else None
+    if route is None:
+        return None
+    policy = request.get("provider")
+    if (
+        not isinstance(policy, dict)
+        or set(policy)
+        - {
+            "only",
+            "zdr",
+            "enforce_distillable_text",
+            "allow_fallbacks",
+            "data_collection",
+            "max_price",
+        }
+        or policy.get("only") != [route.tag]
+        or policy.get("allow_fallbacks") is not False
+        or policy.get("zdr") is not True
+        or policy.get("enforce_distillable_text") is not True
+        or policy.get("data_collection") != "deny"
+    ):
+        return None
+    price = policy.get("max_price")
+    if (
+        not isinstance(price, dict)
+        or set(price) != {"prompt", "completion", "request"}
+        or type(price.get("request")) not in (int, float)
+        or price["request"] != 0
+    ):
+        return None
+    messages, tools = request.get("messages"), request.get("tools")
+    if (
+        not isinstance(messages, list)
+        or not messages
+        or not isinstance(tools, list)
+        or not all(
+            isinstance(t, dict)
+            and set(t) == {"type", "function"}
+            and t["type"] == "function"
+            for t in tools
+        )
+        or not all(
+            isinstance(m, dict)
+            and m.get("role") in ("system", "user", "assistant", "tool")
+            and isinstance(m.get("content"), str)
+            and not set(m) - {"role", "content", "tool_calls", "tool_call_id"}
+            for m in messages
+        )
+    ):
+        return None
+    try:
+        doc = json.loads(response.body)
+    except (UnicodeError, ValueError):
+        return None
+    if not isinstance(doc, dict) or set(doc) - {
+        "error",
+        "id",
+        "openrouter_metadata",
+        "user_id",
+    }:
+        return None
+    error = doc.get("error")
+    if (
+        not isinstance(error, dict)
+        or type(error.get("code")) is not int
+        or error["code"] != 429
+        or not isinstance(error.get("message"), str)
+        or not error["message"].strip()
+    ):
+        return None
+    metadata = error.get("metadata", {})
+    if not isinstance(metadata, dict) or metadata.get(
+        "error_type", "rate_limit_exceeded"
+    ) not in ("rate_limit_exceeded", "provider_overloaded"):
+        return None
+    return {
+        "schema": "collection.openrouter-model-only-refusal.v1",
+        "policy": "openrouter.failed-model-tokens",
+        "http_status": 429,
+        "error_code": 429,
+        "no_delivered_output": True,
+        "request_fee_ceiling": 0,
+        "model": model,
+        "allowed_route": route.tag,
+        "policy_sources": {
+            "https://openrouter.ai/pricing": "sha256:4f3d58a68dea4d8668d3aaf472d71e955462e56aa822dfffb7e71c9ebd72510f",
+            "https://openrouter.ai/docs/api/reference/errors-and-debugging": "sha256:7dc5b229ece76de22d8842e2009743cffd999cbcd00c3a738797c71e104537d0",
+        },
+        "response_sha256": digest(response.body),
+        "request_sha256": digest(contracts.canonical_json(request).encode()),
+    }
 
 
 class CollectionBroker:
@@ -206,6 +322,32 @@ class CollectionBroker:
             or secret in upstream_id
         ):
             upstream_id = None
+        # A vendor usage/generation cost, including a nonzero one, always wins.
+        # Only attest an authenticated pre-generation HTTP
+        # refusal with a proved zero auxiliary-service ceiling. A failed lookup
+        # alone or a generic 429 can never release a reservation. Keep the entire
+        # original hold until its actual cost becomes independently available.
+        policy_proof = None
+        if (
+            provider == "openrouter"
+            and url == "https://openrouter.ai/api/v1/chat/completions"
+            and response.status == 429
+            and cost is None
+            and self.record_generation
+            and not broker._response_contains_credential(response, secret)
+        ):
+            policy_proof = model_only_rejection(json.loads(content), response)
+            if policy_proof:
+                policy_ref = self.record_generation(
+                    request_id,
+                    digest(content),
+                    digest(response.body),
+                    response.status,
+                    None,
+                    upstream_id,
+                    None,
+                    policy_attestation=policy_proof,
+                )
         self._rpc(
             "collection_record_call_v1",
             request_id,
@@ -214,6 +356,14 @@ class CollectionBroker:
             p_status=response.status,
             p_provider_id=upstream_id,
         )
+        if policy_proof and policy_ref and self.job["mode"] == "pilot":
+            self._rpc(
+                "collection_record_throttle_hold_v1",
+                request_id,
+                p_original_request=digest(content),
+                p_original_response=digest(response.body),
+                p_proof=policy_ref["sha256"],
+            )
         if provider == "judge" and response.status != 200:
             raise JudgeUnavailable(model, request_id, "http_error")
         if (
@@ -223,7 +373,7 @@ class CollectionBroker:
         ):
             if provider == "judge":
                 raise JudgeUnavailable(model, request_id, "unverified_receipt")
-            if provider == "openrouter" and self.record_generation:
+            if provider == "openrouter" and self.record_generation and not policy_proof:
                 self.record_generation(
                     request_id,
                     digest(content),

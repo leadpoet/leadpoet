@@ -603,7 +603,7 @@ transactions are unchanged.
 
 ## Locked collection settlement
 
-After a reviewed collection cutover on Finney/71, the gateway signs a
+From the champion retirement epoch on Finney/71, the gateway signs a
 `leadpoet.collection.fixed_run_quotes.v1` basis in the existing accepted
 weight-state envelope. Update every participating validator's canonical
 weight kernel before cutover. Older kernels reject the new basis.
@@ -620,10 +620,11 @@ migration authority, insert the compiled document into `collection_reward_launch
 as `pilot_evidence`, using network `finney`, netuid 71 and
 `first_epoch = cutover_anchor.epoch + 1`. This stages the measured prices
 and permits one live run. Check the source and recent finalized weights of
-primary, Rizzo and Yuma before staging. Drain existing competition awards
-with the established daily-cutoff setting when preparing the transition.
+primary, Rizzo and Yuma before staging. The signed anchor can come from an interim burn-only epoch.
 
-Enrollment alone leaves the champion mechanism active. The worker stores
+Champion retirement and paid launch are independent. To retire champions, use the migration owner to insert the next epoch and the current signed state hash into `public.collection_champion_retirement(first_epoch,previous_state_hash)`. Read back the current finalized epoch before inserting. Cancel any remaining active Finney/71 competition rounds using the existing `lab_arena_cancel_round` operation in the same transaction. The database serializes retirement against signed state publication and rejects stale anchors. The gateway immediately closes legacy submissions and promotions. With zero eligible quotes, validators use the existing designated burn hotkey for the full vector. The pilot can continue.
+
+The worker stores
 the first completed live job and its assessed artifact before activating
 rewards. A fresh worker recovers that completion without another provider call.
 The first accepted live job and activation commit together. A fresh finalized
@@ -632,8 +633,7 @@ epochs cannot earn a retroactive quote. An operator can withdraw the staged
 row before a job starts or after a failed attempt. A running or completed
 launch job must be resolved first. The read-only
 `collection_reward_schedule_v1()` shows the pilot-approved fees, limits
-and any pending launch job. `collection_reward_start_v1()` identifies
-the first actual collection payout epoch.
+and any pending launch job. After the first paid job, its `first_epoch` is the paid settlement boundary. `collection_reward_start_v1()` identifies the first epoch signed with the collection weight basis.
 
 For payout epoch E, sum the frozen prices of all accepted, live,
 miner-funded jobs whose accepted epoch was E−1. Code checks, provider

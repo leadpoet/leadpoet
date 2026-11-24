@@ -37,7 +37,7 @@ def test_freeze_reviewed_fees_uses_each_actual_miner_charge_once(db):
     exercise_ordinary_cutover(db)
 
 
-def exercise_ordinary_cutover(db, *, paid_panel=None, after_cutover=None):
+def exercise_ordinary_cutover(db, *, paid_panel=None, after_cutover=None, retired_anchor=None):
     pg, dsn = db
     miner = Keypair.create_from_uri("//Calibration").ss58_address
     batch = "test-pilot"
@@ -133,12 +133,13 @@ def exercise_ordinary_cutover(db, *, paid_panel=None, after_cutover=None):
         q.execute("ROLLBACK TO with_retry")
         from tests.lab_arena.collection_rewards_test import insert_legacy_state
 
-        legacy = insert_legacy_state(q, 100)
+        predecessor = retired_anchor(q, 100) if retired_anchor else insert_legacy_state(q, 100)
+        before_launch = {"first_epoch": 100 if retired_anchor else None}
         proof = {
             **result,
             "cutover_anchor": {
                 "epoch": 100,
-                "state_hash": legacy["state_hash"],
+                "state_hash": predecessor["state_hash"],
                 "head_block": 25,
                 "head_hash": "0x" + "b" * 64,
                 "observed_at": int(time.time()),
@@ -185,7 +186,7 @@ def exercise_ordinary_cutover(db, *, paid_panel=None, after_cutover=None):
                 (Json(dict(proof, prices={"C": dict.fromkeys(MODELS, 10000)})),),
             )
         q.execute("ROLLBACK TO altered")
-        # Even an approved pilot cannot retire champions with no earned live quote.
+        # Even an approved pilot cannot activate payments without an earned live quote.
         with pytest.raises(pg.Error, match="first paid collection job"):
             q.execute(
                 "INSERT INTO public.collection_reward_cutover VALUES ('finney',71,101,%s)",
@@ -199,12 +200,12 @@ def exercise_ordinary_cutover(db, *, paid_panel=None, after_cutover=None):
         )
         q.execute("SELECT public.collection_reward_start_v1(), public.collection_reward_schedule_v1()")
         start, staged = q.fetchone()
-        assert start == {"first_epoch": None}
+        assert start == before_launch
         assert staged["staged"] and staged["pilot_evidence"] == proof
         q.execute("SAVEPOINT staged")
         q.execute("DELETE FROM public.collection_reward_launch")
         q.execute("SELECT public.collection_reward_schedule_v1(), public.collection_reward_start_v1()")
-        assert q.fetchone() == ({}, {"first_epoch": None})
+        assert q.fetchone() == ({}, before_launch)
         q.execute("ROLLBACK TO staged")
         live_job, live_batch, token = str(uuid4()), "test-live", "sha256:" + "b" * 64
         live_reg, live_orr = str(uuid4()), str(uuid4())
@@ -249,13 +250,13 @@ def exercise_ordinary_cutover(db, *, paid_panel=None, after_cutover=None):
             "batch_id": live_batch, "model": MODELS[0], "scenario_id": "C01-s2001",
             "harness_commit": commit, "artifact_sha256": args[-1],
         }
-        assert champion == {"first_epoch": None}
+        assert champion == before_launch
         conn.commit()
         with pg.connect(**dsn) as independent, independent.cursor() as fresh:
             fresh.execute("SET LOCAL ROLE lab_arena_service")
             fresh.execute("SELECT public.collection_reward_schedule_v1(),public.collection_reward_start_v1()")
             resumed, before = fresh.fetchone()
-            assert resumed["pending"] == pending["pending"] and before["first_epoch"] is None
+            assert resumed["pending"] == pending["pending"] and before == before_launch
             fresh.execute("SELECT has_table_privilege(current_user,'public.collection_reward_launch','INSERT')")
             assert fresh.fetchone() == (False,)
         source = args[-1]
@@ -270,7 +271,7 @@ def exercise_ordinary_cutover(db, *, paid_panel=None, after_cutover=None):
             q.execute(finish_sql, (live_job, Json(dict(anchor, observed_at=int(time.time()) - 150))))
         q.execute("ROLLBACK TO paid")
         q.execute("SELECT public.collection_reward_start_v1(),status FROM public.collection_jobs WHERE job_id=%s", (live_job,))
-        assert q.fetchone() == ({"first_epoch": None}, "ready")
+        assert q.fetchone() == (before_launch, "ready")
         q.execute(finish_sql, (live_job, Json(anchor)))
         assert q.fetchone()[0]["status"] == "accepted"
         q.execute("SET CONSTRAINTS ALL IMMEDIATE")
@@ -279,7 +280,8 @@ def exercise_ordinary_cutover(db, *, paid_panel=None, after_cutover=None):
         q.execute("SELECT public.collection_reward_start_v1(),public.collection_reward_quotes_v1(101),"
                   "public.collection_reward_quotes_v1(102),public.collection_reward_schedule_v1()")
         active, first, second, schedule = q.fetchone()
-        assert active == {"first_epoch": 101}
+        assert active == {"first_epoch": 100 if retired_anchor else 101}
+        assert schedule["first_epoch"] == 101
         assert first["job_count"] == 1 and first["quotes_microusd"] == {miner: fee}
         assert second["job_count"] == 0
         assert not schedule.get("staged")

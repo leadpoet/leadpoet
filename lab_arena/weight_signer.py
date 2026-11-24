@@ -12,6 +12,7 @@ from leadpoet_canonical.arena_weights import (
 )
 from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
 from leadpoet_canonical.hotkey_authority_v2 import (
+    chain_signing_profiles,
     encode_commit_timelocked_call,
     encode_signed_extrinsic_v2,
     encode_weight_signature_payload,
@@ -298,13 +299,22 @@ class ArenaWeightSigner:
                 raise ArenaWeightSignerError("Arena recovery authorization hash differs")
             if authorization.get("state_hash") != state_hash or authorization.get("netuid") != self._netuid:
                 raise ArenaWeightSignerError("Arena recovery authorization targets another state")
+            runtime_spec_version = int(authorization["runtime_spec_version"])
+            runtime_transaction_version = authorization.get("runtime_transaction_version")
+            if runtime_transaction_version is None:
+                measured = {
+                    int(item["spec_version"]): item
+                    for item in chain_signing_profiles(self.chain_profile)
+                }
+                runtime_transaction_version = measured.get(
+                    runtime_spec_version, self.chain_profile
+                )["transaction_version"]
             profile = select_chain_signing_profile(
                 self.chain_profile,
-                runtime_version={"specVersion": authorization["runtime_spec_version"],
-                                 "transactionVersion": int(authorization.get(
-                                     "runtime_transaction_version",
-                                     self.chain_profile["transaction_version"],
-                                 ))},
+                runtime_version={
+                    "specVersion": runtime_spec_version,
+                    "transactionVersion": int(runtime_transaction_version),
+                },
                 genesis_hash=self.chain_profile["genesis_hash"],
             )
             call = bytes.fromhex(str(recovery["call_data_hex"]))

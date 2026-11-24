@@ -325,6 +325,21 @@ def assign_judges(policy, assignments):
 
 
 def _packet(p):
+    from lab_arena.collection_judge_segments import (
+        MAX_PARTS,
+        PART_BYTES,
+        describe,
+        source,
+    )
+
+    segmented = "judge_segments" in p
+    if segmented:
+        _require(
+            describe(source(p)) == p["judge_segments"]
+            and p["judge_segments"]["parts"] <= MAX_PARTS,
+            "incomplete segmented evidence",
+        )
+    field_limit = PART_BYTES * MAX_PARTS if segmented else 65536
     _require(
         type(p) is dict
         and all(_text(p.get(k), 256) for k in ("run_id", "scenario_id")),
@@ -332,7 +347,7 @@ def _packet(p):
     )
     _require(
         all(
-            _text(p.get(k), 65536)
+            _text(p.get(k), field_limit)
             for k in (
                 "task",
                 "facts",
@@ -357,19 +372,21 @@ def _packet(p):
         _require(
             type(step) is dict
             and _integer(step.get("step"), i, i)
-            and _text(step.get("action"), 8192),
+            and _text(step.get("action"), field_limit if segmented else 8192),
             "numbered action",
         )
         # The private evidence adapter supplies cited/relevant excerpts only.
         _require(
-            type(step.get("evidence")) is str and len(step["evidence"]) <= 8192,
+            type(step.get("evidence")) is str
+            and len(step["evidence"]) <= (field_limit if segmented else 8192),
             "trimmed evidence",
         )
         projected.append({k: step[k] for k in ("step", "action", "evidence")})
         if step.get("reasoning") is not None:
             _require(
                 type(step["reasoning"]) is str
-                and len(step["reasoning"]) <= MAX_VISIBLE_REASONING_CHARS,
+                and len(step["reasoning"])
+                <= (field_limit if segmented else MAX_VISIBLE_REASONING_CHARS),
                 "visible reasoning",
             )
             projected[-1]["reasoning"] = step["reasoning"]
@@ -531,7 +548,9 @@ def _system(prompt, key):
     }
 
 
-def judge_run(policy, assignment, packet, call, *, prompt, previous=None):
+def judge_run(
+    policy, assignment, packet, call, *, prompt, previous=None, record_segment=None
+):
     """Return private records and selection indices. Never emit judge prose in training rows."""
     validate_prompt(policy, prompt)
     _require(
@@ -604,10 +623,38 @@ def judge_run(policy, assignment, packet, call, *, prompt, previous=None):
             "judge": judge,
             "judge_version": policy.version(judge),
         }
+        shown_scenario, shown_run = scenario, run
+        if packet.get("judge_segments", {}).get("parts", 0) > 1:
+            from lab_arena.collection_judge_segments import collect_notes
+
+            notes, complete = collect_notes(
+                policy, call, judge, blind, [scenario, run], record_note=record_segment
+            )
+            result.setdefault("segment_reviews", {})[judge] = notes
+            if not complete:
+                rejected = _abstain(
+                    identity,
+                    "Incomplete evidence coverage across the recorded segments.",
+                )
+                return dict(
+                    rejected, run_id=packet["run_id"], scenario_id=packet["scenario_id"]
+                )
+            shown_scenario = {
+                "evidence_protocol": packet["judge_segments"],
+                "instructions": "Assess the complete ordered evidence notes. Abstain if evidence is insufficient or cannot be reconciled.",
+            }
+            shown_run = {
+                "steps_count": n,
+                "checks": run["checks"],
+                "segment_evidence": notes,
+            }
         messages = [
             _system(prompt, "run_instructions"),
-            {"role": "user", "content": _json(scenario)},
-            {"role": "user", "content": _json({"identity": identity, "run": run})},
+            {"role": "user", "content": _json(shown_scenario)},
+            {
+                "role": "user",
+                "content": _json({"identity": identity, "run": shown_run}),
+            },
         ]
         verdict = _request(
             policy,
@@ -622,6 +669,11 @@ def judge_run(policy, assignment, packet, call, *, prompt, previous=None):
     primary = assignment["primary"]
     records = result["records"]
     if previous is not None:
+        if "segment_reviews" in previous:
+            from lab_arena.collection_judge_segments import verify_notes
+
+            verify_notes(packet, previous)
+            result["segment_reviews"] = dict(previous["segment_reviews"])
         validate_unavailable(policy, previous, primary)
         _require(
             all(
@@ -719,7 +771,9 @@ def claim_review(packet, records):
         _require(
             type(unit) is dict
             and _text(unit.get("id"), 256)
-            and _text(unit.get("text"), 65536)
+            and _text(
+                unit.get("text"), 128 * 1024 if "judge_segments" in packet else 65536
+            )
             and type(unit.get("sources")) is dict,
             "claim unit",
         )
@@ -775,6 +829,8 @@ def claim_review(packet, records):
 
 
 def claim_verdict(packet):
+    if packet.get("projection_error") or packet.get("claim_size_hold"):
+        return "missing"
     verdict = claim_review(packet, [])
     return "passed" if verdict == "agreed" else verdict
 
@@ -803,8 +859,10 @@ def rank_scenario(policy, candidates, call, *, prompt):
     """Input (packet, private assessment) pairs from the trusted result store."""
     validate_prompt(policy, prompt)
     eligible = []
+    bounded = False
     run_ids, scenarios, fact_sets = set(), set(), set()
     for packet, assessment in candidates:
+        bounded |= "judge_segments" in packet
         rid = packet["run_id"]
         _require(
             rid == assessment["run_id"]
@@ -883,14 +941,42 @@ def rank_scenario(policy, candidates, call, *, prompt):
         )
         return v
 
+    shown = {k: c[2] for k, c in by_label.items()}
+    ranking_parts = {}
+    if bounded:
+        from lab_arena.collection_judge_segments import PART_BYTES, collect_notes
+
+        if len(_json([common, shown]).encode()) > PART_BYTES:
+            for label, evidence in shown.items():
+                notes, covered = collect_notes(
+                    policy,
+                    call,
+                    judge,
+                    {"scenario_id": identity["scenario_id"]},
+                    [common, evidence],
+                )
+                ranking_parts[label] = notes
+                if not covered:
+                    return {
+                        "status": "cannot_judge",
+                        "labels": {},
+                        "record": None,
+                        "segment_reviews": ranking_parts,
+                        "reason": "incomplete_ranking_coverage",
+                    }
+            common = {
+                "instructions": "Compare all ordered evidence notes. Each candidate was read in full."
+            }
+            shown = {
+                label: {"evidence_notes": notes}
+                for label, notes in ranking_parts.items()
+            }
     messages = [
         _system(prompt, "ranking_instructions"),
         {"role": "user", "content": _json(common)},
         {
             "role": "user",
-            "content": _json(
-                {"identity": identity, "runs": {k: c[2] for k, c in by_label.items()}}
-            ),
+            "content": _json({"identity": identity, "runs": shown}),
         },
     ]
     v = _request(policy, call, judge, "ranking", messages, validate)
@@ -902,7 +988,7 @@ def rank_scenario(policy, candidates, call, *, prompt):
             "content": _json(
                 {
                     "identity": identity,
-                    "runs": {k: by_label[r][2] for k, r in reverse.items()},
+                    "runs": {k: shown[r] for k, r in reverse.items()},
                 }
             ),
         }
@@ -928,6 +1014,7 @@ def rank_scenario(policy, candidates, call, *, prompt):
         "labels": {k: c[1] for k, c in by_label.items()},
         "record": dict(v, scenario_id=sid) if v else None,
         **({"swapped_order": swapped["order"]} if v else {}),
+        **({"segment_reviews": ranking_parts} if ranking_parts else {}),
         "status": "ranked" if v else "cannot_judge",
     }
 

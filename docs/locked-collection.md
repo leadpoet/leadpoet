@@ -138,11 +138,9 @@ Compensated ordinary collection must be active before a correction class can ear
 
 ### Recording comparison workflows
 
-For a new synthetic six-model comparison, set `capture_version` to `collection.workflow-events.v1` in the private batch. The version selects the exact public agent and private builder used for generation, review and pricing. A live batch must match its approved pilot. Omitting the version reproduces the historical source pins and batch identity.
+New synthetic comparison manifests use `collection.workflow-events.v2` in `capture_version`. The core runner preserves verified provider replies, visible tool results, usage, the original workflow output and per-step native checks in private storage. Interrupted and capped attempts retain their recorded prefix. Sensitive material is withheld and the private record identifies the reason. Previously frozen versions keep their source pins and batch identities.
 
-The worker writes each original message, complete tool result and pre-decision state under the existing private `collection/<batch>/<job>/events/` path. Numbered events are write-once. A trapped failure ends with an interruption index. After a process kill, the contiguous prefix remains available without retrying inference. Signed review reads the original journal and checks it against each completed generator transcript. Comparison consent continues to permit private review only.
-
-Before any funded synthetic comparison or correction, the worker checks the proposed split against the frozen evaluation templates from the pinned builder. A new seed does not make a held-out template eligible. A missing split or an overlap holds comparisons before the worker claims an assignment. The private P7 training-only task has a separately pinned rule pool and tool format. Its split must equal the one supplied by the training producer.
+New experiment manifests set `max_tokens` per call and `max_run_tokens` for the whole run. The preparation command defaults the latter to 65,536. Unknown token counts stay unknown in the data and reserve the requested allowance against the run limit. A truncated final reply is recorded as unanswered. Long judge inputs are read in bounded, byte-indexed parts before a whole-run verdict. Incomplete evidence or a bounded-reader limit holds that verdict, and the original size and disposition are recorded.
 
 ### Using a gateway-funded student as the source
 

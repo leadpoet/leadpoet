@@ -232,6 +232,7 @@ def main():
     args = parser.parse_args()
     os.umask(0o077)
     data = {"read_errors": {}}
+    db = None
     try:
         env = _read_scoped_environment(args.environment_file)
         db = PostgrestTransport(env["LAB_ARENA_SUPABASE_URL"], service_key=env["LAB_ARENA_SERVICE_KEY"], timeout_seconds=15)
@@ -249,8 +250,10 @@ def main():
     except Exception as exc:
         data["read_errors"]["worker"] = type(exc).__name__
     try:
-        if "collection" in data:
+        if db is not None:
             data["weights"] = validator_snapshot(env, db)
+        else:
+            data["read_errors"]["weights"] = "StoreUnavailable"
     except Exception as exc:
         data["read_errors"]["weights"] = type(exc).__name__
     save(args.state_directory, data)

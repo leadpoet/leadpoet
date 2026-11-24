@@ -211,6 +211,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_create_round": (("p_round_id", "text"), ("p_configuration_doc", "jsonb")),
     "lab_arena_transition_round": (("p_round_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
     "lab_arena_activate_reward": (("p_round_id", "text"), ("p_reward_basis", "jsonb"), ("p_signing_key_doc", "jsonb")),
+    "lab_arena_prospective_win_737": (("p_round_id", "text"),),
     "lab_arena_reward_slot_snapshot": (("p_round_id", "text"), ("p_slot_policy", "jsonb")),
     "lab_arena_correction_reward_history_v1": (
         ("p_mode", "text"), ("p_network_name", "text"), ("p_netuid", "integer"),
@@ -1811,6 +1812,12 @@ class ArenaStore:
             ),
             "commit_round_v2",
         )
+
+    def prospective_win_ready(self, round_id: str) -> bool:
+        result = self._transport.rpc("lab_arena_prospective_win_737", {"p_round_id": round_id})
+        if not isinstance(result, bool):
+            raise ArenaStoreError("invalid prospective win authority")
+        return result
 
     def reward_slot_snapshot(
         self, round_id: str, slot_policy: Mapping[str, Any]

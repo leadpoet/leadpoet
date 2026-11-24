@@ -52,6 +52,7 @@ def load_batch(raw, prompt):
         "thresholds",
         "terms_sha256",
         "reference_successor",
+        "route_witness_sha256",
         "control_artifacts",
         "claim_pack_sha256",
     } != {
@@ -109,6 +110,23 @@ def load_batch(raw, prompt):
     ):
         raise ValueError("every generator and judge needs one pinned provider route")
     successor = raw.get("reference_successor")
+    full_witness = raw.get("route_witness_sha256")
+    if "route_witness_sha256" in raw:
+        from lab_arena.collection_route_witness import WITNESS
+        from lab_arena.collection_generation import CAPTURE_V2
+
+        if (
+            successor
+            or full_witness != WITNESS
+            or raw["mode"] != "pilot"
+            or not qualification
+            or raw.get("capture_version") != CAPTURE_V2
+            or raw.get("terms_sha256") != SYNTHETIC_TRAINING_TERMS_HASH
+            or not raw.get("split_manifest")
+            or not all(s.startswith("P7-s") for s in scenarios)
+        ):
+            raise ValueError("invalid full witnessed reference cohort")
+
     if "reference_successor" in raw:
         from lab_arena.collection_generation import CAPTURE_V2
 
@@ -141,7 +159,9 @@ def load_batch(raw, prompt):
             raise ValueError("successor changes earlier frozen batch settings")
     for model, route in GENERATOR_ROUTES.items():
         expected = (
-            REFERENCE_ROUTE if successor and model == REFERENCE_MODEL else route.tag
+            REFERENCE_ROUTE
+            if (successor or full_witness) and model == REFERENCE_MODEL
+            else route.tag
         )
         if raw["routes"][model] != expected:
             raise ValueError("unverified generator route")
@@ -165,7 +185,15 @@ def load_batch(raw, prompt):
     if qualification:
         versions["fable_version"], versions["astra_version"] = judge.QUALIFICATION_JUDGES
     policy = judge.BatchPolicy(
-        ("rs-" + bundle_hash if successor else raw["name"] + "-" + bundle_hash[:24]),
+        (
+            "rs-" + bundle_hash
+            if successor
+            else (
+                "rq-" + bundle_hash
+                if full_witness
+                else raw["name"] + "-" + bundle_hash[:24]
+            )
+        ),
         raw["seed"],
         judge.digest(prompt),
         pilot=raw["mode"] == "pilot",
@@ -416,6 +444,10 @@ def run_cohort(
     controls=None,
     claim_pack=None,
 ):
+    if raw.get("route_witness_sha256"):
+        from lab_arena.collection_route_witness import verified_witness
+
+        verified_witness(raw, objects)
     agent, builder = comparison_revisions(raw)
     if raw.get("capture_version") and (
         getattr(sources[0], "source_revision", None),

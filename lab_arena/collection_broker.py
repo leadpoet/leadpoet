@@ -63,7 +63,7 @@ def approved_reference_route(model, tag, batch, mode):
         and tag == REFERENCE_ROUTE
         and mode == "pilot"
         and isinstance(batch, str)
-        and re.fullmatch(r"rs-[0-9a-f]{64}", batch) is not None
+        and re.fullmatch(r"r[sq]-[0-9a-f]{64}", batch) is not None
     )
 
 

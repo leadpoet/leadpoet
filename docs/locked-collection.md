@@ -6,7 +6,7 @@ Miners enroll an OpenRouter funding key for operator-run synthetic sales workflo
 
 The pilot uses **your OpenRouter credits and pays no emissions**. Leadpoet pays for verification. Choose one scope per hotkey. A comparison funds one assigned open model on a simulated sales task. A correction funds an expert continuing a smaller model’s run on a synthetic task.
 
-1. Use a registered Finney subnet 71 hotkey and the miner runtime from [Install and register](../README.md#install-and-register). If you have an existing checkout, update it and activate its miner environment. The examples use wallet `miner` and hotkey `default`. Substitute your names or add `--wallet-path` for a custom location.
+1. Use a registered Finney subnet 71 hotkey and the miner runtime from [Install and register](../README.md#install-and-register). If you already have the miner dependencies, update your checkout, activate its miner environment, and run `python -m pip install --no-deps -e .` from the repo root. This refreshes the installed `leadpoet` command. The examples use wallet `miner` and hotkey `default`. Substitute your names or add `--wallet-path` for a custom location.
 2. Create a dedicated funded [OpenRouter API key](https://openrouter.ai/settings/keys) and a [read-only management key](https://openrouter.ai/blog/announcements/scoped-management-keys/) for the same workspace. Disable prompt and output logging, sharing, and external trace broadcast. The gateway uses the management key once to verify ownership and stores only the encrypted runtime key.
 3. Choose a scope and read the published terms. Use one of these commands:
 

@@ -548,3 +548,22 @@ def test_rejudge_ready_reuses_the_generator_and_the_completed_primary(
             str(uuid4()),
         )
     assert calls == [missing, "finish"]
+
+
+def test_drift_anchor_requires_both_reference_judges_at_dispatch_and_review():
+    raw = manifest()
+    scores = {role: dict.fromkeys(judge.PARTS, 3) for role in judge.QUALIFICATION_ROLES}
+    with pytest.raises(ValueError, match="drift slot requires both"):
+        load_batch(dict(raw, drift_slots={"0": scores}), PROMPT)
+
+    policy = load_batch(dict(raw, drift_slots={"1": scores}), PROMPT)
+    p = packet("drift-replay")
+    rows = [dict(run_id=p["run_id"], miner="test", generator=MODELS[0], harness="test")]
+    assigned = judge.assign_judges(policy, rows)[p["run_id"]]
+    assessment = judge.judge_run(policy, assigned, p, Caller(), prompt=PROMPT)
+    assert len(assessment["records"]) == 1
+    report = judge.quality_report(
+        policy, assignments=rows, assessments=[assessment], human_marks={}, planted={},
+        drift={p["run_id"]: scores},
+    )
+    assert "unjudged_control" in report["holds"]

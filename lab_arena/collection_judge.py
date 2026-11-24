@@ -1050,6 +1050,8 @@ def quality_report(
         ):
             problems.add("planted_control_mismatch")
         if rid in drift:
+            if {v["judge"] for v in records} != set(policy.roles):
+                problems.add("unjudged_control")
             for v in records:
                 expected = drift[rid].get(v["judge"])
                 if v["cannot_judge"] or not expected or v["scores"] != expected:

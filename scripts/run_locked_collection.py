@@ -125,6 +125,12 @@ def load_batch(raw, prompt):
         **versions,
         **thresholds,
     )
+    for slot in raw["drift_slots"]:
+        if not isinstance(slot, str) or not re.fullmatch(r"0|[1-9][0-9]{0,4}", slot) or int(slot) >= len(MODELS) * len(scenarios):
+            raise ValueError("drift slot outside batch")
+        generator = MODELS[int(slot) % len(MODELS)]
+        if len(judge.independent_roles(policy, generator)) != len(policy.roles):
+            raise ValueError("drift slot requires both independent judges")
     judge.validate_prompt(policy, prompt)
     return policy
 

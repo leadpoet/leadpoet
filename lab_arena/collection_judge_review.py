@@ -22,6 +22,11 @@ from lab_arena import collection_judge as judge
 
 BUNDLE_SCHEMA = "collection.review.v1"
 RECEIPT_SCHEMA = "collection.human-review.v1"
+BLIND_RECEIPT_SCHEMA = "collection.human-review.v2"
+
+
+class QualificationSampleUnavailable(ValueError):
+    """Only the fixed gate names are safe to print outside private review."""
 
 
 def _read_bundle(bundle, *, require_split=True):
@@ -218,8 +223,18 @@ def _read_bundle(bundle, *, require_split=True):
     return policy, assessments, reviewable
 
 
-def prepare_review(bundle):
-    policy, _, packets = _read_bundle(bundle)
+def prepare_review(bundle, *, for_qualification=False):
+    policy, assessments, packets = _read_bundle(bundle)
+    if for_qualification:
+        judge._require(policy.pilot, "qualification requires a pilot")
+        report = judge.quality_report(
+            policy, assignments=bundle["assignments"], assessments=assessments,
+            human_marks={}, planted=bundle["planted"], drift=bundle["drift"],
+            failed_run_ids={f["run_id"] for f in bundle.get("failed_attempts", [])},
+        )
+        holds = set(report["holds"]) - {"human_sample_incomplete", "human_agreement", "judge_qualification"}
+        if holds:
+            raise QualificationSampleUnavailable("qualification cohort: " + ", ".join(sorted(holds)))
     return judge.blind_human_sample(policy, packets)
 
 
@@ -313,6 +328,10 @@ def sign_review(bundle, blind_marks, reviewer_id, private_key_pem):
         "blind_marks": blind_marks,
         "report": report,
     }
+    return _sign(body, private_key_pem)
+
+
+def _sign(body, private_key_pem):
     key = load_pem_private_key(private_key_pem, password=None)
     judge._require(isinstance(key, Ed25519PrivateKey), "expected Ed25519 reviewer key")
     return {
@@ -323,14 +342,32 @@ def sign_review(bundle, blind_marks, reviewer_id, private_key_pem):
     }
 
 
+def sign_blind_review(jobs, marks, batch_sha256, reviewer, private_key_pem):
+    """Sign the human's decisions on the reviewer machine without disclosing the batch."""
+    _validate_marks(marks)
+    judge._require(
+        judge._text(reviewer, 128) and re.fullmatch(r"[0-9a-f]{64}", str(batch_sha256))
+        and type(jobs) is dict and len(jobs) == 50 and set(jobs) == set(marks["marks"])
+        and judge.digest(jobs) == marks["sample_sha256"],
+        "incomplete or mismatched blind sample",
+    )
+    for scores in marks["marks"].values():
+        judge._fields(scores, judge.PARTS)
+        judge._require(all(judge._integer(score, 0, 3) for score in scores.values()), "human scores")
+    return _sign({
+        "schema": BLIND_RECEIPT_SCHEMA, "bundle_sha256": batch_sha256,
+        "reviewer": reviewer, "blind_marks": marks,
+    }, private_key_pem)
+
+
 def _verified_report(bundle, receipt, public_key_pem):
     """Verify against the deployment's pinned reviewer key before releasing any batch."""
-    judge._fields(
-        receipt,
-        ("schema", "bundle_sha256", "reviewer", "blind_marks", "report", "signature"),
-    )
+    fields = {"schema", "bundle_sha256", "reviewer", "blind_marks", "signature"}
+    if receipt.get("schema") == RECEIPT_SCHEMA:
+        fields.add("report")
+    judge._fields(receipt, fields)
     judge._require(
-        receipt["schema"] == RECEIPT_SCHEMA
+        receipt["schema"] in (RECEIPT_SCHEMA, BLIND_RECEIPT_SCHEMA)
         and judge._text(receipt["reviewer"], 128)
         and receipt["bundle_sha256"] == judge.digest(bundle),
         "review receipt identity",
@@ -356,10 +393,8 @@ def _verified_report(bundle, receipt, public_key_pem):
         "review sample changed",
     )
     report = _report(bundle, marks, receipt["reviewer"])
-    judge._require(
-        report == receipt["report"],
-        "batch did not pass review",
-    )
+    if receipt["schema"] == RECEIPT_SCHEMA:
+        judge._require(report == receipt["report"], "batch did not pass review")
     return report
 
 

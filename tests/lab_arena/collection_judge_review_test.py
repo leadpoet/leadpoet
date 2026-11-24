@@ -258,3 +258,59 @@ def test_human_mark_cannot_replace_missing_claim_reader(batch):
     forged = dict(complete_marks(b), claim_sample_sha256=j.digest(jobs), claim_decisions={"forged": True})
     with pytest.raises(ValueError, match="claim sample changed"):
         review.sign_review(b, forged, "fixture", private)
+
+
+def test_reviewer_can_sign_all_fifty_without_the_operators_unblinded_bundle(batch, tmp_path):
+    paths = {k: tmp_path / k for k in ("bundle", "jobs", "marks", "key", "receipt")}
+    private, public = keys()
+    cli.write_new(paths["bundle"], batch)
+    paths["key"].write_bytes(private)
+    paths["key"].chmod(0o600)
+
+    assert cli.main([
+        "sample", "--for-qualification", "--bundle", str(paths["bundle"]),
+        "--jobs", str(paths["jobs"]), "--marks-template", str(paths["marks"]),
+    ]) == 0
+    form = json.loads(paths["marks"].read_bytes())
+    sample = json.loads(paths["jobs"].read_bytes())
+    assert set(form) == {"batch_sha256", "sample_sha256", "marks"}
+    assert len(sample) == 50 and {a for a in sample} == form["marks"].keys()
+    assert "private-payer" not in json.dumps(sample)
+    paths["bundle"].unlink()  # The reviewer receives only the blind inputs.
+    sign = [
+        "sign", "--jobs", str(paths["jobs"]), "--reviewer", "fixture independent reviewer",
+        "--private-key", str(paths["key"]), "--marks", str(paths["marks"]),
+        "--receipt", str(paths["receipt"]),
+    ]
+    assert cli.main(sign) == 2
+    for scores in form["marks"].values():  # Fixture scores only.
+        scores.update(dict.fromkeys(j.PARTS, 3))
+    paths["marks"].write_text(json.dumps(form))
+    assert cli.main(sign) == 0
+    receipt = json.loads(paths["receipt"].read_bytes())
+    assert "report" not in receipt
+    assert review.verify_review(batch, receipt, public)["blind_human_marks"] == 50
+    with pytest.raises(ValueError, match="signature"):
+        review.verify_review(batch, receipt, keys()[1])
+    changed = deepcopy(batch)
+    changed["runs"][0]["manifest_sha256"] = "sha256:" + "0" * 64
+    with pytest.raises(ValueError, match="identity"):
+        review.verify_review(changed, receipt, public)
+    changed_receipt = deepcopy(receipt)
+    changed_receipt["blind_marks"]["marks"][next(iter(sample))]["truth"] = 1
+    with pytest.raises(ValueError, match="signature"):
+        review.verify_review(batch, changed_receipt, public)
+    paths["receipt"].unlink()
+    paths["jobs"].write_text(json.dumps(dict(list(sample.items())[:-1])))
+    assert cli.main(sign) == 2
+
+
+def test_qualification_sample_requires_real_controls_before_requesting_marks(batch, tmp_path):
+    bundle = dict(batch, drift={})
+    private = tmp_path / "private"
+    cli.write_new(private, bundle)
+    jobs = tmp_path / "jobs"
+    marks = tmp_path / "marks"
+    assert cli.main(["sample", "--for-qualification", "--bundle", str(private),
+                     "--jobs", str(jobs), "--marks-template", str(marks)]) == 2
+    assert not jobs.exists() and not marks.exists()

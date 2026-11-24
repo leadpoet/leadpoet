@@ -63,8 +63,8 @@ TERMS = (
 )
 TERMS_HASH = contracts.hash_bytes(TERMS.encode())
 CORRECTION_SCOPE = "synthetic_corrections"
-# This candidate text is available to miners only when the operator publishes
-# its exact digest after counsel review. An unset or stale digest closes intake.
+# The released text is the canonical offer. An operator can explicitly close a
+# scope or pin a specific revision. Each miner signs a scope- and mode-bound digest.
 _CORRECTION_AUTHORIZATION = (
     "I authorize Leadpoet to charge my dedicated OpenRouter key up to my signed rolling 24-hour limit "
     "for operator-assigned experiments on synthetic sales tasks. Experiments may repeat tasks or continue "
@@ -168,7 +168,7 @@ def correction_terms_hash(mode="pilot"):
     text = CORRECTION_TERMS if mode == "pilot" else LIVE_CORRECTION_TERMS
     setting = "LAB_ARENA_CORRECTION_TERMS_SHA256" if mode == "pilot" else "LAB_ARENA_LIVE_CORRECTION_TERMS_SHA256"
     digest = contracts.hash_bytes(text.encode())
-    if os.getenv(setting) != digest:
+    if os.getenv(setting, digest) != digest:
         raise IntakeError("collection_correction_terms_unavailable", 503)
     return digest
 

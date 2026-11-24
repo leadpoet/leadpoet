@@ -43,7 +43,7 @@ The runtime pins Bittensor 10.5.0. Use a separate environment for the current v1
 deactivate
 python3.11 -m venv .venv-bittensor11-cli
 source .venv-bittensor11-cli/bin/activate
-python -m pip install "bittensor==11.1.0"
+python -m pip install "bittensor==11.3.6"
 btcli wallet create -w miner -H default
 btcli wallet registrations -w miner --network finney --netuid 71
 btcli tx burned-register --netuid 71 --hotkey miner/default -w miner --network finney --dry-run

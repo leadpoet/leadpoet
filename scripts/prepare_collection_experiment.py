@@ -50,6 +50,8 @@ def main(argv=None):
     prepare.add_argument("--max-steps", type=int, required=True)
     prepare.add_argument("--max-generated-tokens", type=int, required=True)
     prepare.add_argument("--repeat", type=int, default=1)
+    prepare.add_argument("--min-pricing-runs", type=int,
+                         help="Predeclare the minimum genuine sample before this pilot can price one paid class")
     feedback = sub.add_parser(
         "sign-feedback",
         help="Sign actual paired held-out results on the Poet evaluator's machine",
@@ -126,6 +128,8 @@ def main(argv=None):
             }
         ],
     }
+    if args.min_pricing_runs is not None:
+        raw["min_pricing_runs"] = args.min_pricing_runs
     load_experiment(
         raw, {}
     )  # Validate caps and schedule; the operator's frozen rubric determines the final ID.

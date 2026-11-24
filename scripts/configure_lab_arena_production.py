@@ -435,15 +435,16 @@ def _configure_secret_request(request, *, client, account):
                 set(updates) != {"LAB_ARENA_COLLECTION_MODE"} or request.get("aliases") or request.get("service_key")
                 or updates["LAB_ARENA_COLLECTION_MODE"] not in {"off", "pilot", "live"}):
             fail("collection_mode_scope_invalid")
-    if request["role"] == "correction_terms_only" or "LAB_ARENA_CORRECTION_TERMS_SHA256" in updates:
+    correction_settings = {"LAB_ARENA_CORRECTION_TERMS_SHA256", "LAB_ARENA_LIVE_CORRECTION_TERMS_SHA256"}
+    if request["role"] == "correction_terms_only" or correction_settings.intersection(updates):
         from lab_arena import contracts
-        from lab_arena.collection_intake import CORRECTION_TERMS
-
+        from lab_arena.collection_intake import CORRECTION_TERMS, LIVE_CORRECTION_TERMS
         if (request["role"] != "correction_terms_only" or secret_id != GATEWAY_SECRET
-                or set(updates) != {"LAB_ARENA_CORRECTION_TERMS_SHA256"}
-                or request.get("aliases") or request.get("service_key")
-                or updates["LAB_ARENA_CORRECTION_TERMS_SHA256"] not in
-                {"off", contracts.hash_bytes(CORRECTION_TERMS.encode())}):
+                or len(updates) != 1 or not set(updates) <= correction_settings or request.get("aliases") or request.get("service_key")):
+            fail("correction_terms_scope_invalid")
+        setting = next(iter(updates))
+        legal_text = LIVE_CORRECTION_TERMS if setting == "LAB_ARENA_LIVE_CORRECTION_TERMS_SHA256" else CORRECTION_TERMS
+        if updates[setting] not in {"off", contracts.hash_bytes(legal_text.encode())}:
             fail("correction_terms_scope_invalid")
 
     if request["role"] == "openrouter_concurrency_only":
@@ -740,6 +741,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--apply", action="store_true", help="apply after an authorized check")
     scope = parser.add_mutually_exclusive_group()
     scope.add_argument("--correction-terms", metavar="APPROVED_SHA256_OR_OFF", help="publish the counsel-reviewed correction terms digest on the gateway, or close that scope")
+    scope.add_argument("--live-correction-terms", metavar="APPROVED_SHA256_OR_OFF", help="publish or withdraw only the separately reviewed compensated correction contract")
     scope.add_argument("--collection-mode", choices=("off", "pilot", "live"), help="configure only the mainnet gateway's funded collection enrollment mode")
     scope.add_argument("--prepare-runner", action="store_true", help="inspect or create the dedicated host-only runner signer")
     scope.add_argument("--miner-credentials-only", action="store_true", help="inspect or configure only the gateway Arena miner KMS key")
@@ -832,6 +834,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         or args.miner_credentials_only
         or getattr(args, "collection_mode", None) is not None
         or getattr(args, "correction_terms", None) is not None
+        or getattr(args, "live_correction_terms", None) is not None
         or args.testnet_proxy is not None
         or args.scorer_image_only
         or args.openrouter_max_concurrency is not None
@@ -890,15 +893,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _configure_secret(request, profile=args.aws_profile or "leadpoet-lab")
             print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
             return 0
-        if args.correction_terms is not None:
+        if args.correction_terms is not None or args.live_correction_terms is not None:
             from lab_arena import contracts
-            from lab_arena.collection_intake import CORRECTION_TERMS
+            from lab_arena.collection_intake import CORRECTION_TERMS, LIVE_CORRECTION_TERMS
 
-            if args.correction_terms not in ("off", contracts.hash_bytes(CORRECTION_TERMS.encode())):
+            if args.live_correction_terms is not None:
+                setting, value, text = "LAB_ARENA_LIVE_CORRECTION_TERMS_SHA256", args.live_correction_terms, LIVE_CORRECTION_TERMS
+            else:
+                setting, value, text = "LAB_ARENA_CORRECTION_TERMS_SHA256", args.correction_terms, CORRECTION_TERMS
+            if value not in ("off", contracts.hash_bytes(text.encode())):
                 raise ConfigurationError("expected the approved correction terms digest or off")
             request = {"secret_id": GATEWAY_SECRET, "allowed_accounts": args.allowed_account,
                        "apply": args.apply, "role": "correction_terms_only", "aliases": {},
-                       "updates": {"LAB_ARENA_CORRECTION_TERMS_SHA256": args.correction_terms}}
+                       "updates": {setting: value}}
             result = _configure_secret(request, profile=args.aws_profile or "leadpoet-lab")
             print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
             return 0

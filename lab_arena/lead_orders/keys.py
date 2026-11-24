@@ -213,7 +213,7 @@ def failover_reason(provider: str, response: "arena_broker.ProviderResponse") ->
         document: Any = None
         try:
             document = json.loads(bytes(response.body).decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
+        except (UnicodeDecodeError, ValueError, RecursionError):
             document = None
         spent = (
             arena_broker._openrouter_account_credit_response(response)

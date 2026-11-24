@@ -375,7 +375,8 @@ provider. `POST /lead-orders/keys/{key_id}/revoke`.
 answers up to 500 of the vault's signed receipts for the miner's keys, each
 with its `sequence`, `call_id` and `kind` (`call` or the free cost
 `readback`), and lists the miner's active keys with the vault key each is
-sealed to. `python -m lead_order_vault.cli receipts` checks them.
+sealed to, plus `next_since` and `more` for the next page.
+`python -m lead_order_vault.cli receipts` checks them.
 
 `GET /lead-orders/statement?since=<call sequence>` (hotkey-signed; the
 signature covers the path without the query) is a miner's own ledger. It

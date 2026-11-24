@@ -1560,8 +1560,9 @@ def test_vault_receipts_are_kept_for_calls_and_read_backs_and_shown_only_to_thei
     assert got == [(first["call_id"], "call", 1), (lost["call_id"], "call", 2), (lost["call_id"], "readback", 3)]
     assert page["keys"] == [{"key_id": key["key_id"], "provider": "openrouter",
                              "key_fingerprint": page["keys"][0]["key_fingerprint"], "sealed_to": None}]
-    assert service.vault_receipts(other, "0") == {"receipts": [], "keys": []}
-    assert service.vault_receipts(miner, str(page["receipts"][-1]["sequence"]))["receipts"] == []
+    assert service.vault_receipts(other, "0") == {"receipts": [], "keys": [], "next_since": 0, "more": False}
+    assert page["next_since"] == page["receipts"][-1]["sequence"] and page["more"] is False
+    assert service.vault_receipts(miner, str(page["next_since"]))["receipts"] == []
 
     # The same receipt twice is one row; a receipt naming another miner is refused.
     assert store.record_vault_receipt(call_id=first["call_id"], kind="call",

@@ -30,7 +30,7 @@ from typing import Callable, Dict, List, Mapping, Optional, Tuple
 
 from . import envelope as env
 from . import trust
-from .vault import RECEIPT_SCHEMA
+from .envelope import RECEIPT_SCHEMA
 
 BASE_RPC = "https://mainnet.base.org"
 

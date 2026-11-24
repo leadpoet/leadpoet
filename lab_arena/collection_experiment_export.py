@@ -29,6 +29,8 @@ from lab_arena.collection_experiment import (
 from lab_arena.collection_quality import require_release_partition, verify_split
 from lab_arena.collection_workflow import store_artifact
 from lab_arena.collection_journal import WorkflowJournal
+from lab_arena import collection_trajectories as trajectories
+from lab_arena.collection_broker import batch_versions
 
 CORRECTIONS = "collection.correction-pairs.v1"
 AUDIT = "collection.experiment-private-audit.v1"
@@ -37,7 +39,16 @@ LIMIT = 128 * 1024 * 1024
 
 
 def verified_panel(
-    database, objects, spec, raw, prompt, receipt, approval, reviewer_key, approver_key
+    database,
+    objects,
+    target,
+    policy,
+    raw,
+    prompt,
+    receipt,
+    approval,
+    reviewer_key,
+    approver_key,
 ):
     from scripts.collection_batch import source_bundle
 
@@ -45,10 +56,24 @@ def verified_panel(
     signed = review.verify_qualification(
         bundle, receipt, reviewer_key, approval, approver_key
     )
-    if signed.get("claim_protocol", "collection.fresh-claims.v1") != spec.raw.get("claim_protocol","collection.fresh-claims.v1"):
+    if signed.get("claim_protocol", "collection.fresh-claims.v1") != target.get(
+        "claim_protocol", "collection.fresh-claims.v1"
+    ):
         raise ValueError("claim reader protocol differs from qualified panel")
-    if signed["prompt_sha256"] != spec.policy.prompt_sha256:
+    if signed["prompt_sha256"] != policy.prompt_sha256:
         raise ValueError("experiment and qualified panel use different policies")
+    if not policy.pilot and not signed.get("allow_live"):
+        raise ValueError("panel approval does not authorize live collection")
+    if not policy.qualification or {
+        policy.version(role) for role in policy.roles
+    } != set(signed["judges"]):
+        raise ValueError("generator batch uses an unqualified judge panel")
+    training_classes = {sid.split("-")[0] for sid in raw["scenario_ids"]}
+    target_cases = target.get("scenario_ids") or [
+        c["scenario_id"] for c in target["cases"]
+    ]
+    if any(sid.split("-")[0] not in training_classes for sid in target_cases):
+        raise ValueError("judges were not qualified for this task class")
     return signed
 
 
@@ -122,21 +147,33 @@ def _pair(row, packet, student):
     }
 
 
-def write_dataset(spec, database, objects, dest, *, qualification=None):
+def write_dataset(
+    spec, database, objects, dest, *, qualification=None, full_trajectories=False
+):
     from scripts.collection_batch import read_artifact
-    from lab_arena.collection_intake import correction_terms_hash, register_signatures
+    from lab_arena.collection_intake import (
+        require_correction_grant,
+        register_signatures,
+    )
 
     register_signatures()
 
     batch = spec.batch_id
     trained = qualification is not None
-    export = CORRECTIONS if trained else AUDIT
+    if full_trajectories and not trained:
+        raise ValueError("trajectory release requires independent qualification")
+    export = (
+        trajectories.SCHEMA
+        if full_trajectories
+        else (CORRECTIONS if trained else AUDIT)
+    )
     if trained:
-        if spec.raw["terms_sha256"] != correction_terms_hash(spec.raw["mode"]):
-            raise ValueError("release requires active approved correction consent")
+        require_correction_grant(spec.raw["mode"], spec.raw["terms_sha256"])
         require_release_partition(spec.raw)
         # Qualification documents are reconstructed from authenticated DB + original immutable evidence.
-        receipt = verified_panel(database, objects, spec, **qualification)
+        receipt = verified_panel(
+            database, objects, spec.raw, spec.policy, **qualification
+        )
     costs_rpc = (
         "collection_experiment_costs_v1"
         if spec.raw["mode"] == "live"
@@ -152,6 +189,18 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
         raise ValueError(
             "correction batch has missing runs or unconfirmed miner charges"
         )
+    if full_trajectories:
+        from lab_arena.collection_intake import CORRECTION_SCOPE
+
+        trajectories.verified_grants(
+            database,
+            batch,
+            rows,
+            mode=spec.raw["mode"],
+            scope=CORRECTION_SCOPE,
+            digest=spec.raw["terms_sha256"],
+        )
+    split = None
     stats = Counter()
     class_costs = {}
     training_rows = sha256()
@@ -161,6 +210,7 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
     with tempfile.TemporaryDirectory(dir=dest.parent) as tmp:
         stage = Path(tmp) / "dataset.zip"
         with ZipFile(stage, "x", compression=ZIP_DEFLATED) as z:
+            full = trajectories.TrajectoryArchive(z) if full_trajectories else None
             for job in sorted(rows, key=lambda j: (j["slot"], j["attempt"])):
                 i = job["slot"]
                 if type(i) is not int or not 0 <= i < len(spec.slots):
@@ -180,6 +230,35 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
                 source_ids.append([rid, job.get("artifact_sha256")])
                 if not trained:
                     z.writestr(f"{rid}/job.json", judge._json(job))
+                meta = {
+                    "id": spec.raw["id"],
+                    "arm": arm["id"],
+                    "settings_sha256": spec.settings_hash,
+                    "repeat": repeat,
+                    "role": arm["role"],
+                    "capture_reasoning": arm["capture_reasoning"],
+                    "reasoning_effort": arm["reasoning_effort"],
+                }
+
+                def project(generator, packet, calls, stamp, student, **kwargs):
+                    agent, builder = source_revisions(spec.raw)
+                    return trajectories.trajectory_row(
+                        job=job,
+                        generator=generator,
+                        packet=packet,
+                        calls=calls,
+                        settings_sha256=spec.settings_hash,
+                        harness=agent,
+                        builder=builder,
+                        revision=batch_versions(spec.routes)[job["model"]],
+                        route=spec.routes[job["model"]],
+                        split=stamp,
+                        terms_sha256=spec.raw["terms_sha256"],
+                        experiment=meta,
+                        source=student,
+                        **kwargs,
+                    )
+
                 event_hashes = []
                 if job.get("artifact_sha256") and job["status"] != "failed":
                     manifest = read_artifact(
@@ -221,6 +300,79 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
                     if job["status"] not in {"failed", "running"}:
                         raise ValueError("completed experiment missing archive")
                     stats["partial_or_failed"] += 1
+                    if full is not None:
+
+                        def saved(kind):
+                            pointer = objects.get_optional_bounded(
+                                f"collection/{batch}/{rid}/saved/{kind}.json", 8192
+                            )
+                            return (
+                                read_artifact(
+                                    objects,
+                                    batch,
+                                    rid,
+                                    kind,
+                                    json.loads(pointer),
+                                    LIMIT,
+                                )
+                                if pointer
+                                else None
+                            )
+
+                        split_doc = saved("split")
+                        if split_doc is not None:
+                            if _hash(split_doc) != spec.raw["split_sha256"]:
+                                raise ValueError(
+                                    "partial source uses a different split"
+                                )
+                            split = split_doc
+                        stamp = saved("split-stamp")
+                        generator, calls, hold = trajectories.partial_generator(
+                            objects, job, None if incomplete else event_hashes
+                        )
+                        student = (
+                            saved("student-source")
+                            if case.get("source_sha256")
+                            else None
+                        )
+                        if case.get("source_sha256"):
+                            if (
+                                student is None
+                                or _hash(student) != case["source_sha256"]
+                            ):
+                                hold = "missing_verified_student"
+                            else:
+                                from lab_arena.collection_experiment import (
+                                    verify_provenance,
+                                )
+
+                                proof = saved("producer-attestation")
+                                if proof is None:
+                                    hold = "missing_producer_attestation"
+                                else:
+                                    verify_provenance(
+                                        spec,
+                                        proof,
+                                        {case["source_sha256"]: student},
+                                        objects=objects,
+                                    )
+                        if stamp is None or split_doc is None:
+                            hold = "missing_verified_split"
+                        else:
+                            verify_split(stamp, split_doc)
+                        if saved("quarantine") is not None:
+                            hold = "quarantine"
+                        full.write(
+                            project(
+                                None if hold else generator,
+                                None,
+                                calls,
+                                stamp,
+                                student,
+                                partial=True,
+                                hold=hold,
+                            )
+                        )
                     if not trained:
                         for kind in (
                             "student-source",
@@ -265,7 +417,15 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
                     raise ValueError("experiment manifest identity mismatch")
                 row = read("generator", manifest["generator"])
                 packet = read("judge-input", manifest["packet"])
-                student = read("student-source", manifest["student_source"])
+                student = None
+                if "source_sha256" in case:
+                    student = read("student-source", manifest["student_source"])
+                elif (
+                    manifest.get("student_source")
+                    or manifest.get("producer_attestation")
+                    or row.get("correction")
+                ):
+                    raise ValueError("source-free case contains a student correction")
                 split = read("split", manifest["split"])
                 calls = read("generation-receipts", manifest["calls"])
                 settings = read("settings", manifest["settings"])
@@ -274,12 +434,12 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
                     or row["teacher"] != job["model"]
                     or packet["run_id"] != rid
                     or packet["scenario_id"] != case["scenario_id"]
-                    or _hash(student) != case["source_sha256"]
+                    or (student is not None and _hash(student) != case["source_sha256"])
                     or _hash(split) != spec.raw["split_sha256"]
                     or settings != spec.raw
                 ):
                     raise ValueError("experiment evidence differs from assignment")
-                if trained:
+                if trained and student is not None:
                     from lab_arena.collection_experiment import verify_provenance
 
                     provenance = read(
@@ -379,24 +539,47 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
                     group[1] += job["miner_cost_microusd"]
                 stats["finished_runs"] += 1
                 stats["code_passed"] += all(packet["checks"].values())
+                pair = None
                 if (
                     trained
                     and job["status"] == "accepted"
                     and arm["role"] == "continuation"
+                    and student is not None
                 ):
                     pair = _pair(row, packet, student)
-                    if pair is None:
-                        continue
-                    if not pair["final_turn_retained"]:
-                        continue
-                    pair.update(
-                        run_id=rid,
-                        scenario_id=case["scenario_id"],
-                        arm=arm["id"],
-                        settings_sha256=spec.settings_hash,
-                        source_sha256=case["source_sha256"],
-                        split=manifest["split_stamp"],
+                    if pair and pair["final_turn_retained"]:
+                        pair.update(
+                            run_id=rid,
+                            scenario_id=case["scenario_id"],
+                            arm=arm["id"],
+                            settings_sha256=spec.settings_hash,
+                            source_sha256=case["source_sha256"],
+                            split=manifest["split_stamp"],
+                        )
+                    else:
+                        pair = None
+                if full is not None:
+                    hold = None
+                    if (
+                        packet["checks"].get("privacy") is not True
+                        or packet["checks"].get("training_split") is not True
+                    ):
+                        hold = "privacy_or_split_not_cleared"
+                    journal.transcript_hashes(
+                        manifest["events"], model=job["model"], generator=row
                     )
+                    full.write(
+                        project(
+                            None if hold else row,
+                            None if hold else packet,
+                            calls,
+                            manifest["split_stamp"],
+                            student,
+                            hold=hold,
+                        ),
+                        pair,
+                    )
+                elif pair is not None:
                     data = (judge._json(pair) + "\n").encode()
                     z.writestr(f"pairs/{rid}.jsonl", data)
                     training_rows.update(data)
@@ -405,6 +588,10 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
                     stats["targets_including_final_turn"] += int(
                         pair["target_is_final_turn"]
                     )
+            if full is not None:
+                stats.update(full.stats)
+                stats["rows"] = stats["trajectory_rows"]
+                stats["endings_kept"] = stats["final_turns_present"]
             if trained and not stats["rows"]:
                 raise ValueError("no verified correction pairs")
             metadata = {
@@ -439,6 +626,10 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
                     dataset_sha256="sha256:" + training_rows.hexdigest(),
                     qualification_sha256=_hash(receipt),
                 )
+            if full is not None:
+                if split is None:
+                    raise ValueError("missing release split")
+                metadata.update(full.finish())
             z.writestr("metadata.json", judge._json(metadata))
         os.chmod(stage, 0o600)
         if trained:
@@ -450,9 +641,10 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
 
 def record_feedback(metadata, result, objects, public_key_pem):
     """An identified Poet evaluator signs paired same-server held-out outcomes."""
-    if metadata["schema"] != CORRECTIONS or not SHA.fullmatch(
-        metadata["dataset_sha256"]
-    ):
+    if metadata["schema"] not in {
+        CORRECTIONS,
+        trajectories.SCHEMA,
+    } or not SHA.fullmatch(metadata["dataset_sha256"]):
         raise ValueError("expected released correction dataset")
     from scripts.collection_batch import read_artifact
 

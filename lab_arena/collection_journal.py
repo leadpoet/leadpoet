@@ -94,10 +94,21 @@ class WorkflowJournal:
             raise ValueError(
                 "comparison manifest differs from its complete event index"
             )
+        expected = None if index is None else index["events"]
+        hashes = self.transcript_hashes(
+            expected, model=model, generator=generator if complete else None
+        )
+        return {
+            "status": index["status"] if index is not None else "unsealed",
+            "events": hashes,
+        }
+
+    def transcript_hashes(self, expected, *, model, generator=None):
+        """Check private events against the original assistant-visible transcript."""
         first = last = None
         hashes = []
         transcript = []
-        for data, digest in self.read(None if index is None else index["events"]):
+        for data, digest in self.read(expected):
             event = json.loads(data)
             if not hashes:
                 first = event
@@ -128,7 +139,7 @@ class WorkflowJournal:
             hashes.append(digest)
         if hashes and (first["kind"] != "start" or first["model"] != model):
             raise ValueError("comparison generator identity differs from its journal")
-        if complete and (
+        if generator is not None and (
             not hashes
             or last != "finish"
             or generator is None
@@ -138,7 +149,4 @@ class WorkflowJournal:
             raise ValueError(
                 "complete comparison journal differs from generator evidence"
             )
-        return {
-            "status": index["status"] if index is not None else "unsealed",
-            "events": hashes,
-        }
+        return hashes

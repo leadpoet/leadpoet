@@ -49,7 +49,7 @@ import uuid
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Dict, List, Mapping, Optional, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import unquote_to_bytes, urlsplit
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -63,7 +63,9 @@ RECEIPTS_DOMAIN = "leadpoet/lead-order-vault/receipts/v1"
 KEY_ALGORITHM = "secp256k1"
 RECEIPT_SCHEMA = "leadpoet.lead_order_vault.receipt.v1"
 TLS_SCHEMA = "leadpoet.lead_order_vault.tls.v1"
-TLS_HANDSHAKE_SECONDS = 30.0
+# Handshake, headers and body together; a per-read timeout alone would let a
+# client that sends one byte at a time hold a connection slot forever.
+REQUEST_READ_SECONDS = 10.0
 
 HOSTS = {"openrouter.ai": "openrouter", "code.deepline.com": "deepline"}
 # Request shapes a miner's key may take. Anything else, such as billing
@@ -127,22 +129,73 @@ def canonical(document: Mapping) -> bytes:
     return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
 
 
-def https_upstream(method: str, host: str, target: str, headers: Mapping[str, str], body: bytes,
-                   timeout: float, max_bytes: int) -> UpstreamResponse:
-    """One HTTPS/1.1 request to port 443, certificate checked, no redirects."""
+def echoes(secret: str, data: bytes) -> bool:
+    """The key appears in ``data`` literally, URL-encoded, or JSON-escaped."""
 
-    connection = http.client.HTTPSConnection(host, 443, timeout=timeout, context=ssl.create_default_context())
+    key = secret.encode("utf-8")
+    if key in data or key in unquote_to_bytes(data):
+        return True
+    try:
+        # Pairs, not a dict: a duplicate member is still seen.
+        pending = [json.loads(data, object_pairs_hook=list)]
+    except (UnicodeDecodeError, ValueError):
+        return False
+    except RecursionError:
+        return True  # cannot be inspected, so it is withheld
+    while pending:
+        value = pending.pop()
+        if isinstance(value, str):
+            text = value.encode("utf-8", errors="surrogatepass")
+            if key in text or key in unquote_to_bytes(text):
+                return True
+        elif isinstance(value, (list, tuple)):
+            pending.extend(value)
+    return False
+
+
+def header_echoes(secret: str, headers) -> bool:
+    return any(echoes(secret, ("%s: %s" % (name, value)).encode("utf-8", errors="surrogatepass"))
+               for name, value in headers)
+
+
+def https_upstream(method: str, host: str, target: str, headers: Mapping[str, str], body: bytes,
+                   timeout: float, max_bytes: int, *, port: int = 443,
+                   context: Optional[ssl.SSLContext] = None) -> UpstreamResponse:
+    """One HTTPS/1.1 request, certificate checked, no redirects, done within ``timeout`` in total.
+
+    ``port`` and ``context`` exist for the loopback test; the vault always
+    uses 443 and the system's trust store.
+    """
+
+    deadline = time.monotonic() + timeout
+    connection = http.client.HTTPSConnection(host, port, timeout=timeout,
+                                             context=context or ssl.create_default_context())
     status: Optional[int] = None
     try:
         connection.request(method, target, body=body if method == "POST" else None, headers=dict(headers))
         response = connection.getresponse()
         status = response.status
-        data = response.read(max_bytes + 1)
-        if len(data) > max_bytes:
-            raise UpstreamError("response_too_large", status)
-        return UpstreamResponse(status, list(response.getheaders()), data)
+        chunks: List[bytes] = []
+        size = 0
+        while True:
+            # Each socket read gets only the time left, so a provider that
+            # trickles its answer cannot outlast the caller's timeout.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise UpstreamError("upstream_timeout", status)
+            connection.sock.settimeout(remaining)
+            chunk = response.read1(65536)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > max_bytes:
+                raise UpstreamError("response_too_large", status)
+            chunks.append(chunk)
+        return UpstreamResponse(status, list(response.getheaders()), b"".join(chunks))
     except UpstreamError:
         raise
+    except TimeoutError:
+        raise UpstreamError("upstream_timeout", status) from None
     except (OSError, http.client.HTTPException, ssl.SSLError):
         raise UpstreamError("upstream_unavailable", status) from None
     finally:
@@ -250,8 +303,7 @@ class Vault:
                     "receipt": self._signed(receipt)}
         response_headers = [[name.lower(), value] for name, value in response.headers
                             if name.lower() not in DROPPED_HEADERS]
-        secret_bytes = secret.encode("utf-8")
-        if secret_bytes in response.body or any(secret in value for _, value in response_headers):
+        if echoes(secret, response.body) or header_echoes(secret, response_headers):
             receipt.update(outcome="key_echo_withheld", response_status=response.status, response_sha256=None)
             return {"status": 502, "headers": [["content-type", "application/json"]],
                     "body_b64": base64.b64encode(canonical({"error": {"code": "vault_response_withheld"}})).decode(),
@@ -413,8 +465,8 @@ def make_handler(vault: Vault):
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(data)))
             self.send_header("cache-control", "no-store")
-            if self.close_connection:
-                self.send_header("connection", "close")
+            # One request per connection, so an idle client holds no slot.
+            self.send_header("connection", "close")
             self.end_headers()
             self.wfile.write(data)
 
@@ -427,6 +479,7 @@ def make_handler(vault: Vault):
                 self._reply(500, {"error": "vault_error"})
 
         def do_GET(self) -> None:
+            self.server.request_read()
             parts = urlsplit(self.path)
             routes = {"/v1/identity": vault.identity, "/healthz": lambda: {"ok": True}}
             route = routes.get(parts.path)
@@ -440,15 +493,12 @@ def make_handler(vault: Vault):
                 return
 
             def action() -> Mapping:
-                # A refusal before the body is read closes the connection, so
-                # the unread body is never parsed as the next request.
-                keep_alive, self.close_connection = not self.close_connection, True
                 vault.authorize(self.headers.get(CALLER_HEADER))
                 length = self.headers.get("content-length", "")
                 if not length.isdigit() or int(length) > MAX_REQUEST_BODY:
                     raise VaultError("request_too_large", 413)
                 body = self.rfile.read(int(length))
-                self.close_connection = not keep_alive
+                self.server.request_read()
                 try:
                     request = json.loads(body)
                 except ValueError:
@@ -464,7 +514,10 @@ class BoundedServer(ThreadingHTTPServer):
     """At most ``MAX_CONNECTIONS`` requests at once; the rest are closed.
 
     With ``ssl_context`` set, each connection's TLS handshake runs in its own
-    worker thread, so a slow client cannot stall the accept loop.
+    worker thread, so a slow client cannot stall the accept loop. A
+    connection that has not delivered its whole request within
+    ``REQUEST_READ_SECONDS`` is cut; the handler calls ``request_read`` once
+    it has.
     """
 
     daemon_threads = True
@@ -474,6 +527,7 @@ class BoundedServer(ThreadingHTTPServer):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._slots = threading.BoundedSemaphore(self.MAX_CONNECTIONS)
+        self._reading = threading.local()
 
     def process_request(self, request, client_address) -> None:
         if not self._slots.acquire(blocking=False):
@@ -492,16 +546,37 @@ class BoundedServer(ThreadingHTTPServer):
             self._slots.release()
 
     def finish_request(self, request, client_address) -> None:
-        if self.ssl_context is None:
-            super().finish_request(request, client_address)
-            return
-        request.settimeout(TLS_HANDSHAKE_SECONDS)
+        current = [request]  # wrapping for TLS replaces the socket object
+        timer = threading.Timer(REQUEST_READ_SECONDS, lambda: _shutdown(current[0]))
+        timer.daemon = True
+        self._reading.timer = timer
+        timer.start()
         try:
-            tls = self.ssl_context.wrap_socket(request, server_side=True)
-        except OSError:  # includes ssl.SSLError: a failed handshake is just closed
-            return
-        with tls:
-            super().finish_request(tls, client_address)
+            if self.ssl_context is None:
+                super().finish_request(request, client_address)
+                return
+            request.settimeout(REQUEST_READ_SECONDS)
+            try:
+                current[0] = tls = self.ssl_context.wrap_socket(request, server_side=True)
+            except OSError:  # includes ssl.SSLError: a failed handshake is just closed
+                return
+            with tls:
+                super().finish_request(tls, client_address)
+        finally:
+            timer.cancel()
+
+    def request_read(self) -> None:
+        """The whole request has arrived; the read deadline no longer applies."""
+
+        self._reading.timer.cancel()
+
+
+def _shutdown(connection: socket.socket) -> None:
+    # The base method, so the TLS layer is not torn down under its reader.
+    try:
+        socket.socket.shutdown(connection, socket.SHUT_RDWR)
+    except OSError:
+        pass
 
 
 def spki_sha256(certificate_der: bytes) -> str:

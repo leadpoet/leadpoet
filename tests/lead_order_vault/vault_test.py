@@ -280,10 +280,16 @@ def test_caller_headers_cannot_smuggle_a_host_or_second_credential():
         _vault(provider).call(request)
 
 
-def test_a_response_that_echoes_the_key_is_withheld():
-    echo = UpstreamResponse(200, [], b'{"your_key":"' + OPENROUTER_KEY.encode() + b'"}')
+@pytest.mark.parametrize("headers,body", [
+    ([], b'{"your_key":"' + OPENROUTER_KEY.encode() + b'"}'),
+    ([], b'{"k":"' + "".join("\\u%04x" % ord(c) for c in OPENROUTER_KEY).encode() + b'"}'),
+    ([], b"key=" + "".join("%%%02X" % ord(c) for c in OPENROUTER_KEY).encode()),
+    ([("X-Echo", "%73" + OPENROUTER_KEY[1:])], b"{}"),
+])
+def test_a_response_that_echoes_the_key_is_withheld(headers, body):
+    echo = UpstreamResponse(200, headers, body)
     result = _vault(FakeProvider({"/api/v1/chat/completions": echo})).call(_call())
-    assert result["status"] == 502 and OPENROUTER_KEY not in base64.b64decode(result["body_b64"]).decode()
+    assert result["status"] == 502 and OPENROUTER_KEY not in json.dumps(result)
     assert _check_receipt(result["receipt"])["outcome"] == "key_echo_withheld"
 
 
@@ -364,12 +370,10 @@ def test_http_server_routes_authenticates_and_never_logs(capsys):
     import threading
     import urllib.error
     import urllib.request
-    from http.server import ThreadingHTTPServer
-
-    from lead_order_vault.vault import CALLER_HEADER, make_handler
+    from lead_order_vault.vault import CALLER_HEADER, BoundedServer, make_handler
 
     provider = FakeProvider()
-    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(_vault(provider)))
+    server = BoundedServer(("127.0.0.1", 0), make_handler(_vault(provider)))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = "http://127.0.0.1:%d" % server.server_address[1]
 
@@ -397,31 +401,111 @@ def test_http_server_routes_authenticates_and_never_logs(capsys):
     assert captured.out == "" and captured.err == ""
 
 
-def test_a_refusal_before_the_body_is_read_closes_the_connection():
+def test_every_answer_closes_its_connection_and_slow_clients_are_cut(monkeypatch):
     import http.client
+    import socket
     import threading
-    from http.server import ThreadingHTTPServer
+    import time
 
-    from lead_order_vault.vault import CALLER_HEADER, make_handler
+    from lead_order_vault import vault as vault_module
+    from lead_order_vault.vault import BoundedServer, make_handler
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(_vault()))
+    monkeypatch.setattr(vault_module, "REQUEST_READ_SECONDS", 0.5)
+    class OneSlot(BoundedServer):
+        MAX_CONNECTIONS = 1
+
+    server = OneSlot(("127.0.0.1", 0), make_handler(_vault()))
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+    port = server.server_address[1]
     try:
-        body = json.dumps(_call()).encode()
-        connection.request("POST", "/v1/call", body=body)
+        # A refusal before the body is read must not leave the body to be
+        # parsed as a next request.
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        connection.request("POST", "/v1/call", body=json.dumps(_call()).encode())
         refused = connection.getresponse()
         refused.read()
         assert refused.status == 401 and refused.will_close
         connection.close()
-        connection.request("POST", "/v1/call", body=body, headers={CALLER_HEADER: TOKEN})
+        # A client sending one byte at a time holds the only slot only until
+        # the read deadline, not for as long as it keeps trickling.
+        slow = socket.create_connection(("127.0.0.1", port))
+        slow.settimeout(0.2)
+        started = time.monotonic()
+        try:
+            while time.monotonic() - started < 3:
+                slow.sendall(b"G")
+                try:
+                    if slow.recv(1) == b"":
+                        break
+                except socket.timeout:
+                    pass
+        except OSError:
+            pass
+        assert time.monotonic() - started < 2
+        slow.close()
+        time.sleep(0.1)
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        connection.request("GET", "/healthz")
         answered = connection.getresponse()
-        answered.read()
-        assert answered.status == 200 and not answered.will_close
-    finally:
+        assert answered.status == 200 and answered.will_close
         connection.close()
+    finally:
         server.shutdown()
         server.server_close()
+
+
+def test_the_real_upstream_bounds_total_time_and_size():
+    import socket
+    import ssl
+    import threading
+    import time
+
+    from lead_order_vault.vault import https_upstream, tls_server_context
+
+    server_context, _ = tls_server_context()
+    listener = socket.create_server(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+
+    def serve(answer):
+        raw, _ = listener.accept()
+        with server_context.wrap_socket(raw, server_side=True) as connection:
+            connection.recv(65536)
+            answer(connection)
+
+    def trickle(connection):
+        connection.sendall(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\n")
+        for _ in range(30):
+            time.sleep(0.1)
+            try:
+                connection.sendall(b"x")
+            except OSError:
+                return
+
+    def oversize(connection):
+        connection.sendall(b"HTTP/1.1 200 OK\r\ncontent-length: 2048\r\n\r\n" + b"x" * 2048)
+
+    def whole(connection):
+        connection.sendall(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+
+    client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    client_context.check_hostname, client_context.verify_mode = False, ssl.CERT_NONE
+    try:
+        for answer, error in ((trickle, "upstream_timeout"), (oversize, "response_too_large"), (whole, None)):
+            thread = threading.Thread(target=serve, args=(answer,), daemon=True)
+            thread.start()
+            started = time.monotonic()
+            call = lambda: https_upstream("GET", "127.0.0.1", "/", {}, b"", 1.0, 1024, port=port,
+                                          context=client_context)
+            if error:
+                with pytest.raises(UpstreamError, match=error) as raised:
+                    call()
+                assert raised.value.observed_status == 200
+            else:
+                assert call().body == b"ok"
+            assert time.monotonic() - started < 2
+            thread.join(5)
+    finally:
+        listener.close()
 
 
 @pytest.mark.parametrize("method,url", [

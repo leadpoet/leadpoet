@@ -241,6 +241,7 @@ def stack(tmp_path_factory):
                     "740-collection-training-only-platform-task.sql",
                     "741-collection-funding-statement.sql",
                     "742-collection-participation-readback.sql",
+                    "743-retire-champion-rewards.sql",
                 ):
                     cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / migration).read_text())
             # Install additive current readers before PostgREST takes its

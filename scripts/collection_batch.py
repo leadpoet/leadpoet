@@ -124,7 +124,7 @@ def write_exports(bundle, receipt, public_key, objects, output):
 
 
 def cutover_anchor(transport, *, launch_job=None):
-    """Bind an operator's pricing document to the current finalized legacy epoch."""
+    """Bind pricing to the current signed, finalized epoch before paid collection."""
     from lab_arena import chain, signing
     from lab_arena.store import ArenaStore
     from leadpoet_canonical.arena_weights import verify_accepted_weight_state_signature
@@ -137,10 +137,21 @@ def cutover_anchor(transport, *, launch_job=None):
         snapshot = chain.finalized_epoch_snapshot(client)
         epoch = snapshot.settlement_epoch_id(chain.load_arena_cutover())
         row = ArenaStore(transport).get_weight_state("finney", 71, epoch)
-        if not row or row["state_doc"]["reward_basis"]["schema_version"].startswith(
-            "leadpoet.collection."
-        ):
-            raise ValueError("current signed legacy state required")
+        if not row:
+            raise ValueError("current signed state required")
+        basis = row["state_doc"]["reward_basis"]
+        if basis["schema_version"].startswith("leadpoet.collection."):
+            # The prospective retirement can have signed many empty epochs.
+            # Paid launch still needs its original signed approvals and live job.
+            schedule = transport.rpc("collection_reward_schedule_v1", {})
+            if (
+                basis["schema_version"] != "leadpoet.collection.fixed_run_quotes.v1"
+                or basis["job_count"] != 0
+                or basis["quotes_microusd"]
+                or basis["valuation"] is not None
+                or (schedule and not schedule.get("staged"))
+            ):
+                raise ValueError("expected an unpaid collection epoch before launch")
         signer = signing.KmsSigner(
             os.environ["LAB_ARENA_SIGNING_KEY_ID"],
             region_name=os.environ.get("AWS_REGION"),

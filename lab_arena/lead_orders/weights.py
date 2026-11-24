@@ -10,7 +10,8 @@ and each may use what the other leaves unused.
 ``LeadOrderLane.settle`` is the gateway half. It caps the payout at the lead
 orders' allowance before recording it, so what the ledger marks paid is what
 validators weight. ``scripts/730`` makes the database refuse a state that
-disagrees with the recorded payout.
+disagrees with the recorded payout, and closes the epoch to new collection
+jobs once the payout is recorded, so the total it was capped against stands.
 """
 
 from __future__ import annotations
@@ -52,13 +53,14 @@ class LeadOrderLane:
         self._service = service
         self._registered_hotkeys = registered_hotkeys
 
-    def settle(self, epoch: int, *, collection_microusd: int,
+    def settle(self, epoch: int, *, collection_microusd: int, burn_hotkey: str,
                valuation: Callable[[], Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
         """Return ``{"valuation", "lead_orders"}`` for a paying epoch, else ``None``.
 
         A payout already recorded for the epoch is returned with the valuation
         it was capped by, so a retry signs the same amounts. Shadow mode
-        records its what-if document and returns ``None``.
+        records its what-if document and returns ``None``. The burn hotkey
+        is never paid: a state that pays it is invalid.
         """
 
         config = self._service.config
@@ -75,7 +77,9 @@ class LeadOrderLane:
             return dict(valuation(), tao_price_source=TAO_PRICE_SOURCE)
 
         document = self._service.run_epoch(
-            epoch, valuation=priced, registered_hotkeys=list(self._registered_hotkeys()),
+            epoch, valuation=priced, collection_microusd=int(collection_microusd),
+            # Read only when a payout is worked out, never on a retry of a recorded one.
+            registered_hotkeys=lambda: [key for key in self._registered_hotkeys() if key != burn_hotkey],
             payable_cap_microusd=lambda emission: lead_order_allowance_microusd(emission, collection_microusd),
         )
         if not document or document.get("mode") != "live" or not document.get("paid_microusd"):

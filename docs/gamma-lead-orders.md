@@ -479,7 +479,15 @@ in `live`, and only in epochs where collection rewards are active.
   that pays no lead orders has exactly the collection state as before.
 - **Ledger equals weights.** `scripts/730-lead-order-weight-state.sql` refuses
   a state whose `lead_orders` differs from the payout recorded for its epoch,
-  and refuses a payout for an epoch whose state is already published.
+  and refuses a payout for an epoch whose state is already published. The
+  payout document names the collection total it was capped against
+  (`collection_microusd`); the database refuses it if that total has changed,
+  and a recorded payout closes the epoch to new collection jobs, as a
+  published state does. So validators never scale a recorded payout down.
+- **Smallest payment.** Weights are 16-bit. A miner whose payments in an epoch
+  total less than 1/65535 of its emission (`min_hotkey_microusd` in the payout
+  document) is not paid that epoch; the amount stays owed and adds up.
+- **Burn hotkey.** It is never paid for lead orders.
 - **Failure.** A failing lead-order payout never holds up the collection
   state: it is logged, nothing is paid, and the rewards stay owed.
 - **Shadow.** The same call records the what-if document; it adds nothing to
@@ -503,6 +511,10 @@ lead-order settings (mode, policy file) on its host.
   are marked paid without weight. The payout document and the missing state
   are both public, so it is visible, but nothing repays it automatically.
 - Lead orders are paid only once collection rewards are active.
+- A miner who leaves the subnet after the payout is recorded and before
+  validators set weights is marked paid, and that share burns.
+- A weight is the nearest of 65535 steps, so what a miner receives can differ
+  from the payout by up to half a step of the epoch's largest weight.
 - The emission price is one read. Someone who moves the alpha price at the
   epoch's first block, or a wrong CoinGecko quote, shifts that epoch's lane
   cap and every miner's lane share with it. The lane cap bounds the effect.

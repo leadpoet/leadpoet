@@ -172,6 +172,8 @@ def db():
         + (
             "720-locked-collection-intake.sql",
             "721-locked-collection-reward-epoch.sql",
+            "707-lead-orders.sql",
+            "730-lead-order-weight-state.sql",
         )
     )
 
@@ -350,6 +352,51 @@ def test_native_scoped_gateway_issues_only_accepted_jobs_once(db):
             q.execute(
                 "UPDATE public.collection_jobs SET price_microusd=100 WHERE status='accepted'"
             )
+
+
+def test_a_lead_order_payout_closes_its_epoch_to_new_collection_jobs(db):
+    """The payout is capped against the collection total, so that total may not grow afterwards."""
+    pg, dsn = db
+    # Runs after the issuance test above: the cutover is live and EPOCH + 1 is signed.
+    target, late = EPOCH + 2, Keypair.create_from_uri("//CollectionLate").ss58_address
+    payout = lambda total: Json({"collection_microusd": total, "paid_microusd": 0, "payments": []})
+    with pg.connect(**dsn) as conn, conn.cursor() as q:
+        reg, orr, dee = [str(uuid.uuid4()) for _ in range(3)]
+        q.execute(
+            """INSERT INTO public.collection_registrations(registration_id,miner_hotkey,owner_coldkey,mode,consent)
+               VALUES (%s,%s,%s,'live','{}')""", (reg, late, late))
+        for kid, provider, mark in ((orr, "openrouter", "e"), (dee, "deepline", "f")):
+            q.execute(
+                """INSERT INTO public.collection_keys
+                   (key_id,registration_id,provider,miner_hotkey,submission_id,daily_cap_microusd,fingerprint,ciphertext_b64)
+                   VALUES (%s,%s,%s,%s,'test',1000000,%s,'test')""", (kid, reg, provider, late, "sha256:" + mark * 64))
+
+        def accept(slot):
+            q.execute(
+                """INSERT INTO public.collection_jobs(job_id,batch_id,mode,miner_hotkey,registration_id,
+                   openrouter_key_id,deepline_key_id,slot,collection_day,scenario_id,model,harness_commit,
+                   budget_microusd,price_microusd,status,lease_token_hash,lease_expires_at,finished_at,accepted_epoch,artifact_sha256)
+                   VALUES (%s,'x','live',%s,%s,%s,%s,%s,current_date,'scenario','a',%s,1000000,300000,'accepted',%s,
+                   now(),now(),%s,%s)""",
+                (str(uuid.uuid4()), late, reg, orr, dee, slot, "a" * 40, "sha256:" + "a" * 64, target - 1,
+                 "sha256:" + "b" * 64))
+
+        record = "SELECT public.lead_order_record_payout_v1(%s,'live',%s,%s,'[]')"
+        accept(10)
+        # A payout capped against a total the database no longer has is refused.
+        q.execute("SAVEPOINT stale")
+        with pytest.raises(pg.Error, match="collection total changed"):
+            q.execute(record, (target, "sha256:" + "1" * 64, payout(0)))
+        q.execute("ROLLBACK TO stale")
+        q.execute(record, (target, "sha256:" + "2" * 64, payout(300000)))
+        # From here the epoch takes no more jobs, exactly as after its state is signed.
+        q.execute("SAVEPOINT closed")
+        with pytest.raises(pg.Error, match="epoch closed"):
+            accept(11)
+        q.execute("ROLLBACK TO closed")
+        q.execute("SELECT public.collection_reward_quotes_v1(%s)->'quotes_microusd'", (target,))
+        assert q.fetchone()[0] == {late: 300000}
+        conn.rollback()
 
 
 def test_normal_validator_signs_recovers_and_checks_collection_vector(tmp_path):

@@ -646,8 +646,9 @@ class LeadOrderService:
         epoch: int,
         *,
         payable_cap_microusd: Union[None, int, Callable[[int], int]] = None,
-        registered_hotkeys: Optional[List[str]] = None,
+        registered_hotkeys: Union[None, List[str], Callable[[], List[str]]] = None,
         valuation: Optional[Callable[[], Mapping[str, Any]]] = None,
+        collection_microusd: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """Compute and record one epoch's payout document (shadow and live).
 
@@ -668,6 +669,8 @@ class LeadOrderService:
         self.repay_uncertain()
         entries = rewards.owed_entries(self._store.owed(through_epoch=epoch, mode=self.config.mode))
         if registered_hotkeys is not None:
+            if callable(registered_hotkeys):
+                registered_hotkeys = registered_hotkeys()
             entries = lane_weights.registered_entries(entries, registered_hotkeys)
         elif self.config.weights_rewards:
             raise LeadOrderServiceError(500, "registered_hotkeys_required")
@@ -690,7 +693,7 @@ class LeadOrderService:
             cap = None if price is None else cap(int(price["emission_microusd"]))
         document = rewards.sign_payout(self._signer, rewards.epoch_payout_document(
             self.policy, epoch=epoch, mode=self.config.mode, entries=entries,
-            valuation=price, payable_cap_microusd=cap,
+            valuation=price, payable_cap_microusd=cap, collection_microusd=collection_microusd,
         ))
         try:
             self._store.record_payout(epoch=epoch, mode=self.config.mode, document=document,

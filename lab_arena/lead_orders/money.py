@@ -212,8 +212,12 @@ def lane_cap_microusd(policy: LeadOrderPolicy, miner_emission_microusd: int) -> 
     return (_non_negative(miner_emission_microusd, "miner emission") * policy.lane_emission_cap_ppm) // PPM
 
 
-def epoch_payout(epoch: int, entries: Sequence[OwedEntry], *, cap_microusd: int) -> EpochPayout:
+def epoch_payout(epoch: int, entries: Sequence[OwedEntry], *, cap_microusd: int,
+                 min_hotkey_microusd: int = 0) -> EpochPayout:
     """Pay owed amounts oldest first up to the cap; the rest carries forward.
+
+    A hotkey whose payments this epoch total less than ``min_hotkey_microusd``
+    is not paid: a weight that small rounds to zero, so it waits and adds up.
 
     Amounts stay in USD until paid. The paying epoch converts its payout to
     weight with its own emission value (``lane_weight_fractions``). Entries
@@ -248,7 +252,10 @@ def epoch_payout(epoch: int, entries: Sequence[OwedEntry], *, cap_microusd: int)
         left -= amount
         payments.append((entry.order_id, entry.miner_hotkey, amount, entry.call_id))
         by_hotkey[entry.miner_hotkey] = by_hotkey.get(entry.miner_hotkey, 0) + amount
-    paid = cap - left
+    small = {hotkey for hotkey, total in by_hotkey.items() if total < min_hotkey_microusd}
+    payments = [payment for payment in payments if payment[1] not in small]
+    by_hotkey = {hotkey: total for hotkey, total in by_hotkey.items() if hotkey not in small}
+    paid = sum(by_hotkey.values())
     return EpochPayout(
         epoch=epoch,
         cap_microusd=cap,

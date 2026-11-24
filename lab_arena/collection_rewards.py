@@ -153,7 +153,7 @@ def epoch_state(store, chain, signer, *, epoch, burn_hotkey, valuation_source, l
     if lead_orders is not None:
         try:
             lead = lead_orders.settle(
-                epoch, valuation=valuation,
+                epoch, valuation=valuation, burn_hotkey=burn_hotkey,
                 collection_microusd=sum(basis["quotes_microusd"].values()),
             )
         except Exception:

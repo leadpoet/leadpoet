@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import random
+import struct
+from fractions import Fraction
 from copy import deepcopy
 from types import SimpleNamespace as NS
 
@@ -29,8 +31,10 @@ USD = 1_000_000
 
 
 def valuation(block=BLOCK, emission=USD):
-    return {"block": block, "block_hash": "0x" + "c" * 64, "miner_alpha_rao": 10**9, "tao_rao_per_alpha": 10**9,
-            "tao_price_microusd": emission, "price_updated_at": 200, "observed_at": 201, "emission_microusd": emission}
+    # 1 alpha at 1 TAO each, TAO at ``emission`` USD; no alpha at all for a zero-value epoch.
+    return {"block": block, "block_hash": "0x" + "c" * 64, "miner_alpha_rao": 10**9 if emission else 0,
+            "tao_rao_per_alpha": 10**9, "tao_price_microusd": emission or USD, "price_updated_at": 200,
+            "observed_at": 201, "emission_microusd": emission}
 
 
 def basis(quotes, *, valued):
@@ -81,13 +85,25 @@ def test_collection_is_guaranteed_80_percent_lead_orders_20_and_each_uses_the_ot
 
 
 def test_a_state_without_lead_orders_keeps_the_exact_collection_vector():
-    for quotes in ({}, {A: 250_000, B: 250_000}, {A: 3_000_000, B: 1_000_000}):
-        document = state(quotes)
+    """Against the rule validators ran before lead orders: quote / max(budget, total quotes)."""
+    rng = random.Random(26600)
+    for _ in range(200):
+        emission = rng.choice([0, 1, 999, USD])
+        quotes = {key: rng.choice([1, 250_000, 3 * USD]) for key in (A, B, C) if rng.random() < 0.7}
+        keys = [key for key in (A, B, C) if rng.random() < 0.8] + [BURN]
+        document = state(quotes, emission=emission)
         assert "lead_orders" not in document
-        got = derive_arena_weights(document, KEYS)
+        got = derive_arena_weights(document, keys)
         assert "lead_order_share_ppb" not in got
-        budget = max(USD, sum(quotes.values()))
-        assert got["collection_share_ppb"] == PARTS_PER_BILLION * sum(quotes.values()) // budget
+        divisor = max(emission, sum(quotes.values()))
+        old = {key: Fraction(amount, divisor) for key, amount in quotes.items() if key in keys}
+        old[BURN] = 1 - sum(old.values(), Fraction(0))
+        float32 = lambda item: struct.unpack("!f", struct.pack("!f", float(item)))[0]
+        floats = [(uid, float32(old[key])) for uid, key in enumerate(keys) if old.get(key, 0) > 0]
+        top = max(weight for _, weight in floats)
+        sparse = [(uid, round(weight / top * 65535)) for uid, weight in floats]
+        assert list(zip(got["sparse_uids"], got["sparse_weights_u16"])) == [(u, w) for u, w in sparse if w > 0]
+        assert got["collection_share_ppb"] == int((1 - old[BURN]) * PARTS_PER_BILLION)
 
 
 def test_one_miner_paid_in_both_lanes_gets_the_sum_and_an_unregistered_one_burns():
@@ -134,6 +150,20 @@ def test_a_payout_capped_by_the_gateway_allowance_is_never_scaled_by_validators(
         assert got["collection_share_ppb"] >= min(asked, ppb(8)) - 1
 
 
+def test_a_payment_too_small_to_weigh_waits_and_adds_up():
+    entries = [money.OwedEntry("o1", A, 1, 1, 10), money.OwedEntry("o2", A, 1, 2, 10),
+               money.OwedEntry("o3", B, 1, 3, 15), money.OwedEntry("o4", C, 1, 4, 100)]
+    payout = money.epoch_payout(5, entries, cap_microusd=10**6, min_hotkey_microusd=16)
+    # A's two rewards together clear the minimum; B's single one waits.
+    assert payout.paid_by_hotkey == {A: 20, C: 100} and payout.paid_microusd == 120
+    assert [p[0] for p in payout.payments] == ["o1", "o2", "o4"] and payout.carry_forward_microusd == 15
+    # At $1000 of emission, every paid share is at least one u16 weight step.
+    emission = 1000 * USD
+    minimum = emission // 65535 + 1
+    got = derive_arena_weights(state({A: 100 * USD}, {B: minimum}, emission=emission), KEYS)
+    assert dict(zip(got["sparse_uids"], got["sparse_weights_u16"]))[1] >= 1
+
+
 def test_registered_entries_keep_only_miners_that_can_be_weighted_now():
     entries = [money.OwedEntry("o1", A, 1, 1, 10), money.OwedEntry("o2", "5" + "Z" * 47, 1, 2, 10)]
     assert [e.order_id for e in weights.registered_entries(entries, KEYS)] == ["o1"]
@@ -163,7 +193,8 @@ class FakeLane:
     def __init__(self, result=None, error=None):
         self.result, self.error, self.calls = result, error, []
 
-    def settle(self, epoch, *, collection_microusd, valuation):
+    def settle(self, epoch, *, collection_microusd, burn_hotkey, valuation):
+        assert burn_hotkey == BURN
         self.calls.append((epoch, collection_microusd))
         if self.error:
             raise self.error
@@ -223,7 +254,8 @@ def test_lane_pays_only_in_live_mode_and_caps_at_the_allowance():
     for mode, ran in (("off", 0), ("staff", 0), ("shadow", 1)):
         service = FakeService(mode, {"mode": "shadow", "paid_microusd": 0, "payments": []})
         lane = weights.LeadOrderLane(service, registered_hotkeys=lambda: KEYS)
-        assert lane.settle(EPOCH, collection_microusd=0, valuation=valuation) is None and len(service.calls) == ran
+        assert lane.settle(EPOCH, collection_microusd=0, burn_hotkey=BURN, valuation=valuation) is None
+        assert len(service.calls) == ran
     document = {
         "mode": "live", "paid_microusd": 300_000, "payout_hash": HASH,
         "emission_valuation": dict(valuation(), tao_price_source=weights.TAO_PRICE_SOURCE),
@@ -233,14 +265,15 @@ def test_lane_pays_only_in_live_mode_and_caps_at_the_allowance():
     }
     service = FakeService("live", document)
     lane = weights.LeadOrderLane(service, registered_hotkeys=lambda: KEYS)
-    settled = lane.settle(EPOCH, collection_microusd=900_000, valuation=valuation)
+    settled = lane.settle(EPOCH, collection_microusd=900_000, burn_hotkey=BURN, valuation=valuation)
     assert settled == {"valuation": valuation(),
                        "lead_orders": {"payout_hash": HASH, "paid_microusd": {B: 250_000, A: 50_000}}}
     (_, kwargs), = service.calls
-    assert kwargs["registered_hotkeys"] == KEYS
+    # The burn hotkey is never paid, and the payout names the collection total it was capped against.
+    assert kwargs["registered_hotkeys"]() == [A, B, C] and kwargs["collection_microusd"] == 900_000
     assert kwargs["payable_cap_microusd"](USD) == 200_000  # collection asks 90%: lead orders keep their 20%
     assert kwargs["valuation"]()["tao_price_source"] == weights.TAO_PRICE_SOURCE
     # A live epoch that paid nothing adds nothing to the state.
     idle = weights.LeadOrderLane(FakeService("live", dict(document, paid_microusd=0, payments=[])),
                                  registered_hotkeys=lambda: KEYS)
-    assert idle.settle(EPOCH, collection_microusd=0, valuation=valuation) is None
+    assert idle.settle(EPOCH, collection_microusd=0, burn_hotkey=BURN, valuation=valuation) is None

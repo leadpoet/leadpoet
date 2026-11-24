@@ -176,6 +176,9 @@ def stack(tmp_path_factory):
                 schema_acl, had_create = cursor.fetchone()
                 cursor.execute('GRANT CREATE ON SCHEMA public TO lab_arena_owner')
                 for migration, start, end in (
+                    ("737-lab-arena-nov23-prospective-win.sql",
+                     "CREATE OR REPLACE FUNCTION public.lab_arena_prospective_win_737",
+                     "DO $acl$"),
                     ("604-arena-2026-11-03-forward-only-verifier.sql",
                      "CREATE OR REPLACE FUNCTION public.lab_arena__nov03_preserved_judge_v1",
                      "DO $helpers_verify604$"),

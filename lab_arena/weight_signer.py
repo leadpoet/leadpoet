@@ -182,7 +182,7 @@ class ArenaWeightSigner:
                 commitment=commitment, reveal_round=int(reveal_round),
             )
             preimage, signed_message = encode_weight_signature_payload(
-                profile=profile, call_bytes=call,
+                profile={**profile, "extrinsic_period": era_period}, call_bytes=call,
                 era_current=era_current, nonce=finalized_nonce,
                 block_hash=mortality_hash,
             )
@@ -319,7 +319,7 @@ class ArenaWeightSigner:
             )
             call = bytes.fromhex(str(recovery["call_data_hex"]))
             preimage, signed_message = encode_weight_signature_payload(
-                profile=profile, call_bytes=call,
+                profile={**profile, "extrinsic_period": authorization["era_period"]}, call_bytes=call,
                 era_current=int(authorization["era_current"]), nonce=int(authorization["nonce"]),
                 block_hash=str(authorization["block_hash"]),
             )

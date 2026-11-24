@@ -1,4 +1,5 @@
 import base64
+import hashlib
 from copy import deepcopy
 
 import pytest
@@ -351,6 +352,11 @@ def test_runtime_transaction_version_is_bound_across_signed_recovery():
     )
     assert recovered_legacy["extrinsic_hex"] == signed["extrinsic_hex"]
 
+    # A new release may change the default transaction lifetime.
+    restarted.chain_profile = {**restarted.chain_profile, "extrinsic_period": 64}
+    restored = restarted.recover({"accepted_state": state, "recovery_record": legacy})
+    assert restored["extrinsic_hash"] == signed["extrinsic_hash"]
+
 
 def test_protected_signer_rejects_state_burn_key_outside_sealed_policy():
     state, der, key_hash = _signed_state()
@@ -382,6 +388,16 @@ def test_protected_signer_will_not_sign_an_era_past_state_expiry():
     authorization = signed["recovery_record"]["authorization"]
     assert authorization["era_period"] == 4
     assert signed["recovery_record"]["maximum_block"] == 1003
+    # The signed payload must contain the same SCALE mortal-era bytes as the extrinsic.
+    record = signed["recovery_record"]
+    from leadpoet_canonical.hotkey_authority_v2 import encode_weight_signature_payload
+    preimage, _ = encode_weight_signature_payload(
+        profile={**_chain_profile(), "extrinsic_period": 4},
+        call_bytes=bytes.fromhex(record["call_data_hex"]),
+        era_current=authorization["era_current"], nonce=authorization["nonce"],
+        block_hash=authorization["block_hash"],
+    )
+    assert authorization["signature_payload_preimage_hash"] == "sha256:" + hashlib.sha256(preimage).hexdigest()
 
 
 def test_protected_signer_rejects_state_shorter_than_minimum_mortal_era():

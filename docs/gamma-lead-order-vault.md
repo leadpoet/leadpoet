@@ -36,11 +36,14 @@ Each update is a new build plus one public approval on Base.
   Billing, plays, monitors and key management are out of reach.
 - HTTPS on 443, no redirects, and a key works only on its own provider.
 - The key goes only into `authorization: Bearer`. A response that contains
-  the whole key is withheld.
+  the whole key, plain, URL-encoded or JSON-escaped, is withheld.
 - An OpenRouter management key is used once, at `/v1/check`, to prove the
-  miner owns the runtime key. It never makes a call.
+  miner owns the runtime key. It never makes a call. `check` makes only free,
+  read-only requests and issues no receipt.
 - Only Leadpoet's broker, with the caller token, may use `check` and `call`.
 - No database, no files, no request logs.
+- Each connection carries one request, which must arrive within 10 seconds.
+  A provider call ends within its timeout in total.
 - TLS ends inside the vault, with a key made at each boot and held only in
   memory. The identity carries that key, signed by the receipts key. Phala's
   gateway runs in TLS passthrough (a `-8080s` URL in `deployment.json`), so
@@ -71,6 +74,10 @@ python -m lead_order_vault.cli verify
 python -m lead_order_vault.cli seal --provider openrouter --hotkey <your hotkey>
 python -m lead_order_vault.cli receipts page1.json page2.json
 ```
+
+Seal a Deepline key from a workspace with no connected integrations. The
+vault lets the gateway call any Deepline tool, and some tools act on the
+accounts a workspace connected.
 
 `seal` reads the key from the terminal and prints the envelope to submit as
 `credentials` to `POST /lead-orders/keys`. `receipts` takes every page of
@@ -119,7 +126,11 @@ approved on Base and the one `cli verify` prints.
 - A second vault instance of the same app numbers calls under its own boot
   id. Hidden calls made only there leave no gap. Only the app's owner can
   start one.
-- One instance, no high availability.
+- One instance, no high availability. Anyone can open connections to it,
+  and Phala's passthrough gives no per-address limit, so a flood of
+  connections can keep it busy. Orders on miner keys fail while it lasts.
+- A call cut mid-answer, by the provider or the network, settles as
+  uncertain until its cost can be read back.
 - The vault does not judge which Deepline tools are worth paying for; the
   gateway does, and the receipts show every call.
 - Partial key echoes, such as a few characters in a label, are not caught.

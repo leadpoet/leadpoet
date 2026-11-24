@@ -30,8 +30,8 @@ from lead_order_vault.vault import CALLER_HEADER, CHECK_TIMEOUT_SECONDS as _VAUL
 VAULT_OVERHEAD_SECONDS = 15.0
 # A check probes the runtime key and then the management key.
 CHECK_REQUEST_SECONDS = 2 * _VAULT_PROBE_SECONDS + VAULT_OVERHEAD_SECONDS
-# A failed connection sent nothing.
-_NOT_SENT = (httpx.ConnectError, httpx.ConnectTimeout)
+# A failed connection, or none free in the pool, sent nothing.
+_NOT_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
 
 
 class VaultUnavailable(RuntimeError):

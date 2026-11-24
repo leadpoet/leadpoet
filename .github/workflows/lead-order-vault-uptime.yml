@@ -34,7 +34,7 @@ jobs:
         if: steps.deployed.outputs.yes
         run: |
           python3 -m venv "$RUNNER_TEMP/v"
-          "$RUNNER_TEMP/v/bin/pip" install --require-hashes --only-binary=:all: --no-deps -r lead_order_vault/requirements.txt
+          "$RUNNER_TEMP/v/bin/pip" install --require-hashes --only-binary=:all: --no-deps -r lead_order_vault/requirements-verify.txt
       - name: Verify the live vault
         if: steps.deployed.outputs.yes
         run: |

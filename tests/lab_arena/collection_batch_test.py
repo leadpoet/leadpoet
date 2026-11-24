@@ -25,6 +25,7 @@ class Database:
         self.rows = []
 
     def rpc(self, name, parameters):
+        if name=="collection_training_consents_v1":return self.grants
         if name in {"collection_batch_jobs_v1", "collection_pilot_costs_v1"}:
             return self.rows
         if name == "collection_pilot_fees_v1":
@@ -43,8 +44,30 @@ def pilot(tmp_path, request):
     db = Database()
     objects = LocalObjectStore(tmp_path / "objects")
     variant = getattr(request, "param", 22)
-    candidate = variant == "open-panel"
-    checkpointed = variant == "checkpointed"
+    exportable = variant == "training-pack"
+    candidate = variant in {"open-panel","training-pack"}
+    checkpointed = variant == "checkpointed" or exportable
+    split = SPLIT
+    if exportable:
+        import json, os
+        from pathlib import Path
+        from bittensor_wallet import Keypair
+        from lab_arena import collection_intake as intake, contracts
+        from lab_arena.collection_quality import admit_split
+        poet=os.environ.get("COLLECTION_TEST_POET_REPO")
+        if not poet:pytest.skip("requires the pinned P7 partition")
+        split=json.loads((Path(poet)/"harness/gtm-tasks/partner_credit_partition.json").read_bytes())["split"]
+        identity={k:v[0] for k,v in split["training"].items()}
+        stamp=admit_split(identity,split)
+        wallet=Keypair.create_from_uri("//TrajectoryTest")
+        def signed_consent():
+            return contracts.build_signed_request(scope=intake.SCOPE["register"],round_id=intake.scope_id("pilot"),
+                hotkey=wallet.ss58_address,body={"task_scope":intake.TASK_SCOPE,"terms_sha256":intake.SYNTHETIC_TRAINING_TERMS_HASH,
+                    "credentials_sha256":"sha256:"+"e"*64,"daily_cap_microusd":300000},
+                timestamp=100,sign_message=lambda msg:wallet.sign(msg.encode()).hex())
+        auth=signed_consent()
+        db.grants=[]
+
     models = {m: j.route for m,j in judge.QUALIFICATION_JUDGES.items()} if candidate else {
         "anthropic/claude-fable-5.2": "test", "openai/gpt-6.2-astra": "test"
     }
@@ -53,7 +76,7 @@ def pilot(tmp_path, request):
     drift_slots = [i for i in range(130) if judge.model_family(MODELS[i % len(MODELS)]) not in judge_families][-30:]
     raw = {
         "name": "test",
-        "split_manifest": SPLIT,
+        "split_manifest": split,
         "mode": "pilot",
         "seed": "test-seed",
         "routes": {
@@ -61,7 +84,7 @@ def pilot(tmp_path, request):
             **models,
         },
         "scenario_ids": [
-            f"C01-s{2000+i}"
+            f"{'P7' if exportable else 'C01'}-s{2000+i}"
             for i in range(22 if candidate or checkpointed else variant)
         ],
         "budgets_microusd": dict.fromkeys(MODELS, 1000000),
@@ -71,6 +94,7 @@ def pilot(tmp_path, request):
             for i in drift_slots
         },
     }
+    if exportable:raw["terms_sha256"]=intake.SYNTHETIC_TRAINING_TERMS_HASH
     private_cases = {}
     source_policy = judge.BatchPolicy(
         "prior-drift-baseline", "earlier-seed", judge.digest(PROMPT), pilot=True,
@@ -82,6 +106,7 @@ def pilot(tmp_path, request):
         original = dict(
             packet(src), scenario_id=sid, task=f"Check synthetic account {i}"
         )
+        if exportable:original["split"]=stamp
         if i >= 130:
             case = controls.planted_case(
                 original,
@@ -148,6 +173,13 @@ def pilot(tmp_path, request):
             if i in private_cases
             else dict(packet(rid), scenario_id=sid)
         )
+        if exportable:
+            from uuid import UUID
+            job.update(attempt=1,miner_hotkey=wallet.ss58_address)
+            p["split"]=stamp
+            billing={"unresolved":0,"generator_calls":0 if i in private_cases else 5,
+                     "miner_cost_microusd":0 if i in private_cases else 50}
+            db.grants.append(dict(job_id=rid,miner_hotkey=wallet.ss58_address,mode="pilot",registration_id=str(UUID(hex=auth["request_id"])),consent=deepcopy(auth),**billing))
         assigned = judge.assign_judges(policy, [assignment(job)])[rid]
         a = judge.judge_run(
             policy,
@@ -173,6 +205,7 @@ def pilot(tmp_path, request):
             "tools": [],
             "steps": [{"seq": n + 1, "message": n} for n in range(5)],
         }
+        if exportable:row["split"]=identity
         manifest = {
             "batch_id": policy.batch_id,
             "job_id": rid,
@@ -416,3 +449,27 @@ def test_signed_checkpointed_prices_bind_journals_and_live_source(pilot):
     path.write_text(json.dumps(doc))
     with pytest.raises(ValueError, match="journal is missing or changed"):
         compile_pilot(db, bundle, receipt, public, objects)
+
+
+@pytest.mark.parametrize("pilot", ["training-pack"], indirect=True)
+def test_qualified_six_model_export_checks_every_signed_job(pilot,tmp_path):
+    import json
+    from zipfile import ZipFile
+    raw,db,objects,bundle,_,_=pilot
+    reviewer,review_key=keys()
+    approver,approval_key=keys()
+    receipt=review.sign_review(bundle,complete_marks(bundle),"human-fixture",reviewer)
+    approval=review.approve_qualification(bundle,receipt,review_key,"independent-fixture",approver)
+    qual=dict(raw=raw,prompt=PROMPT,receipt=receipt,approval=approval,reviewer_key=review_key,approver_key=approval_key)
+    out=tmp_path/"rows.zip"
+    result=release.write_exports(raw,PROMPT,db,objects,out,qualification=qual)
+    assert result["trajectory_rows"]==100 and result["excluded_controls"]==32
+    with ZipFile(out) as z:
+        rows=[json.loads(z.read(n)) for n in z.namelist() if n.startswith("trajectories/")]
+        assert {r["model"] for r in rows}==set(MODELS)
+        assert all(r["miner_cost_microusd"]==50 and "reference_answer" not in r for r in rows)
+        assert all(r["manifest_sha256"] and r["messages"] for r in rows)
+    db.grants[0]["consent"]["body"]["daily_cap_microusd"]+=1
+    with pytest.raises(ValueError,match="signature"):
+        release.write_exports(raw,PROMPT,db,objects,tmp_path/"tampered.zip",qualification=qual)
+    assert not (tmp_path/"tampered.zip").exists()

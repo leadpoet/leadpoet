@@ -205,25 +205,19 @@ def _json_response(status: int, code: str) -> ProviderResponse:
 
 
 class _ReceiptCapture:
-    """Pass-through transport that keeps the vault receipt of each send."""
+    """Pass-through transport that keeps what its one send returned or raised."""
 
     def __init__(self, transport: ProviderTransport) -> None:
         self._transport = transport
-        self.receipts: list = []
+        self.result: Any = None
 
     def send(self, **request: Any) -> ProviderResponse:
         try:
-            response = self._transport.send(**request)
+            self.result = self._transport.send(**request)
         except ProviderTransportError as error:
-            self._keep(error)
+            self.result = error
             raise
-        self._keep(response)
-        return response
-
-    def _keep(self, result: Any) -> None:
-        receipt = getattr(result, "vault_receipt", None)
-        if receipt is not None:
-            self.receipts.append(receipt)
+        return self.result
 
 
 class LeadOrderBroker:
@@ -539,7 +533,7 @@ class LeadOrderBroker:
                 ciphertext_b64=row["ciphertext_b64"],
             )
             try:
-                secret = self._registrar.credential(key)
+                credential = self._registrar.credential(key)
             except lead_keys.LeadOrderKeyError as exc:
                 self._store.record_readback(call_id=str(row["call_id"]),
                                             outcome="retry" if exc.retryable else "terminal")
@@ -548,11 +542,10 @@ class LeadOrderBroker:
             # receipt is kept: an unreported one would look like a hidden call.
             capture = _ReceiptCapture(self._miner_transport)
             state, cost = arena_broker._openrouter_generation_readback_once(
-                transport=capture, secret=secret, generation_id=str(row["provider_request_id"]),
+                transport=capture, secret=credential, generation_id=str(row["provider_request_id"]),
                 timeout_seconds=min(RESOLVE_LOOKUP_SECONDS, remaining),
             )
-            for receipt in capture.receipts:
-                self._keep_receipt(str(row["call_id"]), "readback", receipt)
+            self._keep_receipt(str(row["call_id"]), "readback", capture.result)
             found = state == "found" and cost is not None
             self._store.record_readback(call_id=str(row["call_id"]),
                                         outcome="found" if found else ("terminal" if state == "terminal" else "retry"))
@@ -562,11 +555,12 @@ class LeadOrderBroker:
                 resolved += result.get("status") == "resolved"
         return resolved
 
-    def _keep_receipt(self, call_id: str, kind: str, receipt: Optional[Mapping[str, Any]]) -> None:
-        """Store a vault receipt. A failed write must not lose an answer the
-        provider already billed; it is logged, and the miner's audit shows
-        the gap."""
+    def _keep_receipt(self, call_id: str, kind: str, result: Any) -> None:
+        """Store the vault receipt a send's response or error carries. A failed
+        write must not lose an answer the provider already billed; it is
+        logged, and the miner's audit shows the gap."""
 
+        receipt = getattr(result, "vault_receipt", None)
         if receipt is None:
             return
         try:
@@ -665,8 +659,7 @@ class LeadOrderBroker:
                         provider_request_id=request_id,
                     )
                 finally:
-                    self._keep_receipt(call_id, "call", getattr(response if response is not None else error,
-                                                                "vault_receipt", None))
+                    self._keep_receipt(call_id, "call", response if response is not None else error)
             if response is None or arena_broker._response_contains_credential(response, credential):
                 return _json_response(502, "provider_unreachable")
             reason = lead_keys.failover_reason(provider, response)

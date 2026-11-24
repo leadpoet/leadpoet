@@ -115,15 +115,15 @@ class MinerKeyRegistrar:
             raise LeadOrderKeyError("provider_invalid")
         # OpenRouter also needs the management key's envelope: the vault uses
         # it once to prove the miner owns the runtime key, and it is not stored.
-        expected = {"envelope", "management_envelope"} if provider == "openrouter" else {"envelope"}
-        if not isinstance(credentials, Mapping) or set(credentials) != expected:
+        expected = {"envelope": "runtime"}
+        if provider == "openrouter":
+            expected["management_envelope"] = "management"
+        if not isinstance(credentials, Mapping) or set(credentials) != set(expected):
             raise LeadOrderKeyError("credentials_invalid")
         # The vault checks these headers again. Reading them here first means
         # an envelope that is not this miner's never makes the vault probe a
         # provider.
-        for name, purpose in (("envelope", "runtime"), ("management_envelope", "management")):
-            if name not in expected:
-                continue
+        for name, purpose in expected.items():
             try:
                 header, _ = vault_envelope.read_header(credentials[name])
             except vault_envelope.EnvelopeError as exc:

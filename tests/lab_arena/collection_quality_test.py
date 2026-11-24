@@ -303,3 +303,94 @@ def test_qualification_control_provenance_excludes_source_siblings():
         with pytest.raises(ValueError, match="independent source family"):
             verify_control_family({"provenance": {"source_generator": source}}, panel)
     verify_control_family({"provenance": {"source_generator": "human"}}, panel)
+
+
+def test_long_claim_unit_checks_every_named_sentence_even_when_old_array_drifts():
+    from lab_arena.collection_claims import read_fresh
+
+    task = packet()
+    sentences = [f"Account {i} renewed." for i in range(22)]
+    unit = {
+        "id": "file",
+        "text": " ".join(sentences),
+        "sources": {"signed-ledger": "renewal ledger"},
+    }
+    task["claim_reader"] = {"units": [unit], "results": []}
+
+    class Reader:
+        def __init__(self):
+            self.seen = []
+
+        def judge(self, **request):
+            data = json.loads(request["messages"][-1]["content"])
+            group = data["sentences"]
+            if isinstance(group, list):
+                return json.dumps({"labels": ["supported"] * (len(group) + 1)})
+            assert 1 <= len(group) <= 8 and data["context"] == unit["text"]
+            self.seen.extend(group)
+            return json.dumps(
+                {
+                    "labels": {
+                        i: ("invented" if i == "s18" else "supported")
+                        for i in reversed(group)
+                    }
+                }
+            )
+
+    reader = Reader()
+    checked = read_fresh(
+        task,
+        policy=candidate_policy(),
+        generator="mistralai/mistral-large-4-0",
+        broker=reader,
+        protocol="collection.fresh-claims.v2",
+    )
+    assert judge.claim_verdict(checked) == "failed"
+    from collections import Counter
+
+    assert Counter(reader.seen) == {f"s{i}": 3 for i in range(1, 23)}
+    result = checked["claim_reader"]["results"][0]["record"]["sentences"]
+    assert [i["text"] for i in result] == sentences
+    assert [i["text"] for i in result if i["level"]] == [sentences[17]]
+    from lab_arena.collection_claims import verify_keyed_unit
+    proof = checked["fresh_claim_proof"][judge.digest(unit)]
+    record = checked["claim_reader"]["results"][0]["record"]
+    verify_keyed_unit(unit, proof, record)
+    shifted = deepcopy(proof)
+    shifted["sentence_ids"][0][0] = "s9"
+    with pytest.raises(ValueError, match="coverage"):
+        verify_keyed_unit(unit, shifted, record)
+    with pytest.raises(ValueError, match="majority"):
+        verify_keyed_unit(unit, proof, dict(record, strict=False))
+
+
+def test_keyed_claims_reject_displaced_or_missing_sentence_ids_and_mixed_provenance():
+    from lab_arena.collection_claims import KEYED_V2, read_fresh
+
+    unit = {"id": "answers", "text": "First. Second.", "sources": {"file": "Original."}}
+    p = packet()
+    p["claim_reader"] = {"units": [unit], "results": []}
+
+    class WrongKeys:
+        def judge(self, **req):
+            return '{"labels":{"s1":"supported","s3":"supported"}}'
+
+    out = read_fresh(
+        p,
+        policy=candidate_policy(),
+        generator="mistralai/mistral-large-4-0",
+        broker=WrongKeys(),
+        protocol=KEYED_V2,
+    )
+    assert not out["claim_reader"]["results"] and judge.claim_verdict(out) == "missing"
+    digest = judge.digest(unit)
+    p["claim_reader"]["results"] = [{"unit_sha256": digest, "record": {}}]
+    p["fresh_claim_proof"] = {digest: {"schema": "collection.fresh-claims.v1"}}
+    with pytest.raises(ValueError, match="different protocol"):
+        read_fresh(
+            p,
+            policy=candidate_policy(),
+            generator="mistralai/mistral-large-4-0",
+            broker=WrongKeys(),
+            protocol=KEYED_V2,
+        )

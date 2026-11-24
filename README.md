@@ -1,7 +1,7 @@
 <h1 align="center">Subnet 71</h1>
 
 <p align="center">
-  <strong>The open AI agent competition on Bittensor.</strong>
+  <strong>The open sales AI research lab on Bittensor.</strong>
 </p>
 
 <p align="center">
@@ -14,17 +14,15 @@
 
 # Subnet 71 - the first open research lab advancing AI models for sales reasoning.
 
-Subnet 71 is a Bittensor subnet where miners improve an open sales-research agent. The public baseline lives in the promoted `lab` branch of [leadpoet-sales-agent](https://github.com/leadpoet/leadpoet-sales-agent).
+Subnet 71 is a Bittensor subnet where miners fund experiments to improve open sales models. Leadpoet runs the [public sales agent](https://github.com/leadpoet/leadpoet-sales-agent) and records how models complete sales tasks.
 
 ## Locked collection
 
 Registered miners can fund a simulated sales workflow with an OpenRouter key and a daily spending cap. Choose a model comparison or a correction, where an expert resumes a task after a smaller model makes a mistake. The subnet runs the agent.
 
-Pilot jobs use real API credits and pay no emissions. Champion rewards continue during the pilot. To join, follow the [miner enrollment steps](docs/locked-collection.md#enrollment). You can check your spending and revoke access at any time.
+Pilot jobs use real API credits and pay no emissions. To join, follow the [miner enrollment steps](docs/locked-collection.md#enrollment). You can check your spending and revoke access at any time.
 
-## Daily schedule
-
-Submit during the day before **00:00 UTC**, when submissions close and evaluation starts. The benchmark stays private during evaluation. Results and source publish according to the round's disclosure schedule. Check the [dashboard](https://subnet71.com) for current deadlines and results.
+Champion allocations end at the retirement epoch. The designated burn hotkey receives all unallocated emissions. When paid collection opens, eligible completed jobs earn a fixed price from the available emissions. See the [pilot and reviewer thread](https://github.com/leadpoet/leadpoet/issues/1343) for setup help or to volunteer for a blind review.
 
 ## Install and register
 
@@ -60,169 +58,9 @@ deactivate
 source venv/bin/activate
 ```
 
-## Build your agent
+## Historical Arena competition
 
-Fork the public baseline, or clone its promoted version as a starting point:
-
-```bash
-git clone --branch lab https://github.com/leadpoet/leadpoet-sales-agent.git ../my-agent
-```
-
-In `harness.py`, define or re-export this synchronous function with exactly one positional parameter:
-
-```python
-def run_icp(icp: dict) -> list[dict]:
-    """Return at most five companies."""
-```
-
-Keep the complete [Tyche AGPL-3.0 license](https://github.com/gzaentz/tyche/blob/main/LICENSE) beside `harness.py` as `LICENSE`, `LICENSE.txt`, or `LICENSE.md`.
-
-You can change the harness, model, prompts, and tools. Put package names and version constraints in `requirements.txt`; dependencies must have binary wheels. URLs, VCS dependencies, local paths, nested requirements, and source builds are not supported.
-
-The sandbox blocks direct network access. Keep the baseline's broker transport for approved OpenRouter, Scrapingdog, and Deepline calls. See the [miner guide](docs/miner-model-submissions.md) for API access and limits.
-
-**OpenRouter must allow [Zero Data Retention (ZDR)](https://openrouter.ai/docs/guides/features/zdr) endpoints for your chosen model.** Calls fail if your account blocks the required provider. Keep your API keys funded.
-
-### Upcoming model whitelist
-
-In rounds with whitelist enforcement, agents and subagents must use an approved route. Each round keeps the list frozen when it opens; additions below apply to future rounds.
-
-| OpenRouter model | Providers (first is the default) | API |
-| --- | --- | --- |
-| `openai/gpt-oss-120b` | `deepinfra/bf16`, `groq`, `mara`, `near-ai/fp4`, `phala` | Chat Completions |
-| `openai/gpt-oss-20b` | `deepinfra/bf16`, `coreweave/fp4`, `groq` | Chat Completions |
-| `mistralai/mistral-large-4-0` | `mistral/zdr`, `mistral/eu` | Chat Completions |
-| `deepseek/deepseek-v4.1-flash-1017` | `fireworks`, `fireworks/spot`, `nebius/fp8`, `together` | Chat Completions or Responses |
-| `reflection/beam-1.0-501b-a23b` | `nebius/fp8`, `coreweave/fp4`, `digitalocean`, `io-net/fp4`, `together` | Chat Completions |
-| `google/gemma-4-31b-it` | `coreweave/fp4`, `modelrun/fp4` | Chat Completions |
-| `moonshotai/kimi-k3.1-pro` | `moonshotai/mxfp4`, `moonshotai/highspeed` | Chat Completions or Responses |
-| `z-ai/glm-5.3` | `fireworks`, `coreweave/fp8` | Chat Completions or Responses |
-| `z-ai/glm-5.3-flash` | `fireworks` | Chat Completions or Responses |
-| `z-ai/glm-5.3-flashx` | `z-ai/fp8` | Chat Completions or Responses* |
-| `moonshotai/kimi-k3` | `moonshotai` | Chat Completions or Responses |
-| `moonshotai/kimi-k2.7-code` | `moonshotai`, `moonshotai/highspeed` | Chat Completions or Responses |
-| `z-ai/glm-5.2` | `coreweave/fp4` | Chat Completions |
-| `z-ai/glm-5.1` | `phala` | Chat Completions or Responses |
-| `z-ai/glm-5v-turbo` | `z-ai/fp8` | Chat Completions or Responses* |
-| `z-ai/glm-4.7` | `deepinfra/fp4` | Chat Completions or Responses |
-| `z-ai/glm-4.6v` | `novita/bf16` | Chat Completions or Responses* |
-| `moonshotai/kimi-k2.5` | `novita` | Chat Completions or Responses |
-| `moonshotai/kimi-k2-thinking` | `novita/bf16` | Chat Completions |
-| `z-ai/glm-4.5v` | `novita/fp8` | Chat Completions or Responses* |
-| `z-ai/glm-5` | `venice/fp8` | Chat Completions or Responses |
-| `z-ai/glm-4.6` | `deepinfra/fp4/flex` | Chat Completions or Responses |
-| `moonshotai/kimi-k2.6` | `coreweave/fp4` | Chat Completions or Responses |
-| `minimax/minimax-m3.1-flash` | `nebius/fp4` | Chat Completions or Responses |
-| `minimax/minimax-m3` | `coreweave/fp4` | Chat Completions or Responses |
-| `meta/muse-spark-open` | `fireworks` | Chat Completions or Responses |
-| `nvidia/nemotron-3.5-super-vl` | `deepinfra/fp4` | Chat Completions or Responses |
-| `nvidia/nemotron-3.5-lightning` | `deepinfra/bf16` | Chat Completions or Responses |
-| `qwen/qwen3.8-27b` | `deepinfra/bf16` | Chat Completions or Responses |
-| `qwen/qwen3.8-2.4t-a95b` | `novita` | Chat Completions or Responses |
-| `inclusionai/ling-3.1-flash` | `deepinfra/fp4` | Chat Completions or Responses |
-| `xiaomi/mimo-v2.6-flash` | `deepinfra/fp8` | Chat Completions or Responses |
-| `stepfun/step-5-preview` | `deepinfra/fp8` | Chat Completions or Responses |
-| `mistralai/mistral-medium-3-5` | `mistral/zdr` | Chat Completions or Responses |
-| `tencent/hy4-preview` | `deepinfra/fp4` | Chat Completions or Responses |
-| `upstage/solar-pro4` | `upstage/zdr` | Chat Completions or Responses |
-| `upstage/solar-mini4` | `upstage/zdr` | Chat Completions or Responses |
-| `fireworks/ember-1` | `fireworks` | Chat Completions or Responses |
-| `deepseek/deepseek-v4-pro-0813` | `coreweave/fp8` | Chat Completions or Responses |
-
-New routes were tested for thinking output, tool continuation, and structured answers. See the [route evidence](docs/evidence/full-thinking/reasoning-expansion-20261027.json).
-
-Allow your chosen provider in your [OpenRouter settings](https://openrouter.ai/settings/privacy). To select an alternative, send `"provider": {"only": ["exact-provider-from-table"]}` on each request. Keep the same route throughout a tool conversation. Arena keeps ZDR and disables provider fallback. The bundled Codex helper uses DeepSeek Responses on the default Fireworks route.
-
-*For FlashX, GLM-5V and GLM-4.x vision variants, use Chat JSON mode or prompt for JSON on Responses. Native strict JSON-schema output is not verified.
-
-The existing Reflection `nebius/fp8` selector was unavailable in the latest check. Use a listed alternative such as `coreweave/fp4`.
-
-For local tests, enable thinking with:
-
-- Chat Completions: `"reasoning": {"effort": "high", "exclude": false}`.
-- Gemma: `"reasoning": {"enabled": true, "exclude": false}` instead.
-- Responses: `"reasoning": {"effort": "high"}`.
-
-For Solar Pro4 and Mini4, use explicit `high` effort to enable thinking. `minimal` and `include_reasoning: true` alone leave it off.
-
-Hosted web search is supported on the approved DeepSeek Responses routes. Keep normal conversation history and tool-call IDs intact. **Keep your harness and custom tools. No custom logging or receipts are required.** These rounds require model-directed research and full provider-exposed thinking; summaries alone do not qualify. The sourcing cap increases to **$6 per ICP**. Champion eligibility requires a passing review and usable training data for at least **80% of ICPs**.
-
-Return a JSON list of up to five companies, or `[]` if none qualify. Use the `output_schema_version` and policy settings provided in the ICP input. Current rounds source companies only, with no contact details required. See [output requirements](docs/arena-company-quality.md) for required fields.
-
-This example shows the output format. `matched_icp_signal` is the zero-based index in the input's `intent_signals` list. Example URLs and claims must be replaced with real evidence.
-
-<details>
-<summary>Output</summary>
-
-```json
-[
-  {
-    "company_name": "Example",
-    "company_website": "https://example.com/",
-    "company_linkedin": "",
-    "industry": "Software",
-    "employee_count": "51-200",
-    "company_stage": "Series A",
-    "country": "United States",
-    "state": "",
-    "intent_details": "Example launched its workflow platform on August 20, 2026. The launch could create more implementation work as customers adopt the platform. This activity makes Example relevant to the ICP for business software companies expanding their workflow offering.",
-    "intent_signals": [
-      {
-        "matched_icp_signal": 0,
-        "description": "Example launched its workflow platform.",
-        "date": "2026-08-20",
-        "url": "https://example.com/news"
-      }
-    ],
-    "required_attribute": {
-      "text": "Required characteristic.",
-      "passed": true,
-      "evidence_url": "https://example.com/about",
-      "evidence_quote": "Supporting quote.",
-      "explanation": "Why it passes."
-    }
-  }
-]
-```
-</details>
-
-Scoring checks company fit, intent, and supporting evidence. The highest eligible score must beat the daily baseline by **at least 5 points** to become champion in new rounds. Winning code becomes the next baseline.
-
-New reward tiers are cumulative (15%, 25%, and 35% per slot; 25% base burn):
-
-| Improvement over baseline | Total emissions before decay |
-| --- | --- |
-| +5 points | 15% |
-| +10 points | 40% |
-| +15 points | 75% |
-
-Slots remain with their holder until replaced. With weekly decay enabled, each slot halves every 140 epochs (about seven days), without a reward floor; a genuinely new promoted model resets only the slots it replaces, even on the same hotkey. See [reward rules](docs/arena_reward_slots.md) for activation and historical policies.
-
-**Champion miners must keep their submitted API credentials funded. If the subnet owner funds a champion rebenchmark, that period's champion incentive is reduced by 50%.**
-
-Current rounds have a **$4 sourcing cap per ICP**, across OpenRouter, Scrapingdog, and Deepline, including retries. Only confirmed charges count toward admission. An ICP above the successful-sourcing cost limit contributes zero; other ICPs still count. Judging has a separate default **$50 allowance per submitted model**, and code review is billed separately. Historical rounds retain their original rules. See [cost details](docs/arena-score-integrity.md).
-
-## Submit a model
-
-Use the interactive CLI:
-
-```bash
-python scripts/lab_arena_miner.py interactive \
-  --wallet-name miner --hotkey-name default \
-  --api-base-url https://gateway.subnet71.com
-```
-
-Enter `../my-agent` as the source directory and confirm submission, then enter your OpenRouter API key, OpenRouter management key, and Deepline key in the masked prompts. Provide the optional Scrapingdog key only if your model uses it; otherwise press Enter. Runtime keys are stored encrypted and are never published or shared with other miners; the management key is checked and not stored.
-
-For automation, set `OPENROUTER_API_KEY`, `OPENROUTER_MANAGEMENT_KEY`, and `DEEPLINE_API_KEY`, plus `SCRAPINGDOG_API_KEY` if used. Replace `interactive` with `submit-model --source ../my-agent` in the command above.
-
-Every submission must pass code review before evaluation. Review uses the submitting miner's OpenRouter key and is charged separately. Keep source and bundled prompts readable. Track review status and cost on the dashboard.
-
-Do not include keys or `.env` files in the source directory. Placeholder-only `.env.example`, `.env.sample`, and `.env.template` files are allowed. Source limits are **10 MiB compressed, 50 MiB unpacked, and 1,000 files**.
-
-Each registered hotkey can submit one model per daily round. First submissions close at **00:00 UTC**. New and eligible open rounds allow **one replacement attempt before 23:50 UTC** using the same command and hotkey. The API publishes each round's exact `submission_replacement_cutoff`; earlier frozen rounds retain their original cutoff. Upload and validation must finish before that cutoff. An abandoned or failed replacement still uses that attempt, but the last accepted model remains selected.
-
-Track submissions, scores, and champion status on the [dashboard](https://subnet71.com). See the [miner guide](docs/miner-model-submissions.md) for detailed submission rules.
+Past rounds, submissions and results are available on the [dashboard](https://subnet71.com). The [archived competition guide](https://github.com/leadpoet/leadpoet/blob/dd1749b774490d3afdaf169d25c31b652bdc7acc/README.md#build-your-agent) records how miners built and submitted agents before retirement.
 
 ## Public input example
 

@@ -25,8 +25,10 @@ Each update is a new build plus one public approval on Base.
   the app's contract on Base.
 - Each vault public key carries a KMS signature chain. `cli verify` and
   `cli seal` check it against the app id and KMS root key in
-  `lead_order_vault/deployment.json`, which anyone can compare with Base.
-- The code is `lead_order_vault/envelope.py` and `vault.py`, about 800 lines,
+  `lead_order_vault/deployment.json`, then read Base themselves: the KMS
+  contract must hold that root key and list the app, and the app must have
+  approved the build the vault reports.
+- The code is `lead_order_vault/envelope.py` and `vault.py`, about 900 lines,
   with `cryptography` as the only dependency.
 
 ## Rules in the vault
@@ -82,15 +84,25 @@ Seal a Deepline key from a workspace with no connected integrations. The
 vault lets the gateway call any Deepline tool, and some tools act on the
 accounts a workspace connected.
 
+`verify` prints `kms_contract` and `app_owner`. Compare `kms_contract`
+once with Phala's Base KMS address on its "Cloud vs Onchain KMS" page: it
+is the one value the tool cannot check for you. Both commands read Base
+through its public endpoint; pass `--rpc <url>` to use one you trust.
+
 `seal` reads the key from the terminal and prints the envelope to submit.
 Both commands refuse until the vault is deployed.
+
+Your provider's own usage log is the full check of what was spent on your
+key. Compare it with what Leadpoet reports now and then.
 
 ## Known limits
 
 - A vault fault after a call is numbered, before its receipt is signed,
   also leaves a gap.
-- Sequence numbers restart with the vault. A hidden call just before a
-  restart, or after a key's last reported call, leaves no gap.
+- Sequence numbers restart with the vault, and nothing lists past boots.
+  Leadpoet could hide every call of a whole boot, not only one just before
+  a restart or after a key's last reported call. The provider's usage log
+  catches it.
 - If Phala rotates its KMS root, miners must seal their keys again.
 - One instance, no high availability. Anyone can open connections to it,
   and Phala's passthrough gives no per-address limit, so a flood of

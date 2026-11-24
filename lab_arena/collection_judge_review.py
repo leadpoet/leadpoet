@@ -127,7 +127,11 @@ def _read_bundle(bundle, *, require_split=True):
             and (0 if unavailable else 1) <= len(a["records"]) <= 2,
             "judge record count",
         )
+        generator = schedule[rid]["generator"]
+        if policy.qualification:
+            judge._require(a.get("generator_family") == judge.model_family(generator), "wrong generator family")
         for v in a["records"]:
+            judge._require(v["judge"] in judge.independent_roles(policy, generator), "judge family conflicts with generator")
             identity = {
                 "spec_version": judge.SPEC,
                 "run_id": rid,

@@ -316,7 +316,7 @@ def read_fresh(packet, *, policy, generator, broker, record_vote=None):
         return packet
     done = {r["unit_sha256"] for r in reader["results"]}
     results = list(reader["results"])
-    proof = {}
+    proof = {k: v for k, v in packet.get("fresh_claim_proof", {}).items() if k in done}
     roles = judge.independent_roles(policy, generator)
     if not roles:
         return packet

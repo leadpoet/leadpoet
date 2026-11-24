@@ -138,6 +138,9 @@ approved on Base and the one `cli verify` prints.
   connections can keep it busy. Orders on miner keys fail while it lasts.
 - A call cut mid-answer, by the provider or the network, settles as
   uncertain until its cost can be read back.
+- A provider's total deadline is checked between reads, so one that
+  stalls its TLS handshake or trickles its headers can run a call past its
+  timeout. Both providers are certificate-checked, so this is unlikely.
 - The vault does not judge which Deepline tools are worth paying for; the
   gateway does, and the receipts show every call.
 - Partial key echoes, such as a few characters in a label, are not caught.

@@ -71,7 +71,7 @@ def test_private_route_requires_same_origin_pack_model_and_predeclared_frontier(
         load_batch(modified, PROMPT)
     with pytest.raises(ValueError, match="private reference"):
         collection_batch.source_bundle(new, PROMPT, None, None)
-    with pytest.raises(ValueError, match="private reference"):
+    with pytest.raises(ValueError, match="independent reviewer"):
         collection_batch.write_exports(new, PROMPT, None, None, None)
 
 
@@ -166,3 +166,122 @@ def test_successor_keeps_parent_slot_and_daily_funding_history():
             with pytest.raises(pg.Error, match="immutable"):
                 q.execute("DELETE FROM public.collection_reference_successions")
         db.close()
+
+
+def test_partial_successor_only_exports_its_real_absolute_slots():
+    from scripts.collection_batch import assigned_export_slots
+
+    assert assigned_export_slots(6, 1, [1, 2], [1, 2, 3]) == {1, 2}
+    assert assigned_export_slots(6, 1, [1], [1, 2]) == {1}
+    for actual, registered in [
+        ([0, 1], [0, 1]),
+        ([2], [2]),
+        ([1, 1], [1, 2]),
+        ([1, 3], [1, 3]),
+        ([1, 6], [1, 6]),
+    ]:
+        with pytest.raises(ValueError):
+            assigned_export_slots(6, 1, actual, registered)
+
+
+def test_complete_measured_route_is_frozen_before_slot_zero_and_rechecks_immutable_witness(
+    tmp_path, monkeypatch
+):
+    import hashlib
+    from lab_arena import collection_route_witness as w
+    from lab_arena.collection_workflow import store_artifact, comparison_revisions
+    from lab_arena.service import LocalObjectStore
+
+    objects = LocalObjectStore(tmp_path / "objects")
+    raw = settings()
+    raw["routes"][REFERENCE_MODEL] = REFERENCE_ROUTE
+    agent, builder = comparison_revisions(raw)
+
+    def store(kind, doc):
+        return store_artifact(objects, w.OWNER_BATCH, w.OWNER_RUN, kind, doc)
+
+    generator = {
+        "run": w.OWNER_RUN,
+        "teacher": REFERENCE_MODEL,
+        "task": "P7-s40401",
+        "evidence": {"grade": {"score": 1, "hard_fail": None}},
+    }
+    links = {
+        "generator": store("generator", generator),
+        "workflow-output": store(
+            "workflow-output",
+            {
+                "run_id": w.OWNER_RUN,
+                "model": REFERENCE_MODEL,
+                "scenario_id": "P7-s40401",
+                "finish": "answered",
+                "harness_commit": agent,
+                "builder_commit": builder,
+            },
+        ),
+        "provider-0001": store(
+            "provider-0001",
+            {
+                "run_id": w.OWNER_RUN,
+                "request_id": "generate-1",
+                "response": {
+                    "id": "abc",
+                    "model": REFERENCE_MODEL,
+                    "provider": "CoreWeave",
+                },
+            },
+        ),
+    }
+    doc = {
+        "schema": "collection.owner-route-witness.v1",
+        "owner_only": True,
+        "run_id": w.OWNER_RUN,
+        "model": REFERENCE_MODEL,
+        "revision": GENERATOR_ROUTES[REFERENCE_MODEL].revision,
+        "provider": "CoreWeave",
+        "route": REFERENCE_ROUTE,
+        "quantization": "fp8",
+        "native_checks_passed": True,
+        "finish": "answered",
+        "scope": "P7-s40401",
+        "objects": links,
+        "cap_microusd": 2000,
+        "usage_microusd": 22,
+        "receipts": [
+            {
+                "request": "generate-1",
+                "status": 200,
+                "model": REFERENCE_MODEL,
+                "source_revision": GENERATOR_ROUTES[REFERENCE_MODEL].revision,
+                "provider": "CoreWeave",
+                "route": REFERENCE_ROUTE,
+                "gen_sha256": hashlib.sha256(b"abc").hexdigest(),
+                "known_microusd": 22,
+                "returned_reasoning": True,
+            }
+        ],
+        "strict_terms": {
+            "author_distillable": True,
+            "fallback": False,
+            "request_fee": 0,
+            "safety_retention": False,
+            "zdr": True,
+        },
+    }
+    sha = store("route-witness", doc)["sha256"]
+    monkeypatch.setattr(w, "WITNESS", sha)
+    raw["route_witness_sha256"] = sha
+    complete = load_batch(raw, PROMPT)
+    assert (
+        complete.batch_id.startswith("rq-")
+        and w.verified_witness(raw, objects)["provider_route"] == REFERENCE_ROUTE
+    )
+    with pytest.raises(ValueError, match="witnessed"):
+        load_batch(dict(raw, mode="live", panel_qualification_sha256="b" * 64), PROMPT)
+    changed = dict(doc, strict_terms=dict(doc["strict_terms"], fallback=True))
+    sha = store("route-witness", changed)["sha256"]
+    monkeypatch.setattr(w, "WITNESS", sha)
+    raw["route_witness_sha256"] = sha
+    with pytest.raises(ValueError, match="approved private route"):
+        w.verified_witness(raw, objects)
+    assert load_batch(raw, PROMPT).batch_id != complete.batch_id

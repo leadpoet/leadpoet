@@ -21,16 +21,45 @@ from scripts.collection_review import read_file, write_new
 from scripts.run_locked_collection import load_batch, assignment
 
 
+def assigned_export_slots(capacity, first, completed, registered):
+    """A successor can expose only its genuine terminal prefix at the original absolute indices."""
+    unique = sorted(set(registered))
+    if (
+        not completed
+        or not unique
+        or min(unique) != first
+        or max(unique) >= capacity
+        or unique != list(range(first, max(unique) + 1))
+        or sorted(completed) != list(range(first, first + len(completed)))
+        or not set(completed) <= set(unique)
+    ):
+        raise ValueError("missing, fabricated or duplicate successor slots")
+    return set(completed)
+
+
 def source_bundle(raw, prompt, transport, objects):
     if raw.get("reference_successor"):
-        raise ValueError("a witnessed route comparison is private reference data only")
+        raise ValueError(
+            "a witnessed route comparison is private reference data only for qualification or pricing"
+        )
+    return _registered_projection(raw, prompt, transport, objects)
+
+
+def _registered_projection(raw, prompt, transport, objects, *, export_successor=False):
     policy = load_batch(raw, prompt)
     agent, builder = comparison_revisions(raw)
     jobs = transport.rpc("collection_batch_jobs_v1", {"p_batch": policy.batch_id})
     expected_count = len(raw["scenario_ids"]) * len(MODELS)
-    if (
-        not isinstance(jobs, list)
-        or not expected_count <= len(jobs) <= 2 * expected_count
+    registered = jobs
+    successor = raw.get("reference_successor") if export_successor else None
+    if successor:
+        terminal = {"accepted", "rejected", "failed"}
+        active_slots = {r["slot"] for r in jobs if r["status"] not in terminal}
+        jobs = [
+            r for r in jobs if r["status"] in terminal and r["slot"] not in active_slots
+        ]
+    if not isinstance(jobs, list) or (
+        not successor and not expected_count <= len(jobs) <= 2 * expected_count
     ):
         raise ValueError("incomplete registered batch")
     if any(j["batch_id"] != policy.batch_id or j["mode"] != raw["mode"] for j in jobs):
@@ -38,7 +67,14 @@ def source_bundle(raw, prompt, transport, objects):
     failures = []
     if policy.pilot:
         jobs, failures = review.terminal_pilot_attempts(jobs)
-    if len(jobs) != expected_count:
+    if successor:
+        assigned_export_slots(
+            expected_count,
+            successor["next_slot"],
+            [j["slot"] for j in jobs],
+            [j["slot"] for j in registered],
+        )
+    elif len(jobs) != expected_count:
         raise ValueError("incomplete registered batch")
     slots = {}
     for job in jobs:
@@ -103,6 +139,9 @@ def source_bundle(raw, prompt, transport, objects):
             raise ValueError("hidden or unchecked material in review batch")
     if raw.get("claim_protocol") == "collection.fresh-claims.v2":
         bundle["claim_protocol"] = raw["claim_protocol"]
+    if successor:
+        # Deliberately non-qualifying. The registered projection was verified in memory above.
+        bundle["schema"] = "collection.successor-export-sources.v1"
     return {**bundle, "split_manifest_sha256": judge.digest(raw["split_manifest"])}
 
 
@@ -131,8 +170,6 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
     )
     from lab_arena.collection_workflow import store_artifact
 
-    if raw.get("reference_successor"):
-        raise ValueError("private reference successor cannot release training data")
     terms = raw.get("terms_sha256")
     if not terms or terms != intake.SYNTHETIC_TRAINING_TERMS_HASH:
         raise ValueError("comparison enrollment did not grant training release rights")
@@ -148,11 +185,30 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
         }
     )
     approved = verified_panel(database, objects, raw, policy, **qualification)
+    witness = None
+    successor = raw.get("reference_successor")
+    if successor or raw.get("route_witness_sha256"):
+        from lab_arena.collection_route_witness import (
+            verified_witness,
+            verify_matching_panel,
+        )
+
+        witness = verified_witness(raw, objects)
+        verify_matching_panel(
+            raw,
+            policy,
+            qualification["raw"],
+            qualification["prompt"],
+            database,
+            successor=bool(successor),
+        )
     if not raw.get("capture_version"):
         raise ValueError(
             "comparison training release requires a checkpointed transcript"
         )
-    bundle = source_bundle(raw, prompt, database, objects)
+    bundle = _registered_projection(
+        raw, prompt, database, objects, export_successor=bool(successor)
+    )
     rows = database.rpc("collection_batch_jobs_v1", {"p_batch": policy.batch_id})
     grants = traces.verified_grants(
         database,
@@ -161,10 +217,14 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
         mode=raw["mode"],
         scope=intake.TASK_SCOPE,
         digest=terms,
+        allow_pending=bool(successor),
     )
     by_id = {item["packet"]["run_id"]: item for item in bundle["runs"]}
     failed = {item["run_id"] for item in bundle.get("failed_attempts", ())}
-    if set(by_id) | failed != set(grants):
+    if successor:
+        allowed = set(by_id) | failed
+        rows = [r for r in rows if r["job_id"] in allowed]
+    if set(by_id) | failed != {r["job_id"] for r in rows}:
         raise ValueError("registered jobs changed during release")
     controls = set(bundle["planted"]) | set(bundle["drift"])
     agent, builder = comparison_revisions(raw)
@@ -186,6 +246,8 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
                     full.stats["excluded_controls"] += 1
                     continue
                 auth = grants[rid]
+                if auth["unresolved"]:
+                    raise ValueError("unconfirmed miner charges for successor row")
                 billed = dict(
                     job,
                     **{
@@ -266,24 +328,27 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
                         is not None
                     ):
                         hold = "quarantine"
-                full.write(
-                    traces.trajectory_row(
-                        job=billed,
-                        generator=None if hold else generator,
-                        packet=packet,
-                        calls=calls,
-                        settings_sha256=settings_hash,
-                        harness=agent,
-                        builder=builder,
-                        revision=revisions[job["model"]],
-                        route=raw["routes"][job["model"]],
-                        split=stamp,
-                        terms_sha256=terms,
-                        assessment=assessment,
-                        partial=rid in failed,
-                        hold=hold,
-                    )
+                trajectory = traces.trajectory_row(
+                    job=billed,
+                    generator=None if hold else generator,
+                    packet=packet,
+                    calls=calls,
+                    settings_sha256=settings_hash,
+                    harness=agent,
+                    builder=builder,
+                    revision=revisions[job["model"]],
+                    route=raw["routes"][job["model"]],
+                    split=stamp,
+                    terms_sha256=terms,
+                    assessment=assessment,
+                    partial=rid in failed,
+                    hold=hold,
                 )
+                if successor:
+                    trajectory["reference_successor"] = dict(successor)
+                if witness and job["model"] == witness["model"]:
+                    trajectory["route_witness"] = witness
+                full.write(trajectory)
             result = full.finish()
             metadata = {
                 "schema": traces.SCHEMA,
@@ -294,6 +359,12 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
                 "rows": result.get("trajectory_rows", 0),
                 **result,
             }
+            if successor:
+                metadata["reference_successor"] = dict(successor)
+                metadata["actual_slots"] = sorted({j["slot"] for j in rows})
+                metadata["complete_qualification_batch"] = False
+            if witness:
+                metadata["route_witness"] = witness
             z.writestr("metadata.json", judge._json(metadata))
         os.chmod(stage, 0o600)
         store_artifact(objects, policy.batch_id, "export", "split", split)

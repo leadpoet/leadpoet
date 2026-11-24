@@ -16,7 +16,7 @@ SCHEMA = "collection.trajectories.v1"
 LABEL = re.compile(r"[A-Za-z0-9_ .:-]{1,128}")
 
 
-def verified_grants(database, batch, jobs, *, mode, scope, digest):
+def verified_grants(database, batch, jobs, *, mode, scope, digest, allow_pending=False):
     """Use the original signed registration of each actual job, including retries."""
     from lab_arena import collection_intake as intake
     from lab_arena.chain import verify_hotkey_signature
@@ -74,7 +74,7 @@ def verified_grants(database, batch, jobs, *, mode, scope, digest):
         for k in ("unresolved", "generator_calls", "miner_cost_microusd"):
             if type(auth[k]) is not int or auth[k] < 0 or (k in j and j[k] != auth[k]):
                 raise ValueError("funding evidence differs from original job")
-        if auth["unresolved"]:
+        if auth["unresolved"] and not allow_pending:
             raise ValueError("unconfirmed miner charges")
     return by_id
 

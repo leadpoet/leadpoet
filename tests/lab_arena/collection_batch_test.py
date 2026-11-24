@@ -40,13 +40,34 @@ class Database:
         raise AssertionError(name)
 
 
+def original_journal(objects, *, batch, rid, model, row):
+    from lab_arena.collection_journal import WorkflowJournal
+
+    j = WorkflowJournal(objects, batch, rid)
+    j.append(
+        {
+            "index": 0,
+            "kind": "start",
+            "model": model,
+            "messages": [],
+            "tools": row["tools"],
+        }
+    )
+    for i, msg in enumerate(row["messages"], 1):
+        j.append({"index": i, "kind": "reply", "message": msg})
+    j.append({"index": len(row["messages"]) + 1, "kind": "finish"})
+    j.finish("completed")
+    return j.hashes
+
+
 @pytest.fixture
 def pilot(tmp_path, request):
     db = Database()
     objects = LocalObjectStore(tmp_path / "objects")
     variant = getattr(request, "param", 22)
-    exportable = variant == "training-pack"
-    candidate = variant in {"open-panel", "training-pack"}
+    witnessed = variant == "witnessed-complete"
+    exportable = variant == "training-pack" or witnessed
+    candidate = variant in {"open-panel", "training-pack", "witnessed-complete"}
     checkpointed = variant == "checkpointed" or exportable
     split = SPLIT
     if exportable:
@@ -171,6 +192,14 @@ def pilot(tmp_path, request):
 
     if checkpointed:
         raw["capture_version"] = COMPARISON_CAPTURE
+    if witnessed:
+        from lab_arena.collection_route_witness import WITNESS
+        from lab_arena.collection_broker import REFERENCE_MODEL, REFERENCE_ROUTE
+        from lab_arena.collection_generation import CAPTURE_V2
+
+        raw.update(route_witness_sha256=WITNESS, capture_version=CAPTURE_V2)
+        raw["routes"][REFERENCE_MODEL] = REFERENCE_ROUTE
+
     agent, builder = comparison_revisions(raw)
     policy = load_batch(raw, PROMPT)
     for i in range(len(raw["scenario_ids"]) * len(MODELS)):
@@ -203,6 +232,7 @@ def pilot(tmp_path, request):
                 "generator_calls": 0 if i in private_cases else 5,
                 "miner_cost_microusd": 0 if i in private_cases else 50,
             }
+            job.update(billing)
             db.grants.append(
                 dict(
                     job_id=rid,
@@ -256,27 +286,11 @@ def pilot(tmp_path, request):
         ]:
             manifest[field] = store_artifact(objects, policy.batch_id, rid, kind, value)
         if checkpointed:
-            from lab_arena.collection_journal import WorkflowJournal
-
             manifest["capture_version"] = raw["capture_version"]
             if i not in private_cases:
-                journal = WorkflowJournal(objects, policy.batch_id, rid)
-                journal.append(
-                    {
-                        "index": 0,
-                        "kind": "start",
-                        "model": model,
-                        "messages": [],
-                        "tools": row["tools"],
-                    }
+                manifest["events"] = original_journal(
+                    objects, batch=policy.batch_id, rid=rid, model=model, row=row
                 )
-                for m in row["messages"]:
-                    journal.append(
-                        {"index": len(journal.hashes), "kind": "reply", "message": m}
-                    )
-                journal.append({"index": len(journal.hashes), "kind": "finish"})
-                journal.finish("completed")
-                manifest["events"] = journal.hashes
         if i in private_cases:
             manifest.pop("generator")
             manifest["control"] = store_artifact(
@@ -525,3 +539,145 @@ def test_qualified_six_model_export_checks_every_signed_job(pilot, tmp_path):
             raw, PROMPT, db, objects, tmp_path / "tampered.zip", qualification=qual
         )
     assert not (tmp_path / "tampered.zip").exists()
+
+
+@pytest.mark.parametrize("pilot", ["witnessed-complete"], indirect=True)
+def test_signed_successor_export_keeps_genuine_absolute_slots_and_matching_route(
+    pilot, tmp_path, monkeypatch
+):
+    import json
+    from zipfile import ZipFile
+    from lab_arena import collection_route_witness as witness
+    from lab_arena.collection_broker import REFERENCE_MODEL, REFERENCE_ROUTE
+    from lab_arena.collection_intake import MODELS, GENERATOR_ROUTES
+
+    qualraw, reference, objects, bundle, _, _ = pilot
+    reviewer, rkey = keys()
+    approver, akey = keys()
+    receipt = review.sign_review(
+        bundle, complete_marks(bundle), "independent-human", reviewer
+    )
+    approval = review.approve_qualification(
+        bundle, receipt, rkey, "operator-test", approver
+    )
+    qualification = dict(
+        raw=qualraw,
+        prompt=PROMPT,
+        receipt=receipt,
+        reviewer_key=rkey,
+        approval=approval,
+        approver_key=akey,
+    )
+    initial = deepcopy(qualraw)
+    initial.pop("route_witness_sha256")
+    initial.update(
+        name="new-case",
+        scenario_ids=qualraw["scenario_ids"][:1],
+        control_slots={},
+        drift_slots={},
+        control_artifacts={},
+    )
+    initial["routes"][REFERENCE_MODEL] = GENERATOR_ROUTES[REFERENCE_MODEL].tag
+    parent = load_batch(initial, PROMPT)
+    raw = deepcopy(initial)
+    raw["routes"][REFERENCE_MODEL] = REFERENCE_ROUTE
+    raw["reference_successor"] = {
+        "parent": parent.batch_id,
+        "next_slot": 1,
+        "owner_witness_sha256": witness.WITNESS,
+    }
+    target = load_batch(raw, PROMPT)
+    key = next(r for r in reference.rows if r["slot"] == 1)
+    real = dict(key, batch_id=target.batch_id, job_id="new-successor-only")
+    original = next(x for x in bundle["runs"] if x["packet"]["run_id"] == key["job_id"])
+    rid = real["job_id"]
+    reader = release.read_artifact
+    previous = reader(
+        objects,
+        key["batch_id"],
+        key["job_id"],
+        "manifest",
+        {"sha256": key["artifact_sha256"]},
+        1 << 20,
+    )
+    generator = reader(
+        objects,
+        key["batch_id"],
+        key["job_id"],
+        "generator",
+        previous["generator"],
+        128 << 20,
+    )
+    generator.update(run=rid)
+    pkt = dict(original["packet"], run_id=rid)
+    a = judge.assign_judges(target, [assignment(real)])[rid]
+    assessment = judge.judge_run(target, a, pkt, Caller(), prompt=PROMPT)
+    manifest = dict(
+        previous, batch_id=target.batch_id, job_id=rid, judge_policy=asdict(target)
+    )
+    for k, n, val in [
+        ("packet", "judge-input", pkt),
+        ("assessment", "judge-output", assessment),
+        ("generator", "generator", generator),
+    ]:
+        manifest[k] = store_artifact(objects, target.batch_id, rid, n, val)
+    manifest["events"] = original_journal(
+        objects, batch=target.batch_id, rid=rid, model=real["model"], row=generator
+    )
+    real["artifact_sha256"] = store_artifact(
+        objects, target.batch_id, rid, "manifest", manifest
+    )["sha256"]
+    target_data = Database()
+    target_data.rows = [real]
+    target_data.grants = [dict(reference.grants[1], job_id=rid)]
+
+    class TwoBatches:
+        def rpc(self, n, params):
+            return (
+                reference
+                if params["p_batch"] == bundle["policy"]["batch_id"]
+                else target_data
+            ).rpc(n, params)
+
+    db = TwoBatches()
+    # The owner witness verifier is tested separately and exercised with its real
+    # production S3 originals. The fixture keeps real qualification and miner signatures.
+    monkeypatch.setattr(
+        witness,
+        "verified_witness",
+        lambda raw, objects: {
+            "owner_witness_sha256": witness.WITNESS,
+            "model": REFERENCE_MODEL,
+        },
+    )
+    dest = tmp_path / "successor.zip"
+    meta = release.write_exports(
+        raw, PROMPT, db, objects, dest, qualification=qualification
+    )
+    assert (
+        meta["rows"] == 1
+        and meta["actual_slots"] == [1]
+        and meta["complete_qualification_batch"] is False
+    )
+    with ZipFile(dest) as z:
+        row = json.loads(z.read("trajectories/" + rid + ".jsonl"))
+        assert row["slot"] == 1 and row["model"] == REFERENCE_MODEL
+        assert (
+            row["provider_route"] == REFERENCE_ROUTE
+            and row["reference_successor"] == raw["reference_successor"]
+        )
+        assert not any(key["job_id"] in name for name in z.namelist())
+    with pytest.raises(ValueError, match="private reference"):
+        release.source_bundle(raw, PROMPT, db, objects)
+    bad = deepcopy(raw)
+    bad["reference_successor"]["owner_witness_sha256"] = "sha256:" + "0" * 64
+    with pytest.raises(ValueError):
+        release.write_exports(
+            bad, PROMPT, db, objects, tmp_path / "bad.zip", qualification=qualification
+        )
+    alt = deepcopy(qualraw)
+    alt["budgets_microusd"][REFERENCE_MODEL] += 1
+    with pytest.raises(ValueError, match="matches the witnessed route"):
+        witness.verify_matching_panel(raw, target, alt, PROMPT, db, successor=True)
+    with pytest.raises(ValueError, match="independent reviewer"):
+        release.write_exports(raw, PROMPT, db, objects, tmp_path / "no-review.zip")

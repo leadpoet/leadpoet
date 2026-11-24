@@ -28,6 +28,7 @@ from lab_arena.collection_experiment import (
 )
 from lab_arena.collection_quality import verify_split
 from lab_arena.collection_workflow import store_artifact
+from lab_arena.collection_journal import WorkflowJournal
 
 CORRECTIONS = "collection.correction-pairs.v1"
 AUDIT = "collection.experiment-private-audit.v1"
@@ -202,22 +203,8 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
                             z.writestr(f"{rid}/interruption.json", judge._json(failure))
                 # A hard stop may leave a verified prefix, but no terminal event index.
                 incomplete = not job.get("artifact_sha256") and not event_hashes
-                limit = 4096 if incomplete else len(event_hashes)
-                for idx in range(limit):
-                    key = f"collection/{batch}/{rid}/events/{idx:05d}.json"
-                    event = objects.get_optional_bounded(key, LIMIT)
-                    if incomplete and event is None:
-                        break
-                    if (
-                        event is None
-                        or json.loads(event)["index"] != idx
-                        or (
-                            not incomplete
-                            and "sha256:" + sha256(event).hexdigest()
-                            != event_hashes[idx]
-                        )
-                    ):
-                        raise ValueError("run journal is missing or changed")
+                journal = WorkflowJournal(objects,batch,rid)
+                for idx,(event,_) in enumerate(journal.read(None if incomplete else event_hashes)):
                     if not trained:
                         z.writestr(f"{rid}/events/{idx:05d}.json", event)
                 if job["status"] == "failed" or not job.get("artifact_sha256"):

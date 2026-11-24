@@ -462,6 +462,11 @@ def test_real_harness_checkpoint_and_archive_under_funded_job_contract(
         )
         raw["provenance_sha256"] = stage(att)
         spec = xp.load_experiment(raw, PROMPT)
+        with pytest.raises(ValueError, match="frozen evaluation template"):
+            xp.read_inputs(spec, tmp_path, src)
+        # This fixture exercises downstream funding and archival with a controlled
+        # evaluation registry. Production obtains this set only from pinned Git.
+        monkeypatch.setattr(builders, "evaluation_templates", {"separate-fixture"})
         inputs = xp.read_inputs(spec, tmp_path, src)
         good = builders.perfect(case)
         todo = br.still_to_do(

@@ -19,8 +19,8 @@ from lab_arena.collection_broker import CollectionBroker, batch_versions
 from lab_arena.collection_intake import GENERATOR_ROUTES, MODELS, CollectionIntake, live_finney_arena
 from lab_arena.collection_worker import process_job
 from lab_arena.collection_workflow import (
-    CHAMPION_REV,
-    POET_REV,
+    CHAMPION_REV, POET_REV,
+    comparison_revisions,
     build_scenario,
     workflow_sources,
 )
@@ -33,11 +33,13 @@ from lab_arena.store import PostgrestTransport
 def load_batch(raw, prompt):
     from lab_arena.collection_claims import protocol_of
     protocol_of(raw)
+    agent, builder = comparison_revisions(raw)
     if set(raw) - {
         "research_index_sha256",
         "split_manifest",
         "panel_qualification_sha256",
         "claim_protocol",
+        "capture_version",
         "thresholds",
         "control_artifacts",
         "claim_pack_sha256",
@@ -67,6 +69,8 @@ def load_batch(raw, prompt):
         or len(scenarios) != len(set(scenarios))
     ):
         raise ValueError("scenario pack must contain unique identifiers")
+    if "capture_version" in raw and any(s.startswith("research-") for s in scenarios):
+        raise ValueError("checkpoint comparison requires synthetic workflows")
     if any(s.startswith("research-") for s in scenarios) and not re.fullmatch(
         "[0-9a-f]{64}", raw.get("research_index_sha256", "")
     ):
@@ -97,8 +101,8 @@ def load_batch(raw, prompt):
         {
             "manifest": raw,
             "prompt": judge.digest(prompt),
-            "champion": CHAMPION_REV,
-            "builder": POET_REV,
+            "champion": agent,
+            "builder": builder,
             "model_revisions": revisions,
         }
     )
@@ -138,12 +142,13 @@ def assignment(job):
 def ready_launch_evidence(pending, objects, policy, approved):
     from lab_arena.collection_judge_review import registered_bundle
 
+    agent, builder = comparison_revisions(approved)
     if (
         pending["batch_id"] != policy.batch_id
         or policy.pilot
-        or pending["harness_commit"] != CHAMPION_REV
-        or approved["harness_commit"] != CHAMPION_REV
-        or approved["builder_commit"] != POET_REV
+        or pending["harness_commit"] != agent
+        or approved["harness_commit"] != agent
+        or approved["builder_commit"] != builder
         or approved["judge_prompt_sha256"] != policy.prompt_sha256
     ):
         raise ValueError("staged launch differs from calibrated live batch")
@@ -162,7 +167,8 @@ def ready_launch_evidence(pending, objects, policy, approved):
         objects=objects,
         planted={},
         drift={},
-        expected_builder=POET_REV,
+        expected_builder=builder,
+        capture_version=approved.get("capture_version"),
     )
     checks = evidence["runs"][0]["packet"]["checks"]
     if not all(
@@ -290,18 +296,30 @@ def rejudge_ready(
     finish_launch(database, current, objects, policy, approved)
 
 
+class ComparisonSplitHold(ValueError):
+    """The pinned comparison pack cannot use a miner's funding."""
+
+
 def pack_split(raw, builders, scenario_id):
-    task = build_scenario(builders, scenario_id)
-    if "split_manifest" in raw:
-        from lab_arena.collection_checkpoint import scenario_split
-        from lab_arena.collection_quality import admit_split
-        return admit_split(scenario_split(builders, task), raw["split_manifest"])
-    return None
+    from lab_arena.collection_quality import admit_built_split
+    if not raw.get("split_manifest"):
+        raise ComparisonSplitHold("missing_split_manifest")
+    try:
+        task = build_scenario(builders, scenario_id)
+        return admit_built_split(builders, task, None, raw["split_manifest"])
+    except (ValueError, builders.guard.Refused) as exc:
+        raise ComparisonSplitHold("scenario_not_in_training_partition") from exc
+
+
+def report_split_hold(policy, exc):
+    print(json.dumps({"batch": policy.batch_id, "status": "comparison_held", "reason": str(exc)}), flush=True)
+    return 0
 
 
 def verify_live_panel(raw, policy, approved):
     certificate = raw.get("panel_qualification_sha256")
-    if (certificate != approved.get("panel_qualification_sha256")
+    if (comparison_revisions(raw) != comparison_revisions(approved)
+        or certificate != approved.get("panel_qualification_sha256")
         or raw.get("claim_protocol", "collection.fresh-claims.v1") != approved.get("claim_protocol", "collection.fresh-claims.v1")
         or policy.qualification != bool(certificate)
         or (approved.get("split_manifest_sha256") and
@@ -329,6 +347,9 @@ def run_cohort(
     controls=None,
     claim_pack=None,
 ):
+    agent, builder = comparison_revisions(raw)
+    if raw.get("capture_version") and (getattr(sources[0], "source_revision", None), getattr(sources[1], "source_revision", None)) != (agent,builder):
+        raise ValueError("comparison worker loaded the wrong pinned sources")
     staged = False
     ceiling = dict(raw["budgets_microusd"])
     fees = dict.fromkeys(MODELS, 0)
@@ -351,8 +372,8 @@ def run_cohort(
             for sid in raw["scenario_ids"]
         }
         if (
-            approved["harness_commit"] != CHAMPION_REV
-            or approved["builder_commit"] != POET_REV
+            approved["harness_commit"] != agent
+            or approved["builder_commit"] != builder
             or approved["judge_prompt_sha256"] != policy.prompt_sha256
         ):
             raise ValueError("live arm differs from the measured pilot")
@@ -365,11 +386,14 @@ def run_cohort(
             if research is None:
                 raise ValueError("research runner and label evidence required")
         else:
-            splits[sid] = pack_split(raw, sources[1], sid)
+            try:
+                splits[sid] = pack_split(raw, sources[1], sid)
+            except ComparisonSplitHold as exc:
+                return report_split_hold(policy, exc)
     completed = 0
     for _ in range(max_jobs):
         job = intake.claim(
-            policy.batch_id, raw["scenario_ids"], CHAMPION_REV, fees, ceiling
+            policy.batch_id, raw["scenario_ids"], agent, fees, ceiling
         )
         if not job:
             break
@@ -401,6 +425,7 @@ def run_cohort(
                 control_packet=controls.bind(job) if controls else None,
                 claim_pack=claim_pack,
                 prepare_launch=staged,
+                capture_version=raw.get("capture_version"),
                 split=splits.get(job["scenario_id"]),
                 claim_protocol=raw.get("claim_protocol", "collection.fresh-claims.v1"),
             )
@@ -609,12 +634,18 @@ def _run_options(args, p, raw, *, before_claim=None):
             raise ValueError(
                 "research requires one authenticated validator relay per invocation"
             )
-    source_args = {"corrections": True} if experiment else {}
+    agent,builder = experiments.source_revisions() if experiment else comparison_revisions(raw)
+    source_args = {"corrections": True} if experiment or "capture_version" in raw else {}
     with workflow_sources(args.champion_repo, args.poet_repo, **source_args) as sources:
         experiment_inputs = experiments.read_inputs(experiment, args.experiment_inputs, sources) if experiment else None
-        for sid in ([] if experiment else scenarios):
-            if not sid.startswith("research-"):
-                pack_split(raw, sources[1], sid)
+        try:
+            for sid in ([] if experiment else scenarios):
+                if not sid.startswith("research-"):
+                    pack_split(raw, sources[1], sid)
+        except ComparisonSplitHold as exc:
+            if args.preflight:
+                raise
+            return report_split_hold(policy, exc)
         if args.preflight:
             print(
                 json.dumps(
@@ -622,8 +653,8 @@ def _run_options(args, p, raw, *, before_claim=None):
                         "batch": policy.batch_id,
                         "models": len({a["model"] for a in raw["arms"]}) if experiment else len(MODELS),
                         "scenarios": len(scenarios),
-                        "champion": CHAMPION_REV if not experiment else experiments.source_revisions()[0],
-                        "builder": POET_REV if not experiment else experiments.source_revisions()[1],
+                        "champion": agent,
+                        "builder": builder,
                     }
                 )
             )

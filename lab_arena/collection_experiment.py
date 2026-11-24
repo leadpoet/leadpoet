@@ -19,6 +19,7 @@ from lab_arena.collection_intake import (
     MAX_MICROUSD,
 )
 from lab_arena.collection_workflow import store_artifact
+from lab_arena.collection_journal import WorkflowJournal
 
 SCHEMA = "collection.experiment.v1"
 SHA = re.compile(r"sha256:[0-9a-f]{64}")
@@ -236,9 +237,8 @@ def read_inputs(spec, directory, sources):
     from lab_arena.collection_workflow import (
         validate_student_source,
         correction_scenario,
-        scenario_split,
     )
-    from lab_arena.collection_quality import admit_split
+    from lab_arena.collection_quality import admit_built_split
 
     def read(digest):
         if directory is None or not SHA.fullmatch(digest):
@@ -262,14 +262,8 @@ def read_inputs(spec, directory, sources):
             raise ValueError("a correction needs a distinct approved expert")
         task = correction_scenario(sources[1], source)
         # These identities are re-derived from the pinned builder, never miner labels.
-        stamp = admit_split(
-            scenario_split(
-                sources[1],
-                task,
-                json.loads(source["original"]["trace.json"]).get("shape"),
-            ),
-            split,
-        )
+        stamp = admit_built_split(
+            sources[1], task, json.loads(source["original"]["trace.json"]).get("shape"), split)
         resolved[case["source_sha256"]] = (source, stamp)
     provenance = read(spec.raw["provenance_sha256"])
     verify_provenance(spec, provenance, {k: v[0] for k, v in resolved.items()})
@@ -370,7 +364,7 @@ def run_experiment(
         }
         meter = None
         generator_finished = False
-        event_hashes = []
+        journal = WorkflowJournal(objects, batch, run_id)
         archived = {}
         vote_refs = []
 
@@ -388,17 +382,6 @@ def run_experiment(
         def record_vote(vote):
             ref = save("claim-vote-" + vote["request_id"], vote)
             vote_refs.append(ref)
-
-        def record(event):
-            # Known sequence paths permit recovery after a hard stop before the manifest.
-            if event["index"] != len(event_hashes):
-                raise ValueError("nonsequential experiment event")
-            data = judge._json(event).encode()
-            ref = f"collection/{batch}/{run_id}/events/{event['index']:05d}.json"
-            objects.put(ref, data)
-            if objects.get_bounded(ref, len(data)) != data:
-                raise ValueError("stored experiment event failed readback")
-            event_hashes.append(_hash(event))
 
         try:
             if (
@@ -435,7 +418,7 @@ def run_experiment(
                 meter,
                 max_steps=arm["max_steps"],
                 max_tokens=arm["max_tokens"],
-                record=record,
+                record=journal.append,
                 **{role_option: source},
             )
             if (
@@ -479,7 +462,7 @@ def run_experiment(
                 "settings": settings,
                 "calls": calls_ref,
                 "claim_verdict": claim,
-                "events": event_hashes,
+                "events": journal.hashes,
                 "claim_votes": vote_refs,
             }
             manifest_ref = save("manifest", manifest)
@@ -517,7 +500,7 @@ def run_experiment(
                     "cause": type(exc).__name__,
                     "generator_finished": generator_finished,
                     "calls": meter.calls if meter else [],
-                    "events": event_hashes,
+                    "events": journal.hashes,
                 },
             )
             objects.put(

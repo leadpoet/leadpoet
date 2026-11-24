@@ -52,3 +52,12 @@ def verify_split(stamp, split_manifest):
     if not isinstance(stamp, dict) or stamp != admit_split(stamp, split_manifest):
         raise ValueError("training split binding differs")
     return stamp
+
+
+
+def admit_built_split(builders, task, shape, split):
+    from lab_arena.collection_checkpoint import scenario_split
+    identity = scenario_split(builders, task, shape)
+    if identity["template_id"] in builders.evaluation_templates:
+        raise ValueError("scenario uses a frozen evaluation template")
+    return admit_split(identity, split)

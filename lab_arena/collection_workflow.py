@@ -31,6 +31,17 @@ CORRECTION_CHAMPION_REV = "a9be241e0060b5ae8eefe55b79779eb6e73bd863"
 CORRECTION_POET_REV = "d37173aca32ea59c7c5ffea46b0941726c55f30f"
 
 
+COMPARISON_CAPTURE = "collection.workflow-events.v1"
+
+
+def comparison_revisions(settings):
+    if "capture_version" not in settings:
+        return CHAMPION_REV, POET_REV
+    if settings["capture_version"] != COMPARISON_CAPTURE:
+        raise ValueError("unknown comparison capture version")
+    return CORRECTION_CHAMPION_REV, CORRECTION_POET_REV
+
+
 def _materialize(repo, commit, destination, *paths):
     # Ignore mutable working-tree files, node caches and .git hooks. Only regular
     # files actually recorded by the selected git tree can become modules.
@@ -85,7 +96,17 @@ def workflow_sources(champion_repo, poet_repo, *, corrections=False):
             builders = _load("collection_tasks", tasks / "trace_rows.py")
             if corrections:
                 builders.branch = _load("collection_branches", tasks / "branch_runs.py")
-            yield _load("collection_harness", agent / "harness.py"), builders
+            harness = _load("collection_harness", agent / "harness.py")
+            harness.source_revision = CORRECTION_CHAMPION_REV if corrections else CHAMPION_REV
+            builders.source_revision = CORRECTION_POET_REV if corrections else POET_REV
+            # These are the producer's committed frozen evaluation identities.
+            # A batch creator cannot reclassify an evaluation template as training.
+            frozen = json.loads((tasks / "FROZEN_V2.json").read_bytes())
+            published = {key.split(":")[1] for key in frozen["builds"]}
+            if not published or not builders.kmodule().TEMPLATES:
+                raise ValueError("missing pinned evaluation template registry")
+            builders.evaluation_templates = published | set(builders.kmodule().TEMPLATES)
+            yield harness, builders
         finally:
             sys.path[:] = before
             for name, mod in list(sys.modules.items()):

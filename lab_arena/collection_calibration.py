@@ -7,7 +7,7 @@ from dataclasses import asdict
 from lab_arena import collection_judge as judge
 from lab_arena import collection_judge_review as review
 from lab_arena.collection_intake import MODELS
-from lab_arena.collection_workflow import CHAMPION_REV, POET_REV
+from lab_arena.collection_workflow import comparison_revisions
 
 
 def compile_pilot(
@@ -26,6 +26,7 @@ def compile_pilot(
     reviewer identity, prompt, marks, credentials or private response is exposed.
     """
     policy = judge.BatchPolicy(**bundle["policy"])
+    agent, builder = comparison_revisions(bundle)
     if not policy.pilot:
         raise ValueError("expected pilot review")
     rows = transport.rpc("collection_pilot_costs_v1", {"p_batch": policy.batch_id})
@@ -40,7 +41,8 @@ def compile_pilot(
         jobs=rows,
         failed_attempts=failures,
         objects=objects,
-        expected_builder=POET_REV,
+        expected_builder=builder,
+        capture_version=bundle.get("capture_version"),
     )
     verified["split_manifest_sha256"] = bundle.get("split_manifest_sha256")
     if "claim_protocol" in bundle:
@@ -60,7 +62,7 @@ def compile_pilot(
     if set(a["generator"] for a in bundle["assignments"]) != set(MODELS):
         raise ValueError("pilot release checks failed")
     for row in rows:
-        if row["harness_commit"] != CHAMPION_REV:
+        if row["harness_commit"] != agent:
             raise ValueError("pilot harness does not match release")
     controls = sorted(set(bundle["drift"]) | set(bundle["planted"]))
     calibration = transport.rpc(
@@ -73,8 +75,9 @@ def compile_pilot(
         "review_bundle_sha256": judge.digest(verified),
         "judge_policy_sha256": judge.digest(asdict(policy)),
         "judge_prompt_sha256": policy.prompt_sha256,
-        "harness_commit": CHAMPION_REV,
-        "builder_commit": POET_REV,
+        "harness_commit": agent,
+        "builder_commit": builder,
+        **({"capture_version":bundle["capture_version"]} if "capture_version" in bundle else {}),
         "control_ids": controls,
         "split_manifest_sha256": verified["split_manifest_sha256"],
         **({"claim_protocol":bundle["claim_protocol"]} if "claim_protocol" in bundle else {}),

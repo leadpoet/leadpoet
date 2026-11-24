@@ -67,6 +67,7 @@ TLS_SCHEMA = "leadpoet.lead_order_vault.tls.v1"
 # Handshake, headers and body together; a per-read timeout alone would let a
 # client that sends one byte at a time hold a connection slot forever.
 REQUEST_READ_SECONDS = 10.0
+REFUSED_BODY_DISCARD = 65536
 
 HOSTS = {"openrouter.ai": "openrouter", "code.deepline.com": "deepline"}
 # Request shapes a miner's key may take. Anything else, such as billing
@@ -510,11 +511,16 @@ def make_handler(vault: Vault):
                 length = self.headers.get("content-length", "")
                 if not length.isdigit() or int(length) > MAX_REQUEST_BODY:
                     raise VaultError("request_too_large", 413)
-                # Read before refusing: closing on unread data resets the
-                # connection, and the caller would lose the answer.
+                try:
+                    vault.authorize(self.headers.get(CALLER_HEADER))
+                except VaultError:
+                    # Closing on unread data resets the connection, and the
+                    # caller would lose the answer. A stranger's body is not
+                    # buffered beyond this.
+                    self.rfile.read(min(int(length), REFUSED_BODY_DISCARD))
+                    raise
                 body = self.rfile.read(int(length))
                 self.server.request_read()
-                vault.authorize(self.headers.get(CALLER_HEADER))
                 try:
                     request = json.loads(body)
                 except ValueError:

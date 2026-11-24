@@ -6,6 +6,8 @@ services:
   vault:
     image: ghcr.io/leadpoet/lead-order-vault@sha256:0000000000000000000000000000000000000000000000000000000000000000
     restart: always
+    # Calls in flight finish before the vault stops (vault.py, main).
+    stop_grace_period: 330s
     ports:
       - "8080:8080"
     volumes:

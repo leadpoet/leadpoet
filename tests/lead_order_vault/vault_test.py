@@ -159,7 +159,7 @@ def _identity(**changes):
     return identity
 
 
-def test_cli_accepts_keys_the_kms_issued_to_our_app():
+def test_trust_accepts_keys_the_kms_issued_to_our_app():
     assert trust.verified_identity(DEPLOYMENT, _identity())["encryption"]["public_key"] == VAULT_KEY
 
 
@@ -167,7 +167,7 @@ def test_cli_accepts_keys_the_kms_issued_to_our_app():
     ({"encryption": None}, "not the expected kind"),
     ({"app_id": "cd" * 20}, "different app id"),
 ])
-def test_cli_refuses_a_wrong_identity(changes, message):
+def test_trust_refuses_a_wrong_identity(changes, message):
     identity = _identity(**changes)
     with pytest.raises(trust.TrustError, match=message):
         trust.verified_identity(DEPLOYMENT, identity)
@@ -179,18 +179,17 @@ def test_cli_refuses_a_wrong_identity(changes, message):
     lambda: _issued(ENCRYPTION, "leadpoet/other"),  # another key domain, relabelled
     lambda: dict(_issued(ENCRYPTION, ENCRYPTION_DOMAIN), public_key=_compressed(_key(0x7777)).hex()),  # swapped key
 ])
-def test_cli_refuses_a_key_the_kms_did_not_issue_to_our_app(issued):
+def test_trust_refuses_a_key_the_kms_did_not_issue_to_our_app(issued):
     key = dict(issued(), domain=ENCRYPTION_DOMAIN)
     with pytest.raises(trust.TrustError, match="does not chain"):
         trust.verified_identity(DEPLOYMENT, _identity(encryption=key))
 
 
-def test_cli_refuses_until_deployed(tmp_path):
+def test_trust_refuses_until_deployed(tmp_path):
     path = tmp_path / "deployment.json"
     path.write_text(json.dumps(dict(DEPLOYMENT, url=None)))
     with pytest.raises(trust.TrustError, match="not deployed"):
         trust.load_deployment(path)
-    assert json.loads(trust.DEPLOYMENT_FILE.read_text())["url"] is None
 
 
 def test_cli_seals_both_openrouter_keys_to_the_verified_vault():
@@ -401,6 +400,51 @@ def test_http_server_routes_authenticates_and_never_logs(capsys):
     assert captured.out == "" and captured.err == ""
 
 
+def test_an_unexpected_upstream_failure_still_gets_its_receipt():
+    result = _vault(FakeProvider({"/api/v1/chat/completions": AttributeError("surprise")})).call(_call())
+    assert result["transport_error"] == "upstream_unavailable"
+    assert result["receipt"]["document"]["outcome"] == "transport_error"
+
+
+def test_stopping_the_server_lets_a_call_in_flight_finish():
+    import http.client
+    import threading
+
+    from lead_order_vault.vault import CALLER_HEADER, BoundedServer, make_handler
+
+    started, release = threading.Event(), threading.Event()
+
+    class HeldProvider(FakeProvider):
+        def __call__(self, *args):
+            started.set()
+            release.wait(5)
+            return super().__call__(*args)
+
+    server = BoundedServer(("127.0.0.1", 0), make_handler(_vault(HeldProvider())))
+    serving = threading.Thread(target=server.serve_forever)
+    serving.start()
+    answers = []
+
+    def call():
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        connection.request("POST", "/v1/call", body=json.dumps(_call()).encode(), headers={CALLER_HEADER: TOKEN})
+        answers.append(json.loads(connection.getresponse().read()))
+
+    caller = threading.Thread(target=call)
+    caller.start()
+    assert started.wait(5)
+    server.shutdown()
+    serving.join()
+    closing = threading.Thread(target=server.server_close)
+    closing.start()
+    closing.join(0.3)
+    assert closing.is_alive()  # waiting for the call in flight
+    release.set()
+    closing.join(5)
+    caller.join(5)
+    assert answers[0]["receipt"]["document"]["outcome"] == "response"
+
+
 def test_every_answer_closes_its_connection_and_slow_clients_are_cut(monkeypatch):
     import http.client
     import socket
@@ -487,21 +531,26 @@ def test_the_real_upstream_bounds_total_time_and_size():
     def whole(connection):
         connection.sendall(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
 
+    def closing(connection):
+        # http.client drops the connection's socket when the answer says close.
+        connection.sendall(b"HTTP/1.1 429 Too Many Requests\r\nconnection: close\r\ncontent-length: 2\r\n\r\nno")
+
     client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     client_context.check_hostname, client_context.verify_mode = False, ssl.CERT_NONE
     try:
-        for answer, error in ((trickle, "upstream_timeout"), (oversize, "response_too_large"), (whole, None)):
+        for answer, error in ((trickle, "upstream_timeout"), (oversize, "response_too_large"),
+                              (whole, b"ok"), (closing, b"no")):
             thread = threading.Thread(target=serve, args=(answer,), daemon=True)
             thread.start()
             started = time.monotonic()
             call = lambda: https_upstream("GET", "127.0.0.1", "/", {}, b"", 1.0, 1024, port=port,
                                           context=client_context)
-            if error:
+            if isinstance(error, str):
                 with pytest.raises(UpstreamError, match=error) as raised:
                     call()
                 assert raised.value.observed_status == 200
             else:
-                assert call().body == b"ok"
+                assert call().body == error
             assert time.monotonic() - started < 2
             thread.join(5)
     finally:

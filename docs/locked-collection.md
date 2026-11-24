@@ -1,6 +1,6 @@
 # Locked SN71 collection
 
-Miners enroll an OpenRouter funding key for operator-run synthetic sales workflows. The initial harness is the reviewed source in [sales-agent PR 7](https://github.com/leadpoet/leadpoet-sales-agent/pull/7). The host freezes the source revision, scenario pack, generator schedule, rubric, tags, judge versions and routes. The assigned generator handles every model step, including Tyche child sessions. Fresh rounds of agent competition retire at the economic cutover.
+Miners enroll an OpenRouter funding key for operator-run synthetic sales workflows. The initial harness is the reviewed source in [sales-agent PR 7](https://github.com/leadpoet/leadpoet-sales-agent/pull/7). The host freezes the source revision, scenario pack, generator schedule, rubric, tags, judge versions and routes. The assigned generator handles every model step, including Tyche child sessions.
 
 ## Enrollment
 
@@ -39,7 +39,7 @@ The pilot uses **your OpenRouter credits and pays no emissions**. Leadpoet pays 
 
 Paid assignments require fresh live consent after the pilot qualifies.
 
-For setup help or to volunteer for a blind workflow review, ask in `#lab-chat` on the [Leadpoet Discord](https://discord.gg/dVxQZmJwxB). Reviewing does not require a wallet or API credits.
+For setup help or to volunteer for a blind workflow review, use the [public pilot thread](https://github.com/leadpoet/leadpoet/issues/1343). Reviewing does not require a wallet or API credits. Submit provider keys only through the local miner CLI.
 
 The six slots in each comparison pack use the same scenario and the approved generator routes below. Each subsequent complete group advances to a fresh scenario. A provider receipt records known spend even when the run fails. Unknown bills retain their reservation. The worker cannot issue the same paid request identifier twice. Synthetic tools run locally. The miner funds the billed generator calls. Private verifier calls use an owner-controlled credential and count against the job budget.
 
@@ -64,7 +64,7 @@ The supplied `deploy/leadpoet-collection-pilot.timer` runs the existing worker o
 
 Apply collection migrations 720–729, 732 and 733 in numeric order through the [reviewed RDS migration channel](arena-rds-migrations.md). Deploy all required validator, signer and gateway revisions through the [paired release controller](arena_paired_restart.md). Confirm native routing and data readback before opening paid collection. The existing configuration helper supports a scoped `--collection-mode pilot` check/apply. Prepare each approved live batch within one task family so its model prices and caps come from one measured pilot class.
 
-Run `python -m scripts.collection_batch prices` on the verified, signed pilot evidence. After legacy rounds, promotions and awards finish, stage the approved prices under the [validator weights procedure](arena_normal_validator_weights.md). The first accepted, miner-funded live job activates collection rewards for the next epoch. The worker can recover its completed result after a restart. The subnet then quotes each verified completed job 125% of measured pilot cost for that class and model. Payout weights are proportional to those fixed quotes. An epoch with insufficient emissions scales every quote by the same factor. Surplus goes to burn. Each job contributes once, with no carry-forward.
+Run `python -m scripts.collection_batch prices` on the verified, signed pilot evidence. Champion retirement closes legacy submissions and routes unallocated emissions to the designated burn hotkey. Collection qualification continues during this period. After the pilot qualifies, stage the approved prices under the [validator weights procedure](arena_normal_validator_weights.md). The first accepted, miner-funded live job activates collection rewards for the next epoch. The worker can recover its completed result after a restart. The subnet then quotes each verified completed job 125% of measured pilot cost for that class and model. Payout weights are proportional to those fixed quotes. An epoch with insufficient emissions scales every quote by the same factor. Surplus goes to burn. Each job contributes once, with no carry-forward.
 
 ## Route check on November 23, 2026
 
@@ -127,7 +127,7 @@ The private research journal records each approved provider request and result a
 
 ### Pricing a compensated correction class
 
-Ordinary collection must have completed its prospective switch from champion rewards. A paid correction is a separate bounded assignment with a separately approved price, legal text and live signature from its funder. The existing synthetic pilot remains unpaid.
+Compensated ordinary collection must be active before a correction class can earn rewards. A paid correction is a separate bounded assignment with a separately approved price, legal text and live signature from its funder. The existing synthetic pilot remains unpaid.
 
 1. Before running the pricing pilot, set `min_pricing_runs` in its manifest, or supply `--min-pricing-runs` to the private preparation command. Use one continuation arm and a single comparable template, student weight revision, rule pool, tool variant, expert route, step/token limits, reasoning settings, split and cap. Run the pilot. Wait for all attempts and provider charges to settle and complete the independent panel and training-rights review. Failed model decisions from authentically completed jobs contribute their measured generation cost.
 2. Prepare the private prospective manifest for the same measured class with `mode` set to `live`, the pilot's batch ID in `pricing_pilot`, and the live consent digest in `terms_sha256`. Omit `min_pricing_runs` from this manifest. Each approved manifest covers at most twelve fixed slots and one expert arm. The original pilot can price one such batch. A new class requires new measurements.

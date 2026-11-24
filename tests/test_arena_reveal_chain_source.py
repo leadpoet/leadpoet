@@ -328,7 +328,7 @@ class MeasuredArchiveFixture:
         if method == "state_getRuntimeVersion":
             return {
                 "specVersion": self.runtime_spec_version,
-                "transactionVersion": 1,
+                "transactionVersion": self.fixture.get("runtime_version", {}).get("transactionVersion", 1),
             }
         if method == "state_getMetadata":
             return self.fixture["metadata_hex"]
@@ -471,6 +471,8 @@ def test_historical_reveal_succeeds_after_latest_head_passed_deadline(monkeypatc
         (Path(__file__).resolve().parent / "fixtures" / "subtensor_events_spec492_block9547962.json", 492),
         (Path(__file__).resolve().parent / "fixtures" / "subtensor_events_spec493_block9549764.json", 493),
         (Path(__file__).resolve().parent / "fixtures" / "subtensor_events_spec493_block9549766.json", 493),
+        (Path(__file__).resolve().parent / "fixtures" / "subtensor_events_spec494_block9573884.json", 494),
+        (Path(__file__).resolve().parent / "fixtures" / "subtensor_events_spec494_block9573886.json", 494),
     ],
 )
 def test_exact_parent_runtime_and_transition_events_prove_reveal(

@@ -523,6 +523,8 @@ def partial_generator(objects, job, expected_events=None):
                     "content": event["output"][:20000],
                 }
             )
+        elif kind == "interrupted":
+            finish = "interrupted"
         elif kind in ("before", "finish"):
             if "code_checks" in event:
                 states.append(

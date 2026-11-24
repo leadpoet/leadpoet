@@ -38,6 +38,10 @@ through commits or PRs. Never force-push or rewrite shared history.
 GitHub uses the GitHub App and git credential helper. Use git for pushes; do not
 gate work on `gh auth status`.
 
+Keep user-visible tasks isolated. Report overlap in the owning task. Internal
+subagents report to their owning task. Earlier task-specific authorization
+remains valid within its agreed scope.
+
 ## Verification
 
 Trace the affected behavior through callers, defaults, validators, stored state,

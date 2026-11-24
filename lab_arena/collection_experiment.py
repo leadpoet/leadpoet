@@ -46,7 +46,7 @@ class Experiment:
 
     @property
     def pilot(self):
-        return True
+        return self.raw["mode"] == "pilot"
 
 
 def source_revisions():
@@ -60,11 +60,12 @@ def source_revisions():
 
 def load_experiment(raw, prompt):
     from lab_arena.collection_claims import protocol_of
+
     protocol_of(raw)
     agent_revision, builder_revision = source_revisions()
 
     if (
-        set(raw) - {"claim_protocol"}
+        set(raw) - {"claim_protocol", "min_pricing_runs", "pricing_pilot"}
         != {
             "schema",
             "id",
@@ -79,7 +80,7 @@ def load_experiment(raw, prompt):
             "provenance_sha256",
         }
         or raw["schema"] != SCHEMA
-        or raw["mode"] != "pilot"
+        or raw["mode"] not in {"pilot", "live"}
     ):
         raise ValueError("invalid correction pilot manifest")
     if (
@@ -152,6 +153,26 @@ def load_experiment(raw, prompt):
         or liability > raw["budget_microusd"]
     ):
         raise ValueError("experiment exceeds canary slots or budget")
+    if "min_pricing_runs" in raw and (
+        raw["mode"] != "pilot" or not _integer(raw["min_pricing_runs"], 1, len(slots))
+    ):
+        raise ValueError("pricing requires a predeclared achievable sample size")
+    if raw["mode"] == "live" or "min_pricing_runs" in raw:
+        if (
+            len(arms) != 1
+            or arms[0]["role"] != "continuation"
+            or len({c["scenario_id"].split("-s")[0] for c in cases}) != 1
+        ):
+            raise ValueError(
+                "paid calibration requires one comparable correction class"
+            )
+    if raw["mode"] == "live":
+        if not isinstance(raw.get("pricing_pilot"), str) or not re.fullmatch(
+            r"xp-[0-9a-f]{64}", raw["pricing_pilot"]
+        ):
+            raise ValueError("live corrections require an approved pricing pilot")
+    elif "pricing_pilot" in raw:
+        raise ValueError("a pilot cannot spend an approved live tariff")
     routes = {m: r.tag for m, r in GENERATOR_ROUTES.items()}
     routes.update({m: r.route for m, r in judge.QUALIFICATION_JUDGES.items()})
     identity = judge.digest(
@@ -170,7 +191,7 @@ def load_experiment(raw, prompt):
         batch,
         identity,
         judge.digest(prompt),
-        pilot=True,
+        pilot=raw["mode"] == "pilot",
         **dict(zip(("fable_version", "astra_version"), judge.QUALIFICATION_JUDGES)),
     )
     return Experiment(raw, "sha256:" + identity, batch, routes, slots, policy)
@@ -333,6 +354,7 @@ def run_experiment(
     max_jobs,
     epoch,
     before_claim=None,
+    prompt=None,
 ):
     from lab_arena.collection_broker import CollectionBroker
     from lab_arena.collection_workflow import (
@@ -343,11 +365,22 @@ def run_experiment(
     from lab_arena.collection_claims import read_fresh
 
     stored, split, provenance = inputs
+    live = spec.raw["mode"] == "live"
+    tariff = None
+    if live:
+        from lab_arena.collection_correction_tariff import load_approved
+
+        if prompt is None:
+            raise ValueError("paid correction needs its frozen rubric")
+        tariff = load_approved(spec, inputs, prompt, database, objects, epoch)
+    fixed_quote = tariff["measurement"]["quote_microusd"] if live else 0
     count = 0
     for _ in range(max_jobs):
         if before_claim is not None:
             before_claim()
-        job = intake.claim_experiment(spec, CORRECTION_CHAMPION_REV)
+        job = intake.claim_experiment(
+            spec, CORRECTION_CHAMPION_REV, fixed_quote=fixed_quote
+        )
         if not job:
             break
         run_id = job["job_id"]
@@ -387,8 +420,8 @@ def run_experiment(
             if (
                 job["model"] != arm["model"]
                 or job["scenario_id"] != case["scenario_id"]
-                or job["mode"] != "pilot"
-                or job["price_microusd"] != 0
+                or job["mode"] != spec.raw["mode"]
+                or job["price_microusd"] != fixed_quote
                 or job["harness_commit"] != CORRECTION_CHAMPION_REV
                 or job["batch_id"] != batch
                 or owner_lookup(job["miner_hotkey"]).coldkey != job["owner_coldkey"]
@@ -408,6 +441,8 @@ def run_experiment(
                 routes=spec.routes,
                 judge_key=judge_key,
             )
+            if live:
+                adapter.panel_qualification = tariff["panel_sha256"]
             meter = ExperimentMeter(adapter, arm)
             role_option = (
                 "continuation" if arm["role"] == "continuation" else "student_source"
@@ -439,7 +474,9 @@ def run_experiment(
                     generator=job["model"],
                     broker=adapter,
                     record_vote=record_vote,
-                    protocol=spec.raw.get("claim_protocol", "collection.fresh-claims.v1"),
+                    protocol=spec.raw.get(
+                        "claim_protocol", "collection.fresh-claims.v1"
+                    ),
                 )
             packet_ref = save("judge-input", packet)
             claim = judge.claim_verdict(packet)
@@ -465,6 +502,9 @@ def run_experiment(
                 "events": journal.hashes,
                 "claim_votes": vote_refs,
             }
+            if live:
+                manifest["tariff_sha256"] = _hash(tariff)
+                manifest["fixed_quote_microusd"] = fixed_quote
             manifest_ref = save("manifest", manifest)
             complete = all(
                 packet["checks"].get(k) is True

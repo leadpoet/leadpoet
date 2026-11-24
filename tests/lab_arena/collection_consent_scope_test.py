@@ -20,7 +20,7 @@ def test_correction_registration_requires_exact_published_pilot_text(monkeypatch
     digest = contracts.hash_bytes(CORRECTION_TERMS.encode())
     monkeypatch.setenv("LAB_ARENA_CORRECTION_TERMS_SHA256", digest)
     assert intake.terms("pilot", CORRECTION_SCOPE)["terms_sha256"] == digest
-    with pytest.raises(intake.IntakeError, match="scope"):
+    with pytest.raises(intake.IntakeError, match="terms_unavailable"):
         intake.terms("live", CORRECTION_SCOPE)
     signed, creds = registration("A", "pilot")
     signed["body"]["task_scope"] = CORRECTION_SCOPE

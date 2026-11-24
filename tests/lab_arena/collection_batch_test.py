@@ -348,12 +348,17 @@ def test_exhausted_noncontrol_slot_does_not_erase_successes_but_failed_control_h
         review.verify_review(b, signed, public)
 
 @pytest.mark.parametrize("pilot", ["open-panel"], indirect=True)
-def test_signed_live_panel_price_compilation_requires_separate_economic_approval(pilot):
+@pytest.mark.parametrize("blind_only", [False, True])
+def test_signed_live_panel_price_compilation_requires_separate_economic_approval(pilot, blind_only):
     _, db, objects, bundle, _, _ = pilot
     reviewer, review_key = keys()
     operator, operator_key = keys()
-    receipt = review.sign_review(bundle, complete_marks(bundle), "blind-reviewer", reviewer)
-    assert receipt["report"]["holds"] == ["judge_qualification"]
+    if blind_only:
+        _, jobs = review.prepare_review(bundle, for_qualification=True)
+        receipt = review.sign_blind_review(jobs, complete_marks(bundle), judge.digest(bundle), "blind-reviewer", reviewer)
+    else:
+        receipt = review.sign_review(bundle, complete_marks(bundle), "blind-reviewer", reviewer)
+        assert receipt["report"]["holds"] == ["judge_qualification"]
     only_corrections = review.approve_qualification(bundle, receipt, review_key, "team-owner", operator)
     with pytest.raises(ValueError, match="excludes compensated"):
         compile_pilot(db, bundle, receipt, review_key, objects, approval=only_corrections, approver_key=operator_key)

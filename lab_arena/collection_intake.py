@@ -52,51 +52,39 @@ SCOPE = {
     op: "lab_arena.collection." + op + ".v1"
     for op in ("register", "revoke", "statement")
 }
-TERMS = (
-    "I authorize Leadpoet to spend on my OpenRouter key for centrally assigned simulated sales workflows "
-    "within the rolling 24-hour limit I sign below. I will keep input/output logging, product-use sharing "
-    "and external trace broadcast disabled for this key. The scenarios use invented data and local tools. "
-    "My enrollment does not authorize live web research, third-party enrichment or Deepline charges. "
-    "Leadpoet funds verification and ranking. The read-only management key is used only to verify the runtime key. "
-    "Revocation stops new calls. Already dispatched calls can still be billed. I will keep private run data confidential. "
-    "Pilot jobs incur real provider charges and earn no on-chain reward. Authentic completed live jobs earn the "
-    "assigned fixed run quote under the epoch settlement rules; spending more does not increase "
-    "the quote. If total quotes exceed available epoch emissions, payouts scale proportionally. Unpaid amounts do not carry forward."
-)
-TERMS_HASH = contracts.hash_bytes(TERMS.encode())
 CORRECTION_SCOPE = "synthetic_corrections"
-# The released text is the canonical offer. An operator can explicitly close a
-# scope or pin a specific revision. Each miner signs a scope- and mode-bound digest.
-_CORRECTION_AUTHORIZATION = (
+# Keep historical consent identifiable without upgrading its permissions.
+LEGACY_COMPARISON_TERMS_HASH = "sha256:df00d01897792eca6eb2aa88eab4a16dcba253ef3c8998581a124dead92686ca"
+LEGACY_CORRECTION_TERMS_HASHES = {
+    "pilot": "sha256:41588b51710c8218e5dce56ef12386709e4ebd2409ca76fe4427251425cc6119",
+    "live": "sha256:88d5b6886024e7aa5960c3d76586e2831d96650c071a348b145d19a7e155ba6c",
+}
+
+SYNTHETIC_TRAINING_TERMS = (
     "I authorize Leadpoet to charge my dedicated OpenRouter key up to my signed rolling 24-hour limit "
-    "for operator-assigned experiments on synthetic sales tasks. Experiments may repeat tasks or continue "
-    "an earlier model's run from a saved state. Failed or partial attempts can incur charges. "
+    "for the synthetic sales tasks, scope and payment mode in this enrollment. The subnet assigns the "
+    "agent and model. Tasks may include model comparisons, repeat runs or continuations from a saved state. "
+    "Failed and partial attempts can incur charges. Pilot work pays no emissions. In live mode an authentic "
+    "completed assignment earns its approved fixed quote, regardless of spend or model performance. "
+    "If quotes exceed the epoch's available emissions, each quote is scaled proportionally. Unpaid "
+    "differences do not carry forward. Leadpoet pays for private verification. "
+    "Leadpoet may record messages, original reasoning exposed by the provider, tools, results, evidence, "
+    "task states, costs, checks and outcomes from successful, failed and partial runs. I assign to Leadpoet "
+    "any rights I hold in those outputs. Where assignment is unavailable, I grant Leadpoet a perpetual, "
+    "worldwide, royalty-free, transferable and sublicensable license to store, evaluate, train on, publish "
+    "and license them, including as complete trajectories or chosen/rejected pairs. Other rights holders' "
+    "licenses and privacy protections still apply. I will keep private run data confidential, keep no "
+    "copies beyond my funding statements, and disable input/output logging, sharing and external trace "
+    "broadcast on the enrolled key. The management key is used only to verify the runtime key. I may "
+    "revoke access at any time. Revocation blocks new calls. Already dispatched calls may still be billed. "
+    "This authorization covers only synthetic tasks using OpenRouter and local tools. Live research, hosted "
+    "search and Deepline charges require separate authorization. Changing mode or scope requires a new signature."
 )
-_CORRECTION_RIGHTS = (
-    "Leadpoet may record the original reasoning that the provider exposes, messages, tool calls and results, "
-    "task states, scores, labels, costs and outcomes, including mistakes and corrections. "
-    "I assign to Leadpoet any rights I hold in those outputs. To the extent assignment is unavailable, "
-    "I grant Leadpoet a perpetual, worldwide, royalty-free, transferable and sublicensable license "
-    "to store, evaluate, train on, publish and license them. This covers only rights I can grant. "
-    "Other rights holders' licenses and privacy protections still apply. "
-    "I will keep private run data confidential, keep no copies beyond my funding statements, and disable "
-    "input/output logging, sharing and external trace broadcast on the enrolled key. "
-    "The management key is used only to verify the runtime key. I may revoke access at any time. "
-    "Revocation blocks new calls; already dispatched calls may still be billed. "
-    "This authorization covers only synthetic tasks on OpenRouter. "
-)
-CORRECTION_TERMS = (
-    _CORRECTION_AUTHORIZATION + "The pilot pays no emissions. Leadpoet pays for private verification. "
-    + _CORRECTION_RIGHTS + "Live research, hosted search, Deepline charges and compensated work require separate signed authorization."
-)
-LIVE_CORRECTION_TERMS = (
-    _CORRECTION_AUTHORIZATION + "This is a compensated assignment. Each authentic completed run earns its approved fixed quote "
-    "for the measured experiment class. The quote is set before the run and is independent of how "
-    "much I spend or how well the model performs. If total quotes exceed the epoch's available "
-    "emissions, each quote is scaled proportionally. Unpaid differences do not carry forward. "
-    "An incomplete run may cost credits without earning a quote. Leadpoet pays for private verification. "
-    + _CORRECTION_RIGHTS + "Live research, hosted search, and Deepline charges require separate signed authorization."
-)
+SYNTHETIC_TRAINING_TERMS_HASH = contracts.hash_bytes(SYNTHETIC_TRAINING_TERMS.encode())
+# These public names are used by existing miners and configuration tooling.
+TERMS = CORRECTION_TERMS = LIVE_CORRECTION_TERMS = SYNTHETIC_TRAINING_TERMS
+TERMS_HASH = SYNTHETIC_TRAINING_TERMS_HASH
+
 
 LABEL = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 SHA = re.compile(r"sha256:[0-9a-f]{64}")
@@ -167,26 +155,31 @@ def mode_from_environment():
 def correction_terms_hash(mode="pilot"):
     if mode not in ("pilot", "live"):
         raise IntakeError("collection_scope_unavailable", 422)
-    text = CORRECTION_TERMS if mode == "pilot" else LIVE_CORRECTION_TERMS
     setting = "LAB_ARENA_CORRECTION_TERMS_SHA256" if mode == "pilot" else "LAB_ARENA_LIVE_CORRECTION_TERMS_SHA256"
-    digest = contracts.hash_bytes(text.encode())
+    digest = SYNTHETIC_TRAINING_TERMS_HASH
     if os.getenv(setting, digest) != digest:
         raise IntakeError("collection_correction_terms_unavailable", 503)
     return digest
 
 
+def require_correction_grant(mode, digest):
+    """Keep signed legacy work valid within its original mode and task scope."""
+    current = correction_terms_hash(mode)
+    if digest not in (current, LEGACY_CORRECTION_TERMS_HASHES[mode]):
+        raise IntakeError("collection_correction_terms_changed")
+    return digest
+
+
 def terms(mode, task_scope=TASK_SCOPE):
-    if task_scope == TASK_SCOPE:
-        text, digest = TERMS, TERMS_HASH
-    elif task_scope == CORRECTION_SCOPE and mode in ("pilot", "live"):
-        text, digest = (CORRECTION_TERMS if mode == "pilot" else LIVE_CORRECTION_TERMS), correction_terms_hash(mode)
-    else:
+    if task_scope not in (TASK_SCOPE, CORRECTION_SCOPE) or mode not in ("pilot", "live"):
         raise IntakeError("collection_scope_unavailable", 422)
+    if task_scope == CORRECTION_SCOPE:
+        correction_terms_hash(mode)
     return {
         "mode": mode,
         "task_scope": task_scope,
-        "terms": text,
-        "terms_sha256": digest,
+        "terms": SYNTHETIC_TRAINING_TERMS,
+        "terms_sha256": SYNTHETIC_TRAINING_TERMS_HASH,
         "network": "finney",
         "netuid": 71,
     }
@@ -221,6 +214,7 @@ def _uuid(value):
 
 
 def register_signatures():
+    store.FUNCTION_SIGNATURES.setdefault("collection_training_consents_v1", (("p_batch", "text"),))
     store.FUNCTION_SIGNATURES.setdefault("collection_open_correction_quotes_v1", ())
     store.FUNCTION_SIGNATURES.setdefault("collection_correction_tariff_v1", (("p_batch", "text"),))
     store.FUNCTION_SIGNATURES.setdefault("collection_experiment_costs_v1", (("p_batch", "text"),))
@@ -315,9 +309,12 @@ class CollectionIntake:
         prices_microusd,
         budgets_microusd,
         *,
+        terms_hash=TERMS_HASH,
         job_id=None,
         lease_token=None,
     ):
+        if terms_hash not in (LEGACY_COMPARISON_TERMS_HASH, SYNTHETIC_TRAINING_TERMS_HASH):
+            raise IntakeError("collection_terms_changed")
         if not isinstance(batch_id, str) or not LABEL.fullmatch(batch_id):
             raise IntakeError("collection_batch_invalid")
         if not isinstance(harness_commit, str) or not re.fullmatch(
@@ -360,7 +357,7 @@ class CollectionIntake:
             models=list(MODELS),
             prices=dict(prices_microusd),
             budgets=dict(budgets_microusd),
-            terms_hash=TERMS_HASH,
+            terms_hash=terms_hash,
         )
         return dict(job, lease_token=token) if job else None
 
@@ -368,12 +365,10 @@ class CollectionIntake:
         """Claim exactly one frozen slot under its own mode and signed consent."""
         if self.mode != experiment.raw["mode"] or not re.fullmatch(r"xp-[0-9a-f]{64}", experiment.batch_id):
             raise IntakeError("collection_correction_pilot_required")
-        terms_hash = correction_terms_hash(self.mode)
+        terms_hash = require_correction_grant(self.mode, experiment.raw["terms_sha256"])
         _micros(fixed_quote, 0 if self.mode == "pilot" else 1)
         if self.mode == "pilot" and fixed_quote:
             raise IntakeError("pilot_quote_must_be_zero")
-        if experiment.raw["terms_sha256"] != terms_hash:
-            raise IntakeError("collection_correction_terms_changed")
         if not re.fullmatch("[0-9a-f]{40}", harness_commit):
             raise IntakeError("collection_harness_unpinned")
         token = store.new_lease_token()

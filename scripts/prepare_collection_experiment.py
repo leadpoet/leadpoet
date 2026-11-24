@@ -1,4 +1,4 @@
-"""Prepare a private one-source correction canary without making provider calls."""
+"""Prepare a synthetic experiment from a frozen task or an authenticated student checkpoint."""
 
 import argparse
 import base64
@@ -37,6 +37,12 @@ def main(argv=None):
         "prepare-gateway",
         help="Verify a private gateway student and its original owner-funded provider charges",
     )
+    expert = sub.add_parser("prepare-expert", help="Run approved models from the initial state of each frozen task")
+    expert.add_argument("--scenario-id", action="append", required=True)
+    expert.add_argument("--model", action="append", choices=tuple(GENERATOR_ROUTES), required=True)
+    for action in (prepare, gateway):
+        action.add_argument("--producer-run-id", required=True)
+        action.add_argument("--model", choices=tuple(GENERATOR_ROUTES), required=True)
     for name in ("source", "private-key"):
         prepare.add_argument("--" + name, type=Path, required=True)
     for name in ("producer", "student-revision"):
@@ -45,18 +51,17 @@ def main(argv=None):
     gateway.add_argument("--environment-file", type=Path)
     for name in ("champion-repo", "poet-repo"):
         gateway.add_argument("--" + name, type=Path, required=True)
-    for action in (prepare, gateway):
+    for action in (prepare, gateway, expert):
         for name in ("split", "output"):
             action.add_argument("--" + name, type=Path, required=True)
         for name in (
             "experiment-id",
-            "producer-run-id",
             "question",
             "pass-mark",
             "terms-sha256",
         ):
             action.add_argument("--" + name, required=True)
-        action.add_argument("--model", choices=tuple(GENERATOR_ROUTES), required=True)
+        action.add_argument("--max-slots", type=int, default=12)
         action.add_argument("--cap-microusd", type=int, required=True)
         action.add_argument("--max-steps", type=int, required=True)
         action.add_argument(
@@ -93,12 +98,14 @@ def main(argv=None):
             raise ValueError("expected unsigned Poet evaluation")
         write_new(args.output, sign(result, args.private_key))
         return 0
-    if not NAME.fullmatch(args.producer_run_id) or not SHA.fullmatch(args.terms_sha256):
+    full_task = args.action == "prepare-expert"
+    if (not full_task and not NAME.fullmatch(args.producer_run_id)) or not SHA.fullmatch(args.terms_sha256):
         raise ValueError("invalid source run or terms digest")
     if args.output.exists():
         raise FileExistsError(args.output)
     split = json.loads(read_file(args.split))
     split_id = _hash(split)
+    src = attestation = src_id = None
     if args.action == "prepare-gateway":
         from contextlib import closing
         from lab_arena.broker import HttpxProviderTransport
@@ -132,7 +139,7 @@ def main(argv=None):
                 owner_key=os.environ["LAB_ARENA_OPENROUTER_API_KEY"],
             )
         src_id = _hash(src)
-    else:
+    elif args.action == "prepare":
         if not NAME.fullmatch(args.producer):
             raise ValueError("invalid external producer")
         import re
@@ -167,6 +174,14 @@ def main(argv=None):
             },
             args.private_key,
         )
+    if full_task:
+        models = args.model
+        if len(set(models)) != len(models):
+            raise ValueError("use the repeat setting for repeated runs of one model")
+        cases = [{"scenario_id": sid} for sid in args.scenario_id]
+    else:
+        models = [args.model]
+        cases = [{"scenario_id": src["scenario_id"], "source_sha256": src_id}]
     raw = {
         "schema": SCHEMA,
         "mode": "pilot",
@@ -177,14 +192,14 @@ def main(argv=None):
         "pass_mark": args.pass_mark,
         "terms_sha256": args.terms_sha256,
         "split_sha256": split_id,
-        "provenance_sha256": _hash(attestation),
-        "budget_microusd": args.cap_microusd * args.repeat,
-        "cases": [{"scenario_id": src["scenario_id"], "source_sha256": src_id}],
+        "max_slots": args.max_slots,
+        "budget_microusd": args.cap_microusd * args.repeat * len(cases) * len(models),
+        "cases": cases,
         "arms": [
             {
-                "id": "correction",
-                "model": args.model,
-                "role": "continuation",
+                "id": f"expert-{i}" if full_task else "correction",
+                "model": model,
+                "role": "expert" if full_task else "continuation",
                 "repeats": args.repeat,
                 "reasoning_effort": "low",
                 "capture_reasoning": True,
@@ -192,9 +207,11 @@ def main(argv=None):
                 "max_steps": args.max_steps,
                 "max_tokens": args.max_generated_tokens,
                 "max_run_tokens": args.max_run_tokens,
-            }
+            } for i, model in enumerate(models, start=1)
         ],
     }
+    if attestation is not None:
+        raw["provenance_sha256"] = _hash(attestation)
     if args.min_pricing_runs is not None:
         raw["min_pricing_runs"] = args.min_pricing_runs
     load_experiment(
@@ -207,7 +224,7 @@ def main(argv=None):
         inputs = root / "correction-inputs"
         inputs.mkdir(mode=0o700, parents=True)
         root.chmod(0o700)
-        for val in (src, split, attestation):
+        for val in ([split] if full_task else [src, split, attestation]):
             write_new(inputs / (judge.digest(val) + ".json"), val)
         write_new(root / "correction-batch.json", raw)
         os.rename(root, args.output)
@@ -215,7 +232,7 @@ def main(argv=None):
         json.dumps(
             {
                 "source_digest": src_id,
-                "slots": args.repeat,
+                "slots": len(models) * len(cases) * args.repeat,
                 "maximum_microusd": raw["budget_microusd"],
             }
         )

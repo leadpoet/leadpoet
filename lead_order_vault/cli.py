@@ -23,6 +23,8 @@ from typing import Callable, Mapping, Optional
 from . import envelope as env
 from . import trust
 
+BASE_RPC = "https://mainnet.base.org"
+
 
 def seal_key(*, provider: str, hotkey: str, identity: Mapping, read_secret: Callable[[str], str]) -> Mapping:
     vault_key = identity["encryption"]["public_key"]

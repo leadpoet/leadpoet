@@ -1276,3 +1276,14 @@ python3 -m py_compile lab_arena/*.py scripts/lab_arena_*.py scripts/run_lab_aren
 
 Never place provider keys, database tokens, registry passwords, or signing-key
 material in source, test fixtures, command output, or public results.
+
+### Delayed prior champion decision
+
+New live, rewarded baseline-first rounds using full-thinking capture advertise `dispatch_window_policy=late_predecessor_v1`.
+If the prior day's publication or promotion leaves less than one baseline execution
+budget before stage one closes, stage one opens with its full planned window.
+The original intervals between execution, judging and publication deadlines move
+together. The original intake cutoff and ICP bank date still apply. The database
+records both schedules in the operational history in the same transaction that
+creates the baseline assignments. Install migration 735 before enabling this
+service release.

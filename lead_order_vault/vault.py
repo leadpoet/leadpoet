@@ -127,11 +127,6 @@ def canonical(document: Mapping) -> bytes:
     return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
 
 
-def _compressed_hex(key: ec.EllipticCurvePrivateKey) -> str:
-    return key.public_key().public_bytes(
-        serialization.Encoding.X962, serialization.PublicFormat.CompressedPoint).hex()
-
-
 def https_upstream(method: str, host: str, target: str, headers: Mapping[str, str], body: bytes,
                    timeout: float, max_bytes: int) -> UpstreamResponse:
     """One HTTPS/1.1 request to port 443, certificate checked, no redirects."""
@@ -169,8 +164,8 @@ class Vault:
         self._clock = clock
         self.boot_id = str(uuid.uuid4())
         self.booted_at = int(clock())
-        self.encryption_public_key = _compressed_hex(encryption_key)
-        self.receipts_public_key = _compressed_hex(receipts_key)
+        self.encryption_public_key = env.compressed(encryption_key.public_key()).hex()
+        self.receipts_public_key = env.compressed(receipts_key.public_key()).hex()
         self._identity = dict(identity, schema="leadpoet.lead_order_vault.identity.v1",
                               boot_id=self.boot_id, booted_at=self.booted_at)
         if tls_spki_sha256 is not None:
@@ -580,7 +575,7 @@ class Dstack:
     def key(self, domain: str) -> Tuple[ec.EllipticCurvePrivateKey, Mapping]:
         reply = self._post("GetKey", {"domain": domain, "algorithm": KEY_ALGORITHM})
         private_key = ec.derive_private_key(int(reply["key"], 16), ec.SECP256K1())
-        public_key = _compressed_hex(private_key)
+        public_key = env.compressed(private_key.public_key()).hex()
         if reply.get("public_key", public_key).lower() != public_key:
             raise RuntimeError("dstack returned a public key that does not match its private key")
         return private_key, {"domain": domain, "algorithm": KEY_ALGORITHM, "public_key": public_key,

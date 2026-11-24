@@ -84,7 +84,7 @@ def _aes_key(shared: bytes, ephemeral: bytes, vault_key: bytes) -> bytes:
                 info=_HKDF_INFO + ephemeral + vault_key).derive(shared)
 
 
-def _compressed(public_key: ec.EllipticCurvePublicKey) -> bytes:
+def compressed(public_key: ec.EllipticCurvePublicKey) -> bytes:
     return public_key.public_bytes(serialization.Encoding.X962, serialization.PublicFormat.CompressedPoint)
 
 
@@ -98,7 +98,7 @@ def seal(secret: str, header: Header) -> str:
     vault_key = bytes.fromhex(header.vault_key)
     vault = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256K1(), vault_key)
     ephemeral_private = ec.generate_private_key(ec.SECP256K1())
-    ephemeral = _compressed(ephemeral_private.public_key())
+    ephemeral = compressed(ephemeral_private.public_key())
     key = _aes_key(ephemeral_private.exchange(ec.ECDH(), vault), ephemeral, vault_key)
     nonce = os.urandom(12)
     ciphertext = AESGCM(key).encrypt(nonce, plaintext, _aad(header))
@@ -137,7 +137,7 @@ def open_envelope(envelope: str, private_key: ec.EllipticCurvePrivateKey) -> Tup
     """Decrypt inside the vault. Refuses an envelope sealed to another key."""
 
     header, document = read_header(envelope)
-    own = _compressed(private_key.public_key())
+    own = compressed(private_key.public_key())
     if header.vault_key != own.hex():
         raise EnvelopeError("sealed_to_another_vault")
     try:

@@ -10,7 +10,7 @@ import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, utils
 
-from lead_order_vault import chain, cli
+from lead_order_vault import chain, cli, trust
 from lead_order_vault import envelope as env
 from lead_order_vault.vault import (
     ENCRYPTION_DOMAIN, RECEIPTS_DOMAIN, UpstreamError, UpstreamResponse, Vault, VaultError, canonical,
@@ -160,7 +160,7 @@ def _identity(**changes):
 
 
 def test_cli_accepts_keys_the_kms_issued_to_our_app():
-    assert cli.verified_identity(DEPLOYMENT, _identity())["encryption"]["public_key"] == VAULT_KEY
+    assert trust.verified_identity(DEPLOYMENT, _identity())["encryption"]["public_key"] == VAULT_KEY
 
 
 @pytest.mark.parametrize("changes,message", [
@@ -169,8 +169,8 @@ def test_cli_accepts_keys_the_kms_issued_to_our_app():
 ])
 def test_cli_refuses_a_wrong_identity(changes, message):
     identity = _identity(**changes)
-    with pytest.raises(cli.CliError, match=message):
-        cli.verified_identity(DEPLOYMENT, identity)
+    with pytest.raises(trust.TrustError, match=message):
+        trust.verified_identity(DEPLOYMENT, identity)
 
 
 @pytest.mark.parametrize("issued", [
@@ -181,16 +181,16 @@ def test_cli_refuses_a_wrong_identity(changes, message):
 ])
 def test_cli_refuses_a_key_the_kms_did_not_issue_to_our_app(issued):
     key = dict(issued(), domain=ENCRYPTION_DOMAIN)
-    with pytest.raises(cli.CliError, match="does not chain"):
-        cli.verified_identity(DEPLOYMENT, _identity(encryption=key))
+    with pytest.raises(trust.TrustError, match="does not chain"):
+        trust.verified_identity(DEPLOYMENT, _identity(encryption=key))
 
 
 def test_cli_refuses_until_deployed(tmp_path):
     path = tmp_path / "deployment.json"
     path.write_text(json.dumps(dict(DEPLOYMENT, url=None)))
-    with pytest.raises(cli.CliError, match="not deployed"):
-        cli.load_deployment(path)
-    assert json.loads(cli.DEPLOYMENT_FILE.read_text())["url"] is None
+    with pytest.raises(trust.TrustError, match="not deployed"):
+        trust.load_deployment(path)
+    assert json.loads(trust.DEPLOYMENT_FILE.read_text())["url"] is None
 
 
 def test_cli_seals_both_openrouter_keys_to_the_verified_vault():
@@ -512,9 +512,9 @@ def test_the_cli_trusts_only_a_tls_session_the_vault_ends_itself():
     vault, tls = _tls_vault()
     server, spki, deployment = _tls_server(vault.identity, tls)
     try:
-        identity, certificate = cli.connect(deployment)
+        identity, certificate = trust.connect(deployment)
         assert identity["tls"]["document"]["spki_sha256"] == spki
-        context = cli.pinned_context(certificate)
+        context = trust.tls_context(certificate)
         with urllib.request.urlopen(deployment["url"] + "/v1/identity", context=context) as response:
             assert json.loads(response.read())["boot_id"] == vault.boot_id
         # After a restart the vault has a new TLS key: the old pin fails closed.
@@ -535,8 +535,8 @@ def test_a_gateway_that_ends_tls_itself_is_refused():
     # The gateway relays the vault's real, KMS-signed identity over its own TLS key.
     gateway, _, deployment = _tls_server(vault.identity)
     try:
-        with pytest.raises(cli.CliError, match="does not end in the vault"):
-            cli.connect(deployment)
+        with pytest.raises(trust.TrustError, match="does not end in the vault"):
+            trust.connect(deployment)
     finally:
         gateway.shutdown()
         gateway.server_close()
@@ -555,8 +555,8 @@ def test_a_gateway_cannot_rebind_the_tls_key_without_the_receipts_key():
 
     gateway, _, deployment = _tls_server(forged, (context, spki))
     try:
-        with pytest.raises(cli.CliError, match="not signed by its receipts key"):
-            cli.connect(deployment)
+        with pytest.raises(trust.TrustError, match="not signed by the vault.s receipts key"):
+            trust.connect(deployment)
     finally:
         gateway.shutdown()
         gateway.server_close()

@@ -53,7 +53,8 @@ Each forwarded call returns a receipt signed by the vault's receipts key. It
 carries the boot id, the key fingerprint, the miner hotkey, host and path,
 SHA-256 of the target, headers and bodies, and a per-key sequence number.
 A miner checks the sequence numbers in the receipts Leadpoet reports: a gap
-is a call Leadpoet did not report. Check receipts against the receipts key
+is a call Leadpoet did not report, or one of the rarer cases under Known
+limits. Check receipts against the receipts key
 from `cli verify`, never against the `public_key` a receipt carries.
 
 ## Who you are trusting
@@ -65,6 +66,7 @@ trust point. Approvals are public on Base, but Phala has no timelock.
 ## Miner steps
 
 ```bash
+pip install cryptography pycryptodome
 python -m lead_order_vault.cli verify
 python -m lead_order_vault.cli seal --provider openrouter --hotkey <your hotkey>
 ```
@@ -74,6 +76,8 @@ Both commands refuse until the vault is deployed.
 
 ## Known limits
 
+- A vault fault after a call is numbered, before its receipt is signed,
+  also leaves a gap.
 - Sequence numbers restart with the vault. A hidden call just before a
   restart, or after a key's last reported call, leaves no gap.
 - If Phala rotates its KMS root, miners must seal their keys again.

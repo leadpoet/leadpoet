@@ -214,7 +214,7 @@ def test_call_swaps_the_envelope_for_the_key_and_signs_a_receipt():
     assert result["status"] == 200 and base64.b64decode(result["body_b64"]) == b'{"ok":true}'
     receipt = _check_receipt(result["receipt"])
     assert receipt["key_fingerprint"] == env.fingerprint("openrouter", OPENROUTER_KEY)
-    assert receipt["miner_hotkey"] == HOTKEY and receipt["sequence"] == 1 and receipt["key_sequence"] == 1
+    assert receipt["miner_hotkey"] == HOTKEY and "sequence" not in receipt and receipt["key_sequence"] == 1
     assert receipt["request_sha256"] == hashlib.sha256(b'{"model":"x"}').hexdigest()
     assert receipt["response_sha256"] == hashlib.sha256(b'{"ok":true}').hexdigest()
     assert OPENROUTER_KEY not in json.dumps(result)

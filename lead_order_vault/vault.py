@@ -161,7 +161,6 @@ class Vault:
         self._identity = dict(identity, schema="leadpoet.lead_order_vault.identity.v1",
                               boot_id=self.boot_id, booted_at=self.booted_at)
         self._lock = threading.Lock()
-        self._sequence = 0
         self._calls: Dict[str, int] = {}
 
     # -- public, unauthenticated ------------------------------------------------
@@ -220,8 +219,9 @@ class Vault:
         key_fingerprint = env.fingerprint(provider, secret)
         target = parts.path + ("?" + parts.query if parts.query else "")
         outbound = dict(headers, authorization="Bearer " + secret)
-        sequence, key_sequence, at = self._count(key_fingerprint)
-        receipt = {"schema": RECEIPT_SCHEMA, "boot_id": self.boot_id, "sequence": sequence,
+        key_sequence, at = self._count(key_fingerprint)
+        # Per key only: a global count would show each miner everyone's volume.
+        receipt = {"schema": RECEIPT_SCHEMA, "boot_id": self.boot_id,
                    "key_sequence": key_sequence, "at": at,
                    "key_fingerprint": key_fingerprint, "miner_hotkey": header.miner_hotkey, "provider": provider,
                    "method": method, "host": parts.hostname, "path": parts.path,
@@ -264,13 +264,12 @@ class Vault:
             raise VaultError("purpose_mismatch")
         return secret, header
 
-    def _count(self, key_fingerprint: str) -> Tuple[int, int, int]:
-        """Number a call: global sequence, this key's sequence, time."""
+    def _count(self, key_fingerprint: str) -> Tuple[int, int]:
+        """Number a call with this key's next sequence number and the time."""
 
         with self._lock:
-            self._sequence += 1
             self._calls[key_fingerprint] = self._calls.get(key_fingerprint, 0) + 1
-            return self._sequence, self._calls[key_fingerprint], int(self._clock())
+            return self._calls[key_fingerprint], int(self._clock())
 
     def _signed(self, document: Mapping) -> Mapping:
         signature = self._receipts_key.sign(canonical(document), ec.ECDSA(hashes.SHA256()))

@@ -485,17 +485,21 @@ def main(argv=None):
         load_scoped_environment(args.environment_file)
     if not 1 <= args.max_jobs <= 6:
         p.error("select 1 to 6 jobs per invocation")
+    baseline = json.loads(args.batch.read_text())
     if args.next_correction:
-        if (not args.pilot_only or args.max_jobs != 1 or args.preflight or args.rejudge_ready
+        if (args.max_jobs != 1 or args.preflight or args.rejudge_ready
                 or args.research_stdio or not args.experiment_inputs or args.next_correction == args.batch):
-            p.error("correction-first polling requires one unpaid job and distinct private batch files")
+            p.error("correction-first polling requires one job and distinct private batch files")
         from lab_arena import collection_intake as funding
         from lab_arena.collection_experiment import SCHEMA
         from scripts.collection_review import read_file
 
         if args.next_correction.exists():
+            base_mode = baseline.get("mode", "pilot")
+            if base_mode == "live" and args.pilot_only:
+                p.error("pilot-only polling cannot run live work")
             try:
-                approved = funding.correction_terms_hash()
+                approved = funding.correction_terms_hash(base_mode)
             except funding.IntakeError as exc:
                 if exc.code != "collection_correction_terms_unavailable":
                     raise
@@ -508,7 +512,7 @@ def main(argv=None):
 
                 try:
                     candidate = json.loads(read_file(args.next_correction))
-                    if candidate.get("schema") != SCHEMA or candidate.get("terms_sha256") != approved:
+                    if candidate.get("schema") != SCHEMA or candidate.get("mode") != base_mode or candidate.get("terms_sha256") != approved:
                         raise ValueError("staged correction differs from the approved consent")
                     if _run_options(args, p, candidate, before_claim=before_claim):
                         return 0
@@ -519,7 +523,7 @@ def main(argv=None):
                         raise
                     print(json.dumps({"status": "correction_held", "reason": type(exc).__name__}),
                           file=sys.stderr, flush=True)
-    _run_options(args, p, json.loads(args.batch.read_text()))
+    _run_options(args, p, baseline)
     return 0
 
 
@@ -572,7 +576,7 @@ def _run_options(args, p, raw, *, before_claim=None):
     if not args.champion_repo or not args.poet_repo:
         p.error("running generators requires --champion-repo and --poet-repo")
     if args.pilot_only and (
-        not policy.pilot or not policy.qualification
+        raw["mode"] != "pilot" or not policy.pilot or not policy.qualification
         or any(s.startswith("research-") for s in scenarios)
     ):
         p.error("the pilot worker requires a synthetic qualification batch")
@@ -675,7 +679,7 @@ def _run_options(args, p, raw, *, before_claim=None):
                     transport=transport, pricing=endpoint_prices(experiment.routes, models=sorted(active_models)),
                     owner_lookup=lambda hk: resolve_finalized_owner(client, hk), judge_key=judge_key,
                     max_jobs=args.max_jobs, epoch=lambda: chain.current_settlement_epoch(client, cutover),
-                    before_claim=before_claim,
+                    before_claim=before_claim, prompt=prompt,
                 )
             else:
                 completed = run_cohort(

@@ -123,17 +123,24 @@ def _pair(row, packet, student):
 
 def write_dataset(spec, database, objects, dest, *, qualification=None):
     from scripts.collection_batch import read_artifact
-    from lab_arena.collection_intake import correction_terms_hash
+    from lab_arena.collection_intake import correction_terms_hash, register_signatures
+
+    register_signatures()
 
     batch = spec.batch_id
     trained = qualification is not None
     export = CORRECTIONS if trained else AUDIT
     if trained:
-        if spec.raw["terms_sha256"] != correction_terms_hash():
+        if spec.raw["terms_sha256"] != correction_terms_hash(spec.raw["mode"]):
             raise ValueError("release requires active approved correction consent")
         # Qualification documents are reconstructed from authenticated DB + original immutable evidence.
         receipt = verified_panel(database, objects, spec, **qualification)
-    rows = database.rpc("collection_pilot_costs_v1", {"p_batch": batch})
+    costs_rpc = (
+        "collection_experiment_costs_v1"
+        if spec.raw["mode"] == "live"
+        else "collection_pilot_costs_v1"
+    )
+    rows = database.rpc(costs_rpc, {"p_batch": batch})
     if not isinstance(rows, list) or len(rows) > 2 * len(spec.slots) or not rows:
         raise ValueError("missing registered experiment runs")
     if trained and (

@@ -34,6 +34,10 @@ def db():
 
 
 def test_freeze_reviewed_fees_uses_each_actual_miner_charge_once(db):
+    exercise_ordinary_cutover(db)
+
+
+def exercise_ordinary_cutover(db, *, paid_panel=None, after_cutover=None):
     pg, dsn = db
     miner = Keypair.create_from_uri("//Calibration").ss58_address
     batch = "test-pilot"
@@ -149,6 +153,8 @@ def test_freeze_reviewed_fees_uses_each_actual_miner_charge_once(db):
             "judge_policy_sha256": "d" * 64,
             "judge_prompt_sha256": "e" * 64,
         }
+        if paid_panel is not None:
+            proof["panel_qualification_sha256"] = paid_panel
         q.execute("SAVEPOINT altered")
         for bad_anchor in (
             {"observed_at": int(time.time()) - 150},
@@ -277,6 +283,8 @@ def test_freeze_reviewed_fees_uses_each_actual_miner_charge_once(db):
         assert first["job_count"] == 1 and first["quotes_microusd"] == {miner: fee}
         assert second["job_count"] == 0
         assert not schedule.get("staged")
+        if after_cutover:
+            after_cutover(q)
         q.execute(
             "INSERT INTO public.collection_calls(job_id,request_id,provider,key_id,request_hash,reserved_microusd) "
             "VALUES (%s,'missing','deepline',%s,%s,30)",

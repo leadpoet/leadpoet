@@ -11,7 +11,7 @@ import time
 import requests
 
 from lab_arena import contracts
-from lab_arena.collection_intake import CORRECTION_SCOPE, CORRECTION_TERMS, SCOPE, TASK_SCOPE, TERMS_HASH, scope_id
+from lab_arena.collection_intake import CORRECTION_SCOPE, CORRECTION_TERMS, LIVE_CORRECTION_TERMS, SCOPE, TASK_SCOPE, TERMS_HASH, scope_id
 from lab_arena.credentials import OPENROUTER_FUNDING_FIELDS
 from lab_arena.miner_submit import (
     MinerSubmissionError,
@@ -69,7 +69,8 @@ def run(args, wallet, *, session=requests):
         task_scope = getattr(args, "task_scope", TASK_SCOPE)
         expected = TERMS_HASH
         if task_scope == CORRECTION_SCOPE:
-            expected = contracts.hash_bytes(CORRECTION_TERMS.encode())
+            correction_text = LIVE_CORRECTION_TERMS if args.mode == "live" else CORRECTION_TERMS
+            expected = contracts.hash_bytes(correction_text.encode())
         if action == "terms" or (action == "register" and task_scope == CORRECTION_SCOPE):
             url = base + "terms" + ("?task_scope=" + CORRECTION_SCOPE if task_scope == CORRECTION_SCOPE else "")
             response = session.get(url, timeout=30, allow_redirects=False)
@@ -78,7 +79,7 @@ def run(args, wallet, *, session=requests):
                     raise MinerSubmissionError("collection_correction_terms_unavailable")
                 published = response.json()
                 if (published.get("mode") != args.mode or published.get("task_scope") != task_scope
-                        or published.get("terms_sha256") != expected or published.get("terms") != CORRECTION_TERMS):
+                        or published.get("terms_sha256") != expected or published.get("terms") != correction_text):
                     raise MinerSubmissionError("collection_terms_changed")
         if action != "terms":
             creds, body = None, {}

@@ -24,7 +24,7 @@ import httpx
 from lab_arena import broker as arena_broker
 from lab_arena.broker import ProviderResponse, ProviderTransportError
 from lead_order_vault import trust
-from lead_order_vault.vault import CALLER_HEADER, CHECK_TIMEOUT_SECONDS as _VAULT_PROBE_SECONDS
+from lead_order_vault.envelope import CALLER_HEADER, CHECK_TIMEOUT_SECONDS as _VAULT_PROBE_SECONDS, HOSTS
 
 # Time for the vault itself on top of the provider's own timeout.
 VAULT_OVERHEAD_SECONDS = 15.0
@@ -131,7 +131,7 @@ class VaultClient:
     def _document(response: httpx.Response) -> Dict[str, Any]:
         try:
             document = response.json()
-        except ValueError:
+        except (ValueError, RecursionError):
             document = None
         if response.status_code != 200 or not isinstance(document, dict):
             code = document.get("error") if isinstance(document, dict) else None
@@ -182,7 +182,7 @@ class VaultTransport:
             # Request ids from headers that arrived before the failure, as the
             # direct transport reports them, so the cost can be read back.
             seen = _headers(result.get("observed_headers"))
-            deepline = urlsplit(url).hostname == "code.deepline.com"
+            deepline = HOSTS.get(urlsplit(url).hostname or "") == "deepline"
             raise VaultTransportError(
                 "provider_unreachable", forwarded=True, vault_receipt=receipt,
                 observed_status=observed if isinstance(observed, int) else None,

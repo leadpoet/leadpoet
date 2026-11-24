@@ -24,8 +24,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from . import chain
-from .envelope import canonical
-from .vault import ENCRYPTION_DOMAIN, KEY_ALGORITHM, RECEIPTS_DOMAIN, TLS_SCHEMA, spki_sha256
+from .envelope import (ENCRYPTION_DOMAIN, IDENTITY_SCHEMA, KEY_ALGORITHM, RECEIPTS_DOMAIN, TLS_SCHEMA, canonical,
+                       spki_sha256)
 
 DEPLOYMENT_FILE = Path(__file__).with_name("deployment.json")
 _DEPLOYMENT_FIELDS = ("url", "app_id", "kms_root_public_key", "kms_contract", "chain")
@@ -84,6 +84,8 @@ def connect(deployment: Mapping) -> Tuple[Mapping, str]:
         identity = json.loads(response.read(65536))
     except http.client.HTTPException:
         raise TrustError("The vault's identity answer is not HTTP.") from None
+    except (ValueError, RecursionError):
+        raise TrustError("The vault's identity is not JSON.") from None
     finally:
         connection.close()
     identity = verified_identity(deployment, identity)
@@ -96,8 +98,8 @@ def connect(deployment: Mapping) -> Tuple[Mapping, str]:
 def verified_identity(deployment: Mapping, identity: Any) -> Mapping:
     """Return the identity only if both vault keys chain to the KMS root for our app."""
 
-    if not isinstance(identity, Mapping):
-        raise TrustError("The vault's identity is not an object.")
+    if not isinstance(identity, Mapping) or identity.get("schema") != IDENTITY_SCHEMA:
+        raise TrustError("The vault's identity is not an identity document.")
     app_id = str(deployment["app_id"]).lower().removeprefix("0x")
     if str(identity.get("app_id", "")).lower().removeprefix("0x") != app_id:
         raise TrustError("The vault reports a different app id than deployment.json.")

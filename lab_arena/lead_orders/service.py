@@ -610,8 +610,9 @@ class LeadOrderService:
                    or bool(self._store.buyer(hotkey).get("confirmed")))
         if not allowed:
             raise LeadOrderServiceError(403, "suppressions_not_allowed")
-        rows = self._store.suppressions(since=_since(since), limit=suppressions.PAGE_SIZE)
-        return {"suppressions": rows, "next_since": rows[-1]["sequence"] if rows else _since(since),
+        since = _since(since)
+        rows = self._store.suppressions(since=since, limit=suppressions.PAGE_SIZE)
+        return {"suppressions": rows, "next_since": rows[-1]["sequence"] if rows else since,
                 "more": len(rows) == suppressions.PAGE_SIZE}
 
     def statement(self, hotkey: str, since: Any) -> Dict[str, Any]:
@@ -632,10 +633,13 @@ class LeadOrderService:
 
         if hotkey in self.config.blocked_hotkeys:
             raise LeadOrderServiceError(403, "hotkey_not_allowed")
-        page = self._store.vault_receipts(hotkey, since=_since(since), limit=STATEMENT_PAGE_SIZE)
+        since = _since(since)
+        page = self._store.vault_receipts(hotkey, since=since, limit=STATEMENT_PAGE_SIZE)
+        receipts = list(page.get("receipts") or [])
         keys = [{"key_id": row["key_id"], "provider": row["provider"], "key_fingerprint": row["key_fingerprint"],
                  "sealed_to": lead_keys.sealed_to(row.get("envelope"))} for row in page.get("keys") or []]
-        return {"receipts": list(page.get("receipts") or []), "keys": keys}
+        return {"receipts": receipts, "keys": keys, "next_since": receipts[-1]["sequence"] if receipts else since,
+                "more": len(receipts) == STATEMENT_PAGE_SIZE}
 
     # -- public -------------------------------------------------------------
     def public_policy(self, version: Any) -> Dict[str, Any]:

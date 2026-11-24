@@ -60,6 +60,7 @@ BEGIN
   FROM public.lead_order_calls c JOIN public.lead_order_keys k ON k.key_id=c.key_id WHERE c.call_id=p_call_id;
  IF hotkey IS NULL OR p_kind IS NULL OR p_kind NOT IN ('call','readback') OR jsonb_typeof(doc) IS DISTINCT FROM 'object'
   OR doc->>'miner_hotkey' IS DISTINCT FROM hotkey OR doc->>'key_fingerprint' IS DISTINCT FROM fingerprint
+  -- A readback is the one GET route the vault allows (vault.OPENROUTER_ROUTES).
   OR ((doc->>'method')='GET' AND (doc->>'path')='/api/v1/generation') IS DISTINCT FROM (p_kind='readback')
   OR length(coalesce(doc->>'boot_id','')) NOT BETWEEN 1 AND 128
   OR jsonb_typeof(doc->'key_sequence') IS DISTINCT FROM 'number' OR doc->>'key_sequence' !~ '^[1-9][0-9]{0,17}$'

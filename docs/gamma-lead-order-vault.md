@@ -104,6 +104,8 @@ key. Compare it with what Leadpoet reports now and then.
   a restart or after a key's last reported call. The provider's usage log
   catches it.
 - If Phala rotates its KMS root, miners must seal their keys again.
+- `cli` reads only epoch-0 approvals. If the app's owner advances the app's
+  epoch on Base, every command refuses until `cli` learns epochs.
 - One instance, no high availability. Anyone can open connections to it,
   and Phala's passthrough gives no per-address limit, so a flood of
   connections can keep it busy. Orders on miner keys fail while it lasts.

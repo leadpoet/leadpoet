@@ -205,7 +205,7 @@ def test_trust_refuses_until_deployed(tmp_path):
 COMPOSE_HASH = "cc" * 32
 
 
-def _base(monkeypatch, *, root=None, registered=True, approved=True, chain_id=8453):
+def _base(monkeypatch, *, root=None, registered=True, approved=True, chain_id=8453, epoch=None):
     """A fake Base RPC that answers what the KMS and app contracts would."""
 
     root = root if root is not None else bytes.fromhex(DEPLOYMENT["kms_root_public_key"])
@@ -217,17 +217,24 @@ def _base(monkeypatch, *, root=None, registered=True, approved=True, chain_id=84
                (DEPLOYMENT["kms_contract"], selector("registeredApps(address)") + "00" * 12 + APP_ID.hex()): word(registered),
                ("0x" + APP_ID.hex(), selector("allowedComposeHashes(bytes32)") + COMPOSE_HASH): word(approved),
                ("0x" + APP_ID.hex(), selector("owner()")): "0x" + "00" * 12 + "99" * 20}
+    if epoch is not None:  # a KMS from before app epochs has no currentAppEpoch
+        answers[(DEPLOYMENT["kms_contract"], selector("currentAppEpoch(address)") + "00" * 12 + APP_ID.hex())] = \
+            "0x" + epoch.to_bytes(32, "big").hex()
 
     def rpc(url, method, params):
         if method == "eth_chainId":
             return hex(chain_id)
-        return answers.get((params[0]["to"], params[0]["data"]), "0x")
+        answer = answers.get((params[0]["to"], params[0]["data"]))
+        if answer is None:
+            raise chain.ChainError("rpc_error")  # what _rpc raises when a call reverts
+        return answer
 
     monkeypatch.setattr(chain, "_rpc", rpc)
 
 
-def test_trust_reads_base_itself(monkeypatch):
-    _base(monkeypatch)
+@pytest.mark.parametrize("epoch", [None, 0])
+def test_trust_reads_base_itself(monkeypatch, epoch):
+    _base(monkeypatch, epoch=epoch)
     assert trust.on_chain(DEPLOYMENT, _identity(compose_hash=COMPOSE_HASH), "rpc") == "0x" + "99" * 20
 
 
@@ -236,6 +243,7 @@ def test_trust_reads_base_itself(monkeypatch):
     ({"registered": False}, "app_not_registered"),
     ({"approved": False}, "compose_hash_not_approved"),  # a build the owner never approved on Base
     ({"chain_id": 1}, "wrong_chain"),
+    ({"epoch": 1}, "app_epoch_unsupported"),  # approvals no longer live in the epoch-0 list
 ])
 def test_trust_refuses_what_base_does_not_confirm(monkeypatch, changes, reason):
     _base(monkeypatch, **changes)

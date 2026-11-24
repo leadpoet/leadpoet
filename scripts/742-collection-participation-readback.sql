@@ -25,6 +25,15 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
     count(*) FILTER(WHERE j.status='running' AND j.lease_expires_at<=statement_timestamp()) expired,
     count(*) FILTER(WHERE j.status='accepted') accepted,count(*) FILTER(WHERE j.status='ready') ready
   FROM public.collection_jobs j WHERE j.netuid=71 AND j.network='finney' GROUP BY 1,2
+ ), review_candidates AS (
+  -- This is an operator handoff. Only the private source bundle can distinguish
+  -- genuine judgments and controls and verify the signed human sample.
+  SELECT b.batch_id FROM public.collection_batches b JOIN public.collection_jobs j USING(batch_id)
+  WHERE b.mode='pilot' AND b.batch_id NOT LIKE 'xp-%' AND j.network='finney' AND j.netuid=71
+  GROUP BY b.batch_id,b.scenario_ids,b.models
+  HAVING bool_and(j.status IN ('accepted','rejected','failed'))
+    AND count(DISTINCT j.slot)=jsonb_array_length(b.scenario_ids)*jsonb_array_length(b.models)
+    AND count(DISTINCT j.slot) FILTER (WHERE j.artifact_sha256 IS NOT NULL)>=100
  ), billing AS (
   SELECT j.mode,CASE WHEN j.batch_id LIKE 'xp-%' THEN 'correction' ELSE 'comparison' END arm,
     count(DISTINCT j.job_id) FILTER(WHERE r.http_status=200 AND r.cost_microusd>0) funded_runs,
@@ -37,6 +46,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
  SELECT jsonb_build_object('enrollments',coalesce((SELECT jsonb_agg(to_jsonb(r) ORDER BY mode,arm) FROM registrations r),'[]'),
   'work',coalesce((SELECT jsonb_agg(to_jsonb(work) ORDER BY mode,arm) FROM work),'[]'),
   'billing',coalesce((SELECT jsonb_agg(to_jsonb(billing) ORDER BY mode,arm) FROM billing),'[]'),
+  'completed_review_candidate_packs',(SELECT count(*) FROM review_candidates),
   'correction_quotes',(SELECT count(*) FROM public.collection_correction_tariffs),
   'staged',EXISTS(SELECT FROM public.collection_reward_launch),
   'first_epoch',(SELECT first_epoch FROM public.collection_reward_cutover))

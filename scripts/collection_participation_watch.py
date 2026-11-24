@@ -106,15 +106,13 @@ def notices(data):
         signals[label + " first artifact; inspect stored evidence"] = bool(row["artifacts"])
         for name in ("expired", "failed", "rejected", "ready"):
             signals[label + " " + name + "; inspect job"] = row[name]
-        if row["mode"] == "pilot" and row["arm"] == "comparison":
-            # Counts include controls. Only the private bundle can establish eligibility.
-            signals["100 comparison artifacts; verify ordinary runs and controls for blind review"] = row["artifacts"] >= 100
         if row["mode"] == "live":
             signals[label + " accepted; verify settlement"] = bool(row["accepted"])
     for row in collection.get("billing", []):
         label = f"{row['mode']} {row['arm']}"
         signals[label + " first billed execution"] = bool(row["funded_runs"])
         signals[label + " bills unresolved after two hours"] = row["unresolved"]
+    signals["completed candidate packs; verify ordinary runs and controls for blind review"] = collection.get("completed_review_candidate_packs")
     for name in ("staged", "first_epoch", "correction_quotes"):
         signals["collection " + name] = collection.get(name)
     worker = data.get("worker")

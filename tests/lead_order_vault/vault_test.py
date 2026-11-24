@@ -1,0 +1,405 @@
+"""The key vault opens a miner's key only for its own provider and host, and signs what it did."""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+
+import pytest
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, utils
+
+from lead_order_vault import chain, cli
+from lead_order_vault import envelope as env
+from lead_order_vault.vault import (
+    ENCRYPTION_DOMAIN, RECEIPTS_DOMAIN, UpstreamError, UpstreamResponse, Vault, VaultError, canonical,
+)
+
+HOTKEY = "5" + "F" * 47
+OTHER_HOTKEY = "5" + "G" * 47
+TOKEN = "t" * 40
+OPENROUTER_KEY = "sk-or-v1-" + "a" * 64
+MANAGEMENT_KEY = "sk-or-v1-" + "b" * 64
+DEEPLINE_KEY = "dl_" + "c" * 40
+
+
+def _key(seed: int) -> ec.EllipticCurvePrivateKey:
+    return ec.derive_private_key(seed, ec.SECP256K1())
+
+
+def _compressed(key) -> bytes:
+    return key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.CompressedPoint)
+
+
+ENCRYPTION = _key(0x1111)
+RECEIPTS = _key(0x2222)
+VAULT_KEY = _compressed(ENCRYPTION).hex()
+
+
+class FakeProvider:
+    def __init__(self, responses=None):
+        self.requests = []
+        self.responses = responses or {}
+
+    def __call__(self, method, host, target, headers, body, timeout, max_bytes):
+        self.requests.append({"method": method, "host": host, "target": target, "headers": dict(headers), "body": body})
+        result = self.responses.get(target, UpstreamResponse(200, [("Content-Type", "application/json")], b'{"ok":true}'))
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+def _vault(provider=None) -> Vault:
+    return Vault(encryption_key=ENCRYPTION, receipts_key=RECEIPTS, identity={"app_id": "ab" * 20},
+                 caller_token=TOKEN, upstream=provider or FakeProvider(), clock=lambda: 1_800_000_000)
+
+
+def _seal(secret, provider="openrouter", purpose="runtime", hotkey=HOTKEY, vault_key=VAULT_KEY):
+    return env.seal(secret, env.Header(provider, purpose, hotkey, vault_key))
+
+
+def _call(url="https://openrouter.ai/api/v1/chat/completions", sealed=None, **extra):
+    request = {"method": "POST", "url": url,
+               "headers": {"authorization": "Bearer " + (sealed or _seal(OPENROUTER_KEY)), "content-type": "application/json"},
+               "body_b64": base64.b64encode(b'{"model":"x"}').decode(), "timeout_seconds": 120}
+    request.update(extra)
+    return request
+
+
+def _check_receipt(receipt):
+    public = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256K1(), bytes.fromhex(receipt["public_key"]))
+    public.verify(bytes.fromhex(receipt["signature"]), canonical(receipt["document"]), ec.ECDSA(hashes.SHA256()))
+    assert receipt["public_key"] == _compressed(RECEIPTS).hex()
+    return receipt["document"]
+
+
+# -- envelope -------------------------------------------------------------------
+
+
+def test_envelope_round_trip_and_header_binding():
+    sealed = _seal(OPENROUTER_KEY)
+    assert OPENROUTER_KEY not in sealed
+    secret, header = env.open_envelope(sealed, ENCRYPTION)
+    assert secret == OPENROUTER_KEY and header == env.Header("openrouter", "runtime", HOTKEY, VAULT_KEY)
+
+
+@pytest.mark.parametrize("field,value", [("provider", "deepline"), ("miner_hotkey", OTHER_HOTKEY), ("purpose", "management")])
+def test_editing_the_public_header_breaks_the_envelope(field, value):
+    _, document = env.read_header(_seal(OPENROUTER_KEY))
+    document[field] = value
+    raw = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+    forged = env.PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    with pytest.raises(env.EnvelopeError, match="envelope_tampered"):
+        env.open_envelope(forged, ENCRYPTION)
+
+
+def test_envelope_for_another_vault_is_refused():
+    with pytest.raises(env.EnvelopeError, match="sealed_to_another_vault"):
+        env.open_envelope(_seal(OPENROUTER_KEY, vault_key=_compressed(_key(0x3333)).hex()), ENCRYPTION)
+
+
+def test_deepline_cannot_have_a_management_envelope():
+    with pytest.raises(env.EnvelopeError, match="purpose_invalid"):
+        _seal(DEEPLINE_KEY, provider="deepline", purpose="management")
+
+
+# -- chain ------------------------------------------------------------------------
+
+
+def test_chain_matches_the_dstack_reference_vector():
+    # From dstack's key-provenance spec: app root key 0x1a2b..., domain "storage-encryption".
+    root = _key(0x1A2B3C4D5E6F7A8B9C0D1E2F3A4B5C6D7E8F9A0B1C2D3E4F5A6B7C8D9E0F1A2B)
+    link0 = bytes.fromhex(
+        "5b6193729ce7976ec67863f21692d4b98c69832698aae8e001a7d33a6f818b6e"
+        "46ca950725b6e90e8ca9bcf394abd03ce264bf9b7eec1e91693247f9dd53c26901")
+    public_key = bytes.fromhex("03d962450a41748021c8b02787ac36ce642ff0ae25f4c55019eb527e1112cfd764")
+    assert chain.keccak256(b"").hex() == "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
+    assert chain.app_root_key(algorithm="secp256k1", domain="storage-encryption",
+                              public_key=public_key, link0=link0) == _compressed(root)
+
+
+def _sign(key, digest: bytes) -> bytes:
+    """A 65-byte r||s||v signature like dstack's, with v found by recovery."""
+
+    r, s = utils.decode_dss_signature(key.sign(digest, ec.ECDSA(utils.Prehashed(hashes.SHA256()))))
+    n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+    s = min(s, n - s)
+    for v in range(4):
+        candidate = r.to_bytes(32, "big") + s.to_bytes(32, "big") + bytes([v])
+        try:
+            if chain.recover(digest, candidate) == _compressed(key):
+                return candidate
+        except chain.ChainError:
+            continue
+    raise AssertionError("no recovery id")
+
+
+KMS_ROOT = _key(0x4444)
+APP_ROOT = _key(0x5555)
+APP_ID = bytes.fromhex("ab" * 20)
+
+
+def _issued(key, domain, app_root=APP_ROOT, kms_root=KMS_ROOT, app_id=APP_ID):
+    public_key = _compressed(key)
+    link0 = _sign(app_root, chain.keccak256(chain.claim_message("secp256k1", domain, public_key)))
+    link1 = _sign(kms_root, chain.keccak256(chain.issued_message(app_id, _compressed(app_root))))
+    return {"domain": domain, "algorithm": "secp256k1", "public_key": public_key.hex(),
+            "signature_chain": [link0.hex(), link1.hex()]}
+
+
+DEPLOYMENT = {"url": "https://vault.example", "app_id": APP_ID.hex(), "kms_root_public_key": _compressed(KMS_ROOT).hex(),
+              "kms_contract": "0x" + "11" * 20, "chain": "base"}
+
+
+def _identity(**changes):
+    identity = {"app_id": APP_ID.hex(), "encryption": _issued(ENCRYPTION, ENCRYPTION_DOMAIN),
+                "receipts": _issued(RECEIPTS, RECEIPTS_DOMAIN)}
+    identity.update(changes)
+    return identity
+
+
+def test_cli_accepts_keys_the_kms_issued_to_our_app():
+    assert cli.verified_identity(DEPLOYMENT, _identity())["encryption"]["public_key"] == VAULT_KEY
+
+
+@pytest.mark.parametrize("changes,message", [
+    ({"encryption": None}, "not the expected kind"),
+    ({"app_id": "cd" * 20}, "different app id"),
+])
+def test_cli_refuses_a_wrong_identity(changes, message):
+    identity = _identity(**changes)
+    with pytest.raises(cli.CliError, match=message):
+        cli.verified_identity(DEPLOYMENT, identity)
+
+
+@pytest.mark.parametrize("issued", [
+    lambda: _issued(ENCRYPTION, ENCRYPTION_DOMAIN, kms_root=_key(0x6666)),  # someone else's KMS
+    lambda: _issued(ENCRYPTION, ENCRYPTION_DOMAIN, app_id=bytes.fromhex("cd" * 20)),  # another app
+    lambda: _issued(ENCRYPTION, "leadpoet/other"),  # another key domain, relabelled
+    lambda: dict(_issued(ENCRYPTION, ENCRYPTION_DOMAIN), public_key=_compressed(_key(0x7777)).hex()),  # swapped key
+])
+def test_cli_refuses_a_key_the_kms_did_not_issue_to_our_app(issued):
+    key = dict(issued(), domain=ENCRYPTION_DOMAIN)
+    with pytest.raises(cli.CliError, match="does not chain"):
+        cli.verified_identity(DEPLOYMENT, _identity(encryption=key))
+
+
+def test_cli_refuses_until_deployed(tmp_path):
+    path = tmp_path / "deployment.json"
+    path.write_text(json.dumps(dict(DEPLOYMENT, url=None)))
+    with pytest.raises(cli.CliError, match="not deployed"):
+        cli.load_deployment(path)
+    assert json.loads(cli.DEPLOYMENT_FILE.read_text())["url"] is None
+
+
+def test_cli_seals_both_openrouter_keys_to_the_verified_vault():
+    secrets = iter([OPENROUTER_KEY, MANAGEMENT_KEY])
+    sealed = cli.seal_key(provider="openrouter", hotkey=HOTKEY, identity=_identity(), read_secret=lambda _: next(secrets))
+    assert env.open_envelope(sealed["envelope"], ENCRYPTION)[0] == OPENROUTER_KEY
+    assert env.open_envelope(sealed["management_envelope"], ENCRYPTION)[1].purpose == "management"
+    assert sealed["key_fingerprint"] == env.fingerprint("openrouter", OPENROUTER_KEY)
+
+
+# -- call -------------------------------------------------------------------------
+
+
+def test_call_swaps_the_envelope_for_the_key_and_signs_a_receipt():
+    provider = FakeProvider()
+    vault = _vault(provider)
+    result = vault.call(_call())
+    sent = provider.requests[0]
+    assert sent["host"] == "openrouter.ai" and sent["target"] == "/api/v1/chat/completions"
+    assert sent["headers"]["authorization"] == "Bearer " + OPENROUTER_KEY
+    assert result["status"] == 200 and base64.b64decode(result["body_b64"]) == b'{"ok":true}'
+    receipt = _check_receipt(result["receipt"])
+    assert receipt["key_fingerprint"] == env.fingerprint("openrouter", OPENROUTER_KEY)
+    assert receipt["miner_hotkey"] == HOTKEY and receipt["sequence"] == 1 and receipt["key_sequence"] == 1
+    assert receipt["request_sha256"] == hashlib.sha256(b'{"model":"x"}').hexdigest()
+    assert receipt["response_sha256"] == hashlib.sha256(b'{"ok":true}').hexdigest()
+    assert OPENROUTER_KEY not in json.dumps(result)
+
+
+def test_usage_counts_calls_per_key_and_is_signed():
+    vault = _vault()
+    for _ in range(3):
+        vault.call(_call())
+    vault.call(_call(url="https://code.deepline.com/api/v2/integrations/apollo/execute",
+                     sealed=_seal(DEEPLINE_KEY, provider="deepline")))
+    usage = _check_receipt(vault.usage({"fingerprint": [env.fingerprint("openrouter", OPENROUTER_KEY)]}))
+    assert usage["calls"] == 3 and usage["last_sequence"] == 4 and usage["boot_id"] == vault.boot_id
+
+
+@pytest.mark.parametrize("url,code", [
+    ("https://evil.example/api/v1/chat/completions", "host_not_allowed"),
+    ("http://openrouter.ai/api/v1/chat/completions", "host_not_allowed"),
+    ("https://openrouter.ai:8443/api/v1/chat/completions", "host_not_allowed"),
+    ("https://user@openrouter.ai/api/v1/chat/completions", "host_not_allowed"),
+    ("https://openrouter.ai.evil.example/api/v1/chat", "host_not_allowed"),
+    ("https://openrouter.ai/api/v1/keys", "path_not_allowed"),
+    ("https://openrouter.ai/api/v1/Keys/abc", "path_not_allowed"),
+    ("https://openrouter.ai/api/v1/credits/coinbase", "path_not_allowed"),
+    ("https://openrouter.ai/api/v1/%6beys", "path_not_allowed"),
+    ("https://openrouter.ai/api/v1/x/../keys", "path_not_allowed"),
+])
+def test_call_refuses_other_hosts_and_management_paths(url, code):
+    provider = FakeProvider()
+    with pytest.raises(VaultError, match=code):
+        _vault(provider).call(_call(url=url))
+    assert provider.requests == []
+
+
+def test_a_key_works_only_on_its_own_provider_host():
+    provider = FakeProvider()
+    with pytest.raises(VaultError, match="provider_mismatch"):
+        _vault(provider).call(_call(url="https://code.deepline.com/api/v2/integrations/apollo/execute"))
+    assert provider.requests == []
+
+
+def test_the_management_key_never_makes_a_call():
+    provider = FakeProvider()
+    result = _vault(provider).call(_call(sealed=_seal(MANAGEMENT_KEY, purpose="management")))
+    assert result["status"] == 401 and result["receipt"] is None and provider.requests == []
+
+
+def test_an_unusable_envelope_answers_401_without_sending():
+    provider = FakeProvider()
+    other_vault = _compressed(_key(0x3333)).hex()
+    result = _vault(provider).call(_call(sealed=_seal(OPENROUTER_KEY, vault_key=other_vault)))
+    assert result["status"] == 401 and provider.requests == []
+
+
+def test_a_plain_key_is_refused():
+    request = _call()
+    request["headers"]["authorization"] = "Bearer " + OPENROUTER_KEY
+    with pytest.raises(VaultError, match="credential_missing"):
+        _vault().call(request)
+
+
+def test_caller_headers_cannot_smuggle_a_host_or_second_credential():
+    provider = FakeProvider()
+    request = _call()
+    request["headers"].update({"Host": "evil.example", "Cookie": "a=b", "Accept-Encoding": "gzip"})
+    _vault(provider).call(request)
+    sent = provider.requests[0]["headers"]
+    assert "host" not in sent and "cookie" not in sent and "accept-encoding" not in sent
+    request["headers"]["Authorization"] = "Bearer x"
+    with pytest.raises(VaultError, match="headers_invalid"):
+        _vault(provider).call(request)
+
+
+def test_a_response_that_echoes_the_key_is_withheld():
+    echo = UpstreamResponse(200, [], b'{"your_key":"' + OPENROUTER_KEY.encode() + b'"}')
+    result = _vault(FakeProvider({"/api/v1/chat/completions": echo})).call(_call())
+    assert result["status"] == 502 and OPENROUTER_KEY not in base64.b64decode(result["body_b64"]).decode()
+    assert _check_receipt(result["receipt"])["outcome"] == "key_echo_withheld"
+
+
+def test_a_transport_error_still_gets_a_receipt():
+    failing = FakeProvider({"/api/v1/chat/completions": UpstreamError("upstream_unavailable", 200)})
+    result = _vault(failing).call(_call())
+    assert result["transport_error"] == "upstream_unavailable" and result["observed_status"] == 200
+    assert _check_receipt(result["receipt"])["outcome"] == "transport_error"
+
+
+def test_bad_caller_token_is_refused():
+    vault = _vault()
+    for token in (None, "", "t" * 39, "u" * 40):
+        with pytest.raises(VaultError, match="caller_unauthorized"):
+            vault.authorize(token)
+    vault.authorize(TOKEN)
+
+
+# -- check ------------------------------------------------------------------------
+
+
+def _openrouter_provider(current=None, managed=None, status=200):
+    runtime_hash = hashlib.sha256(OPENROUTER_KEY.encode()).hexdigest()
+    current = current if current is not None else {"data": {"disabled": False, "is_management_key": False, "limit_remaining": 5}}
+    managed = managed if managed is not None else {"data": {"hash": runtime_hash, "disabled": False}}
+    return FakeProvider({
+        "/api/v1/key": UpstreamResponse(status, [], json.dumps(current).encode()),
+        "/api/v1/keys/" + runtime_hash: UpstreamResponse(200, [], json.dumps(managed).encode()),
+    })
+
+
+def _check_request(**changes):
+    request = {"provider": "openrouter", "envelope": _seal(OPENROUTER_KEY),
+               "management_envelope": _seal(MANAGEMENT_KEY, purpose="management")}
+    request.update(changes)
+    return request
+
+
+def test_check_validates_openrouter_ownership_with_the_management_key():
+    provider = _openrouter_provider()
+    result = _vault(provider).check(_check_request())
+    assert result == {"status": "valid", "provider": "openrouter", "miner_hotkey": HOTKEY,
+                      "key_fingerprint": env.fingerprint("openrouter", OPENROUTER_KEY)}
+    assert [r["headers"]["authorization"] for r in provider.requests] == ["Bearer " + OPENROUTER_KEY, "Bearer " + MANAGEMENT_KEY]
+
+
+@pytest.mark.parametrize("provider,reason", [
+    (lambda: _openrouter_provider(status=401), "openrouter_api_key_invalid"),
+    (lambda: _openrouter_provider(current={"data": {"is_management_key": True}}), "openrouter_api_key_invalid"),
+    (lambda: _openrouter_provider(current={"data": {"is_management_key": False, "limit_remaining": 0}}), "openrouter_api_key_no_credit"),
+    (lambda: _openrouter_provider(managed={"data": {"hash": "0" * 64}}), "openrouter_management_key_invalid"),
+])
+def test_check_reports_invalid_keys(provider, reason):
+    result = _vault(provider()).check(_check_request())
+    assert result["status"] == "invalid" and result["reason"] == reason
+
+
+def test_check_refuses_envelopes_from_two_miners():
+    with pytest.raises(VaultError, match="envelope_mismatch"):
+        _vault(_openrouter_provider()).check(
+            _check_request(management_envelope=_seal(MANAGEMENT_KEY, purpose="management", hotkey=OTHER_HOTKEY)))
+
+
+def test_check_deepline_reads_the_balance():
+    provider = FakeProvider()
+    result = _vault(provider).check({"provider": "deepline", "envelope": _seal(DEEPLINE_KEY, provider="deepline")})
+    assert result["status"] == "valid" and provider.requests[0]["target"] == "/api/v2/billing/balance"
+
+
+def test_identity_and_usage_reveal_no_key():
+    vault = _vault()
+    vault.call(_call())
+    text = json.dumps([vault.identity(), vault.usage({"fingerprint": ["sha256:" + "0" * 64]})])
+    assert OPENROUTER_KEY not in text and vault.identity()["boot_id"] == vault.boot_id
+
+
+def test_http_server_routes_authenticates_and_never_logs(capsys):
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    from lead_order_vault.vault import CALLER_HEADER, make_handler
+
+    provider = FakeProvider()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(_vault(provider)))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = "http://127.0.0.1:%d" % server.server_address[1]
+
+    def post(path, document, token=TOKEN):
+        request = urllib.request.Request(base + path, data=json.dumps(document).encode(), method="POST",
+                                         headers={CALLER_HEADER: token} if token else {})
+        try:
+            with urllib.request.urlopen(request) as response:
+                return response.status, json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            return error.code, json.loads(error.read())
+
+    try:
+        with urllib.request.urlopen(base + "/v1/identity") as response:
+            assert json.loads(response.read())["app_id"] == "ab" * 20
+        assert post("/v1/call", _call(), token=None) == (401, {"error": "caller_unauthorized"})
+        assert post("/v1/call", _call(url="https://evil.example/x")) == (400, {"error": "host_not_allowed"})
+        status, result = post("/v1/call", _call())
+        assert status == 200 and result["status"] == 200 and len(provider.requests) == 1
+        assert post("/v1/nope", {})[0] == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == ""

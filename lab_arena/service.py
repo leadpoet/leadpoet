@@ -5932,7 +5932,12 @@ class ArenaService:
 
     def _superseded_by_published_day(self, row: Mapping[str, Any]) -> bool:
         latest = self._latest_published_day()
-        return latest is not None and latest > self._evaluation_day(row)
+        if latest is None or latest <= self._evaluation_day(row):
+            return False
+        decision = (row.get("publication_doc") or {}).get("king_decision") or {}
+        if row["round_id"] == "arena-2026-11-23" and decision.get("outcome") == "crowned":
+            return not self._store.prospective_win_ready(row["round_id"])
+        return True
 
     def _pending_promotion_rows(
         self, *, pinned_round_id: Optional[str] = None,

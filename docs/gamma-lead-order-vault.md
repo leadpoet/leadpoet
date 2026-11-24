@@ -100,6 +100,38 @@ something is wrong. All commands refuse until the vault is deployed.
 Your provider's own usage log is the full check of what was spent on your
 key. Compare it with what Leadpoet reports now and then.
 
+## Releasing
+
+1. Merge the change to `main`, then run **Lead-order vault release** from
+   Actions on `main`. It builds the image twice, stops unless both digests
+   match, pushes `ghcr.io/leadpoet/lead-order-vault@sha256:…`, and uploads
+   `docker-compose.yml` pinned to that digest with `release.json` (commit,
+   image, commit time used as the build time, BuildKit image).
+2. Update the Phala Cloud app with that compose file. Phala shows its
+   compose hash. On stop, the vault refuses new connections and lets calls
+   in flight finish, up to the compose file's 330 s grace period. Check
+   once, on the first update, that Phala waits for it: no receipt gap
+   should appear around the restart.
+3. The app owner approves the hash with `addComposeHash` on the app's
+   contract on Base. This is the one step that grants a build the keys, so
+   it stays a signed, manual step.
+4. Run `cli verify`. It reads the approval of its `compose_hash` from Base.
+
+First deploy only: make the GHCR package public so Phala can pull it, and
+fill `deployment.json` (the TLS passthrough url ending `-8080s.<gateway
+domain>`, app id, KMS root key, contract, chain). The
+**Lead-order vault uptime** check then runs `cli verify` every 30 minutes;
+a failed run is the alert.
+
+To check a release yourself, check out the commit in `release.json` and run
+`bash .github/scripts/lead_order_vault_build.sh` from the repository root
+(Docker with buildx). It prints the digest, which must match the image in
+the compose file. Then compare the compose file's hash with the one
+`cli verify` prints, which Base approved. The vault reports that hash
+itself, so it only shows the hash is approved, not that it is the only
+one. Also check the app contract's `ComposeHashAdded` events on Basescan:
+every approved hash should be one you can rebuild.
+
 ## Known limits
 
 - A vault fault after a call is numbered, before its receipt is signed,
@@ -129,3 +161,7 @@ key. Compare it with what Leadpoet reports now and then.
 - The vault does not judge which Deepline tools are worth paying for; the
   gateway does, and the receipts show every call.
 - Partial key echoes, such as a few characters in a label, are not caught.
+- `cli receipts` proves each call was reported, not that it was paid.
+  Compare the statement's costs with the provider's usage log for that.
+- A call that waits on a vault reconnect can finish after its order's
+  300 s window and settle late.

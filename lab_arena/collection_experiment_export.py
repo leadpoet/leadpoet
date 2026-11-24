@@ -44,6 +44,8 @@ def verified_panel(
     signed = review.verify_qualification(
         bundle, receipt, reviewer_key, approval, approver_key
     )
+    if signed.get("claim_protocol", "collection.fresh-claims.v1") != spec.raw.get("claim_protocol","collection.fresh-claims.v1"):
+        raise ValueError("claim reader protocol differs from qualified panel")
     if signed["prompt_sha256"] != spec.policy.prompt_sha256:
         raise ValueError("experiment and qualified panel use different policies")
     return signed
@@ -297,7 +299,21 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
                         spec, provenance, {case["source_sha256"]: student}
                     )
                 observed = {}
-                for unit, proof in packet.get("fresh_claim_proof", {}).items():
+                protocol = spec.raw.get("claim_protocol", "collection.fresh-claims.v1")
+                proofs = packet.get("fresh_claim_proof", {})
+                keyed_release = trained and protocol == "collection.fresh-claims.v2"
+                if keyed_release:
+                    from lab_arena.collection_claims import verify_keyed_unit
+                    reader = packet.get("claim_reader", {})
+                    sources = {judge.digest(u):u for u in reader.get("units", [])}
+                    results = {r["unit_sha256"]:r["record"] for r in reader.get("results", [])}
+                    if not results.keys() <= proofs.keys() <= sources.keys():
+                        raise ValueError("claim results have no original funded votes")
+                for unit, proof in proofs.items():
+                    if proof["schema"] != protocol:
+                        raise ValueError("claim reader protocol differs from frozen experiment")
+                    if keyed_release and unit in results:
+                        verify_keyed_unit(sources[unit], proof, results[unit])
                     for order, labels in enumerate(proof["votes"]):
                         request_id = proof["request_ids"][order]
                         observed[request_id] = (
@@ -305,6 +321,7 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
                             order,
                             proof["reader"],
                             proof["rubric_sha256"],
+                            proof["sentence_ids"][order] if protocol == "collection.fresh-claims.v2" else None,
                             labels,
                         )
                 seen = set()
@@ -329,6 +346,7 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
                             vote["vote_index"],
                             vote["model"],
                             vote["rubric_sha256"],
+                            vote.get("sentence_ids"),
                             vote["labels"],
                         )
                     ):

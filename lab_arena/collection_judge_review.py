@@ -26,6 +26,10 @@ RECEIPT_SCHEMA = "collection.human-review.v1"
 
 def _read_bundle(bundle, *, require_split=True):
     fields = {"schema", "policy", "assignments", "runs", "planted", "drift"}
+    if "claim_protocol" in bundle:
+        from lab_arena.collection_claims import protocol_of
+        protocol_of(bundle)
+        fields.add("claim_protocol")
     if require_split or "split_manifest_sha256" in bundle:
         fields.add("split_manifest_sha256")
     if "failed_attempts" in bundle:
@@ -52,6 +56,9 @@ def _read_bundle(bundle, *, require_split=True):
         )
         p, a = item["packet"], item["assessment"]
         if require_split:
+            if any(x["schema"] != bundle.get("claim_protocol","collection.fresh-claims.v1")
+                   for x in p.get("fresh_claim_proof", {}).values()):
+                raise ValueError("stored claim protocol differs from review batch")
             stamp = p.get("split") or {}
             judge._require(
                 re.fullmatch(r"[a-f0-9]{64}", str(bundle["split_manifest_sha256"]))
@@ -376,6 +383,7 @@ def _qualification_body(bundle, receipt, reviewer_key, approver, allow_live):
         "review_sha256": judge.digest(receipt),
         "prompt_sha256": policy.prompt_sha256,
         "approver": approver,
+        **({"claim_protocol":bundle["claim_protocol"]} if "claim_protocol" in bundle else {}),
         "allow_live": allow_live,
         "judges": {
             m: {"revision": spec.revision, "route": spec.route}

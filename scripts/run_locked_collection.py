@@ -31,10 +31,13 @@ from lab_arena.store import PostgrestTransport
 
 
 def load_batch(raw, prompt):
+    from lab_arena.collection_claims import protocol_of
+    protocol_of(raw)
     if set(raw) - {
         "research_index_sha256",
         "split_manifest",
         "panel_qualification_sha256",
+        "claim_protocol",
         "thresholds",
         "control_artifacts",
         "claim_pack_sha256",
@@ -299,6 +302,7 @@ def pack_split(raw, builders, scenario_id):
 def verify_live_panel(raw, policy, approved):
     certificate = raw.get("panel_qualification_sha256")
     if (certificate != approved.get("panel_qualification_sha256")
+        or raw.get("claim_protocol", "collection.fresh-claims.v1") != approved.get("claim_protocol", "collection.fresh-claims.v1")
         or policy.qualification != bool(certificate)
         or (approved.get("split_manifest_sha256") and
             ("split_manifest" not in raw or judge.digest(raw["split_manifest"]) != approved["split_manifest_sha256"]))):
@@ -398,6 +402,7 @@ def run_cohort(
                 claim_pack=claim_pack,
                 prepare_launch=staged,
                 split=splits.get(job["scenario_id"]),
+                claim_protocol=raw.get("claim_protocol", "collection.fresh-claims.v1"),
             )
         except Exception as exc:
             # Never print raw model output, arguments, credentials or provider messages.

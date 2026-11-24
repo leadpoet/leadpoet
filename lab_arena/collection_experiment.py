@@ -58,10 +58,13 @@ def source_revisions():
 
 
 def load_experiment(raw, prompt):
+    from lab_arena.collection_claims import protocol_of
+
+    protocol_of(raw)
     agent_revision, builder_revision = source_revisions()
 
     if (
-        set(raw) - {"min_pricing_runs", "pricing_pilot"}
+        set(raw) - {"claim_protocol", "min_pricing_runs", "pricing_pilot"}
         != {
             "schema",
             "id",
@@ -488,6 +491,9 @@ def run_experiment(
                     generator=job["model"],
                     broker=adapter,
                     record_vote=record_vote,
+                    protocol=spec.raw.get(
+                        "claim_protocol", "collection.fresh-claims.v1"
+                    ),
                 )
             packet_ref = save("judge-input", packet)
             claim = judge.claim_verdict(packet)

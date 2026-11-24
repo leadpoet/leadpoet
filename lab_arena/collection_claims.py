@@ -307,7 +307,105 @@ CLAIM_RUBRIC = (
 CLAIM_LABELS = ("no_claim", "supported", "inference", "invented")
 
 
-def read_fresh(packet, *, policy, generator, broker, record_vote=None):
+ARRAY_V1 = "collection.fresh-claims.v1"
+KEYED_V2 = "collection.fresh-claims.v2"
+KEYED_RUBRIC = CLAIM_RUBRIC.split("Return a JSON object", 1)[0] + (
+    "The context contains the entire original document. Classify only the sentence IDs "
+    "in sentences. Return JSON with a single key labels, an object mapping each supplied "
+    "sentence ID exactly once to its label. Do not invent IDs or return prose."
+)
+
+
+def protocol_of(manifest):
+    protocol = manifest.get("claim_protocol", ARRAY_V1)
+    if protocol not in (ARRAY_V1, KEYED_V2):
+        raise ValueError("unknown frozen claim reader protocol")
+    return protocol
+
+
+def verify_keyed_unit(unit, proof, record):
+    """Rebuild the strict result from the original sentence positions and votes."""
+    sentences = [
+        s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", unit["text"]) if s.strip()
+    ]
+    expected = [
+        [f"s{i+1}" for i in range(at, min(at + 8, len(sentences)))]
+        for at in range(0, len(sentences), 8)
+        for _ in range(3)
+    ]
+    if (
+        proof.get("schema") != KEYED_V2
+        or proof.get("rubric_sha256") != judge.digest(KEYED_RUBRIC)
+        or proof.get("sentence_ids") != expected
+        or len(set(proof["request_ids"])) != len(expected)
+        or len(proof["request_ids"]) != len(expected)
+        or proof["complete_votes"] != len(expected)
+        or len(proof["votes"]) != len(expected)
+        or not sentences
+    ):
+        raise ValueError("incomplete keyed claim coverage")
+    rows = []
+    for at in range(0, len(expected), 3):
+        votes = proof["votes"][at : at + 3]
+        if any(
+            len(v) != len(expected[at]) or any(x not in CLAIM_LABELS for x in v)
+            for v in votes
+        ):
+            raise ValueError("invalid keyed claim labels")
+        for choices in zip(*votes, strict=True):
+            rows.append(_sentence_result(sentences[len(rows)], choices))
+    if record != {
+        "id": unit["id"],
+        "sentences": rows,
+        "strict": any(s["level"] for s in rows),
+    }:
+        raise ValueError("claim majority differs from original votes")
+
+
+def _sentence_result(sentence, choices):
+    level = (
+        "invented"
+        if choices.count("invented") >= 2
+        else (
+            "inference"
+            if sum(c in ("invented", "inference") for c in choices) >= 2
+            else None
+        )
+    )
+    return {"text": sentence, "votes": list(choices), "level": level, "unread": 0}
+
+
+def _groups(sentences, sources, text, keyed):
+    if not keyed:
+        yield None, {"sources": sources, "sentences": sentences}
+        return
+    for start in range(0, len(sentences), 8):
+        group = {
+            f"s{i+1}": sentences[i]
+            for i in range(start, min(start + 8, len(sentences)))
+        }
+        yield list(group), {"sources": sources, "context": text, "sentences": group}
+
+
+def _labels(raw, ids, length):
+    doc = judge._parse(raw)
+    judge._fields(doc, ("labels",))
+    answer = doc["labels"]
+    if ids is not None:
+        judge._fields(answer, ids)
+        answer = [answer[i] for i in ids]
+    if (
+        type(answer) is not list
+        or len(answer) != length
+        or any(v not in CLAIM_LABELS for v in answer)
+    ):
+        raise judge.InvalidVerdict("incomplete claim classifications")
+    return answer
+
+
+def read_fresh(
+    packet, *, policy, generator, broker, record_vote=None, protocol=ARRAY_V1
+):
     """Use an independent, pinned, owner-funded route for three votes on every new unit."""
     if not all(packet.get("checks", {}).values()) or packet.get("projection_error"):
         return packet
@@ -317,6 +415,12 @@ def read_fresh(packet, *, policy, generator, broker, record_vote=None):
     done = {r["unit_sha256"] for r in reader["results"]}
     results = list(reader["results"])
     proof = {k: v for k, v in packet.get("fresh_claim_proof", {}).items() if k in done}
+    if protocol not in (ARRAY_V1, KEYED_V2) or any(
+        x["schema"] != protocol for x in proof.values()
+    ):
+        raise ValueError("fresh claim votes belong to a different protocol")
+    keyed = protocol == KEYED_V2
+    rubric = KEYED_RUBRIC if keyed else CLAIM_RUBRIC
     roles = judge.independent_roles(policy, generator)
     if not roles:
         return packet
@@ -342,91 +446,95 @@ def read_fresh(packet, *, policy, generator, broker, record_vote=None):
             # Never dispatch an unsafe original or certify a partially redacted claim.
             clean, _ = sanitize_training_value(packet)
             return {**clean, "checks": {**packet["checks"], "privacy": False}}
-        content = judge._json(material)
-        messages = [
-            {"role": "system", "content": CLAIM_RUBRIC},
-            {"role": "user", "content": content},
-        ]
-        votes, requests = [], []
-        for order in range(3):
-            request_id = (
-                "collection-"
-                + judge.digest(
-                    [
-                        "claims.v1",
+        votes, requests, groups = [], [], []
+        rows = []
+        for ids, payload in _groups(
+            sentences, material["sources"], unit["text"], keyed
+        ):
+            messages = [
+                {"role": "system", "content": rubric},
+                {"role": "user", "content": judge._json(payload)},
+            ]
+            group_votes = []
+            for repeat in range(3):
+                order = len(requests)
+                identity = [
+                    "claims.v1",
+                    policy.batch_id,
+                    packet["run_id"],
+                    key,
+                    model,
+                    rubric,
+                    order,
+                ]
+                if keyed:
+                    identity = [
+                        protocol,
                         policy.batch_id,
                         packet["run_id"],
                         key,
                         model,
-                        CLAIM_RUBRIC,
-                        order,
+                        rubric,
+                        ids,
+                        repeat,
                     ]
-                )
-                + "-1"
-            )
-            requests.append(request_id)
-            try:
-                raw = broker.judge(
-                    request_id=request_id,
-                    model=model,
-                    messages=messages,
-                    max_tokens=candidate.max_tokens if candidate else 400,
-                    **(
-                        {"reasoning_effort": "none"}
-                        if model == "moonshotai/kimi-k3"
-                        else {}
-                    ),
-                )
-                labels = judge._parse(raw)
-                judge._fields(labels, ("labels",))
-                if (
-                    type(labels["labels"]) is not list
-                    or len(labels["labels"]) != len(sentences)
-                    or any(label not in CLAIM_LABELS for label in labels["labels"])
-                ):
-                    raise judge.InvalidVerdict("incomplete claim classifications")
-            except (judge.JudgeUnavailable, judge.InvalidVerdict):
+                request_id = "collection-" + judge.digest(identity) + "-1"
+                requests.append(request_id)
+                try:
+                    raw = broker.judge(
+                        request_id=request_id,
+                        model=model,
+                        messages=messages,
+                        max_tokens=candidate.max_tokens if candidate else 400,
+                        **(
+                            {"reasoning_effort": "none"}
+                            if model == "moonshotai/kimi-k3"
+                            else {}
+                        ),
+                    )
+                    labels = _labels(raw, ids, len(payload["sentences"]))
+                except (judge.JudgeUnavailable, judge.InvalidVerdict):
+                    break
+                if record_vote is not None:
+                    record_vote(
+                        {
+                            "schema": (
+                                "collection.claim-vote.v2"
+                                if keyed
+                                else "collection.claim-vote.v1"
+                            ),
+                            "run_id": packet["run_id"],
+                            "batch_id": policy.batch_id,
+                            "unit_sha256": key,
+                            "model": model,
+                            "request_id": request_id,
+                            "vote_index": order,
+                            "rubric_sha256": judge.digest(rubric),
+                            "labels": labels,
+                            **({"sentence_ids": ids} if keyed else {}),
+                        }
+                    )
+                group_votes.append(labels)
+                votes.append(labels)
+                if keyed:
+                    groups.append(ids)
+            if len(group_votes) != 3:
                 break
-            if record_vote is not None:
-                record_vote(
-                    {
-                        "schema": "collection.claim-vote.v1",
-                        "run_id": packet["run_id"],
-                        "batch_id": policy.batch_id,
-                        "unit_sha256": key,
-                        "model": model,
-                        "request_id": request_id,
-                        "vote_index": order,
-                        "rubric_sha256": judge.digest(CLAIM_RUBRIC),
-                        "labels": labels["labels"],
-                    }
-                )
-            votes.append(labels["labels"])
+            group_texts = payload["sentences"].values() if keyed else sentences
+            for sentence, choices in zip(group_texts, zip(*group_votes), strict=True):
+                rows.append(_sentence_result(sentence, choices))
         proof[key] = {
-            "schema": "collection.fresh-claims.v1",
+            "schema": protocol,
             "reader": model,
             "generator": generator,
-            "rubric_sha256": judge.digest(CLAIM_RUBRIC),
+            "rubric_sha256": judge.digest(rubric),
             "request_ids": requests,
             "complete_votes": len(votes),
             "votes": votes,
+            **({"sentence_ids": groups} if keyed else {}),
         }
-        if len(votes) != 3:
+        if len(rows) != len(sentences):
             break
-        rows = []
-        for sentence, choices in zip(sentences, zip(*votes), strict=True):
-            level = (
-                "invented"
-                if choices.count("invented") >= 2
-                else (
-                    "inference"
-                    if sum(c in ("invented", "inference") for c in choices) >= 2
-                    else None
-                )
-            )
-            rows.append(
-                {"text": sentence, "votes": list(choices), "level": level, "unread": 0}
-            )
         record = {
             "id": unit["id"],
             "sentences": rows,

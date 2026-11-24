@@ -365,8 +365,9 @@ def test_staged_correction_input_failure_does_not_starve_baseline(
         runner.main(argv)
 
 
+@pytest.mark.parametrize("keyed", [False, True])
 def test_real_harness_checkpoint_and_archive_under_funded_job_contract(
-    database, tmp_path, monkeypatch
+    database, tmp_path, monkeypatch, keyed
 ):
     """Native PG worker path; only network, payer and training producer are controlled fixtures."""
     import os
@@ -392,6 +393,8 @@ def test_real_harness_checkpoint_and_archive_under_funded_job_contract(
     pub_path.write_bytes(pub(key))
     monkeypatch.setenv("LAB_ARENA_COLLECTION_TRAINER_PUBLIC_KEY_FILE", str(pub_path))
     raw = settings()
+    if keyed:
+        raw["claim_protocol"] = "collection.fresh-claims.v2"
     raw["arms"][0].update(repeats=1, max_steps=90)
     monkeypatch.setenv("LAB_ARENA_CORRECTION_TERMS_SHA256", raw["terms_sha256"])
     enrolled = intake.CollectionIntake(db, ifx.manager(), "pilot")
@@ -484,10 +487,14 @@ def test_real_harness_checkpoint_and_archive_under_funded_job_contract(
                         call["id"] = "new-" + str(len(handled))
                 else:
                     unit = json.loads(b["messages"][-1]["content"])
-                    assert set(unit) == {"sentences", "sources"}
-                    answer = json.dumps(
-                        {"labels": ["supported"] * len(unit["sentences"])}
-                    )
+                    if keyed:
+                        assert set(unit) == {"sentences", "sources", "context"}
+                        assert type(unit["sentences"]) is dict
+                        labels = dict.fromkeys(unit["sentences"], "supported")
+                    else:
+                        assert set(unit) == {"sentences", "sources"}
+                        labels = ["supported"] * len(unit["sentences"])
+                    answer = json.dumps({"labels":labels})
                     doc = {
                         "choices": [
                             {

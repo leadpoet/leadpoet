@@ -11,7 +11,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
 from lab_arena import collection_judge as judge, contracts
-from lab_arena.collection_claims import CLAIM_RUBRIC
+from lab_arena.collection_claims import (
+    CLAIM_RUBRIC,
+    KEYED_RUBRIC,
+    KEYED_V2,
+    protocol_of,
+)
 from lab_arena.collection_experiment import (
     load_experiment,
     read_inputs,
@@ -56,7 +61,10 @@ def class_definition(spec, inputs):
         "split": partition,
         "harness": source_revisions(),
         "prompt": spec.policy.prompt_sha256,
-        "reader_rubric": judge.digest(CLAIM_RUBRIC),
+        "reader_protocol": protocol_of(spec.raw),
+        "reader_rubric": judge.digest(
+            KEYED_RUBRIC if protocol_of(spec.raw) == KEYED_V2 else CLAIM_RUBRIC
+        ),
         "generator_revision": GENERATOR_ROUTES[arm["model"]].revision,
         "route": spec.routes[arm["model"]],
         "arm": {k: v for k, v in arm.items() if k not in ("id", "repeats")},
@@ -210,7 +218,9 @@ def load_approved(live, inputs, prompt, database, objects, epoch):
         }
 
     if (
-        inference_arm(calibration) != inference_arm(live)
+        protocol_of(calibration.raw) != protocol_of(live.raw)
+        or protocol_of(evidence["panel_approval"]) != protocol_of(live.raw)
+        or inference_arm(calibration) != inference_arm(live)
         or calibration.raw["split_sha256"] != live.raw["split_sha256"]
     ):
         raise ValueError("paid settings differ from measured correction class")

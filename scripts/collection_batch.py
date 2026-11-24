@@ -95,6 +95,8 @@ def source_bundle(raw, prompt, transport, objects):
         if (item["packet"]["checks"].get("training_split") is not True
                 or item["packet"]["checks"].get("privacy") is not True):
             raise ValueError("hidden or unchecked material in review batch")
+    if raw.get("claim_protocol") == "collection.fresh-claims.v2":
+        bundle["claim_protocol"] = raw["claim_protocol"]
     return {**bundle, "split_manifest_sha256": judge.digest(raw["split_manifest"])}
 
 

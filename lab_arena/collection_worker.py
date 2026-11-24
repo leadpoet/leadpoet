@@ -31,6 +31,7 @@ def process_job(
     persist=store_artifact,
     prepare_launch=False,
     split=None,
+    claim_protocol="collection.fresh-claims.v1",
 ):
     """The journal stores judge bytes separately. Only scores and tags reach the public statement."""
     run_id, batch = job["job_id"], job["batch_id"]
@@ -90,7 +91,7 @@ def process_job(
     if not control_ref and not job["scenario_id"].startswith("research-"):
         from lab_arena.collection_claims import read_fresh
         packet = read_fresh(packet, policy=policy, generator=job["model"], broker=broker,
-                            record_vote=lambda vote: persist(objects, batch, run_id, "claim-vote", vote))
+                            record_vote=lambda vote: persist(objects, batch, run_id, "claim-vote", vote), protocol=claim_protocol)
     packet_ref = persist(objects, batch, run_id, "judge-input", packet)
     assessment = judge.judge_run(
         policy, assignment, packet, broker.judge, prompt=prompt

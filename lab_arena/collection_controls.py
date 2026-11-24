@@ -15,6 +15,7 @@ PACKET_FIELDS = (
     "facts",
     "reference_answer",
     "grading_notes",
+    "judge_segments",
     "steps",
     "final_output",
     "checks",

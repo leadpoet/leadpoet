@@ -20,6 +20,12 @@ from lab_arena.collection_intake import (
 )
 from lab_arena.collection_workflow import store_artifact
 from lab_arena.collection_journal import WorkflowJournal
+from lab_arena.collection_generation import (
+    CAPTURE_V2,
+    MAX_RUN_TOKENS,
+    OutputLimitReached,
+    output_charge,
+)
 
 SCHEMA = "collection.experiment.v1"
 SHA = re.compile(r"sha256:[0-9a-f]{64}")
@@ -62,7 +68,7 @@ def load_experiment(raw, prompt):
     protocol_of(raw)
 
     if (
-        set(raw) - {"claim_protocol", "min_pricing_runs", "pricing_pilot", "max_slots", "provenance_sha256"}
+        set(raw) - {"claim_protocol", "min_pricing_runs", "pricing_pilot", "max_slots", "provenance_sha256", "capture_version"}
         != {
             "schema",
             "id",
@@ -75,6 +81,7 @@ def load_experiment(raw, prompt):
             "split_sha256",
             "terms_sha256",
         }
+        or ("capture_version" in raw and raw["capture_version"] != CAPTURE_V2)
         or raw["schema"] != SCHEMA
         or raw["mode"] not in {"pilot", "live"}
     ):
@@ -114,7 +121,7 @@ def load_experiment(raw, prompt):
     caps = {}
     arm_names = set()
     for arm in arms:
-        if set(arm) != {
+        if set(arm) - {"max_run_tokens"} != {
             "id",
             "role",
             "model",
@@ -135,6 +142,9 @@ def load_experiment(raw, prompt):
             or not _integer(arm["repeats"], 1, slot_limit)
             or not _integer(arm["max_steps"], 1, 90)
             or not _integer(arm["max_tokens"], 1, 8192)
+            or not _integer(
+                arm.get("max_run_tokens", arm["max_tokens"]), 1, MAX_RUN_TOKENS
+            )
             or not _integer(arm["budget_microusd"], 1, MAX_MICROUSD)
             or caps.setdefault(model, arm["budget_microusd"]) != arm["budget_microusd"]
             or arm["reasoning_effort"] not in {"low", "medium", "high"}
@@ -325,13 +335,13 @@ class ExperimentMeter:
     def __init__(self, broker, arm):
         self.broker = broker
         self.arm = arm
-        self.remaining = arm["max_tokens"]
+        self.remaining = arm.get("max_run_tokens", arm["max_tokens"])
         self.calls = []
 
     def model_call(self, request_id, body):
         if self.remaining < 1 or len(self.calls) >= self.arm["max_steps"]:
-            raise ValueError("experiment generation cap reached")
-        limit = min(self.remaining, body["max_tokens"])
+            raise OutputLimitReached("experiment generation cap reached")
+        limit = min(self.remaining, self.arm["max_tokens"], body["max_tokens"])
         params = dict(
             body,
             max_tokens=limit,
@@ -341,10 +351,14 @@ class ExperimentMeter:
             },
         )
         result = self.broker.model_call(request_id, params)
-        usage = result.get("usage") or {}
-        counter = usage.get("completion_tokens")
-        # Missing token counts stop subsequent dispatch; the provider receipt survives.
-        self.remaining = self.remaining - counter if _integer(counter, 0, limit) else 0
+        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        counter = output_charge(usage, limit)
+        # Unknown output is privately labelled and charged its maximum only for admission.
+        reported = usage.get("completion_tokens")
+        if type(reported) is int and reported > limit:
+            self.remaining = 0
+        else:
+            self.remaining -= limit if counter is None else counter
         self.calls.append(
             {
                 "request_id": request_id,
@@ -352,6 +366,7 @@ class ExperimentMeter:
                 "model": result["model"],
                 "revision": self.broker.versions[result["model"]],
                 "provider": result.get("provider"),
+                "output_allowance": limit,
                 "usage": {
                     k: usage[k]
                     for k in (
@@ -459,6 +474,7 @@ def run_experiment(
                 source_refs["producer_attestation"] = save("producer-attestation", provenance)
             settings = save("settings", spec.raw)
             split_ref = save("split", split)
+            save("split-stamp", stamp)
             adapter = CollectionBroker(
                 intake,
                 database,
@@ -481,6 +497,8 @@ def run_experiment(
                 max_steps=arm["max_steps"],
                 max_tokens=arm["max_tokens"],
                 record=journal.append,
+                save=save,
+                capture_version=spec.raw.get("capture_version"),
                 **({role_option: source} if source is not None else {}),
             )
             if (
@@ -491,7 +509,7 @@ def run_experiment(
             ):
                 raise ValueError("experiment output identity mismatch")
             generator_finished = True
-            row_ref = save("generator", row)
+            row_ref = archived.get("generator") or save("generator", row)
             calls_ref = save("generation-receipts", meter.calls)
             save("pre-claim-input", packet)
             if all(packet["checks"].values()):

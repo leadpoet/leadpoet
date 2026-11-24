@@ -15,6 +15,12 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from lab_arena import collection_judge as judge
+from lab_arena.collection_generation import (
+    CAPTURE_V2,
+    GenerationCapture,
+    OutputLimitReached,
+    QuarantinedWorkflow,
+)
 from lab_arena.collection_checkpoint import (
     correction_checks,
     correction_scenario,
@@ -31,7 +37,8 @@ CORRECTION_CHAMPION_REV = "a9be241e0060b5ae8eefe55b79779eb6e73bd863"
 CORRECTION_POET_REV = "d37173aca32ea59c7c5ffea46b0941726c55f30f"
 
 
-COMPARISON_CAPTURE = "collection.workflow-events.v1"
+COMPARISON_CAPTURE = CAPTURE_V2
+LEGACY_CAPTURE = "collection.workflow-events.v1"
 # The P7 producer pins its train-only task, rule pool and tool definitions.
 TRAIN_ONLY_POET_REV = "1ff55087fac4cee0748247d47321f94daca7e18b"
 TRAIN_ONLY_PARTITION_SHA256 = (
@@ -51,7 +58,7 @@ def experiment_revisions(scenarios=()):
 def comparison_revisions(settings):
     if "capture_version" not in settings:
         return CHAMPION_REV, POET_REV
-    if settings["capture_version"] != COMPARISON_CAPTURE:
+    if settings["capture_version"] not in (LEGACY_CAPTURE, COMPARISON_CAPTURE):
         raise ValueError("unknown comparison capture version")
     return CORRECTION_CHAMPION_REV, TRAIN_ONLY_POET_REV
 
@@ -232,15 +239,32 @@ def _excerpts(raw, anchors, limit):
     return rendered
 
 
-def _steps(messages, reference, final_output):
+def _steps(messages, reference, final_output, *, full=False):
     turns = []
     for m in messages:
         if m["role"] == "assistant":
-            action = _encode(m.get("tool_calls") or m["content"])
-            if len(action) > 8192:
+            action = (
+                _encode({k: m[k] for k in ("content", "tool_calls") if k in m})
+                if full
+                else _encode(m.get("tool_calls") or m["content"])
+            )
+            if not full and len(action) > 8192:
                 raise IncompleteEvidence("action_exceeds_limit")
             reasoning = m.get("reasoning") or m.get("reasoning_content")
-            if reasoning and len(reasoning) > judge.MAX_VISIBLE_REASONING_CHARS:
+            if (
+                full
+                and m.get("reasoning")
+                and m.get("reasoning_content")
+                and m["reasoning"] != m["reasoning_content"]
+            ):
+                reasoning = _encode(
+                    {k: m[k] for k in ("reasoning", "reasoning_content")}
+                )
+            if (
+                not full
+                and reasoning
+                and len(reasoning) > judge.MAX_VISIBLE_REASONING_CHARS
+            ):
                 raise IncompleteEvidence("visible_reasoning_exceeds_limit")
             turns.append(
                 (
@@ -259,8 +283,11 @@ def _steps(messages, reference, final_output):
     relevant = _anchors(reference + "\n" + final_output)
     for i, (turn, results) in enumerate(turns):
         following = turns[i + 1][0]["action"] if i + 1 < len(turns) else ""
-        turn["evidence"] = _excerpts(
-            "\n".join(results), relevant | _anchors(following), 8192
+        evidence = "\n".join(results)
+        turn["evidence"] = (
+            evidence
+            if full
+            else _excerpts(evidence, relevant | _anchors(following), 8192)
         )
     return [turn for turn, _ in turns]
 
@@ -276,6 +303,8 @@ def play_workflow(
     max_steps=90,
     max_tokens=8192,
     record=None,
+    save=None,
+    capture_version=None,
 ):
     if continuation is not None and student_source is not None:
         raise ValueError("a run has one starting state")
@@ -283,7 +312,6 @@ def play_workflow(
     extended = hasattr(builders, "branch")
     if not extended and (
         source is not None
-        or record is not None
         or max_steps != 90
         or max_tokens != 8192
     ):
@@ -297,25 +325,112 @@ def play_workflow(
         shape = json.loads(source["original"]["trace.json"]).get("shape")
     else:
         task = build_scenario(builders, job["scenario_id"])
-    require_private_evidence(
-        {k: task.get(k) for k in ("prompt", "state", "files", "tools")}
+    capture = GenerationCapture(job["job_id"], builders, save)
+    capture.check(
+        {k: task.get(k) for k in ("prompt", "state", "files", "tools")}, "scenario"
     )
     events = []
     experiment = job.get("experiment", {})
     sequence = 0
 
+    def observe_legacy_tools(messages):
+        # Old pinned harnesses expose only model-visible tool messages. Preserve
+        # those exact bytes and identify them as such in the private journal.
+        for m in messages[len(capture.messages) :]:
+            if m.get("role") != "tool":
+                raise ValueError(
+                    "legacy tool history differs from recorded provider calls"
+                )
+            callers = (
+                c
+                for msg in reversed(capture.messages)
+                for c in msg.get("tool_calls", [])
+            )
+            call = next(c for c in callers if c["id"] == m["tool_call_id"])
+            observe(
+                {
+                    "index": capture.index,
+                    "kind": "tool",
+                    "turn": sum(m["role"] == "assistant" for m in capture.messages) - 1,
+                    "call_id": m["tool_call_id"],
+                    "name": call["function"]["name"],
+                    "output": m["content"],
+                    "representation": "model_visible",
+                }
+            )
+
     def complete(body):
         nonlocal sequence
         sequence += 1
+        if capture_version == CAPTURE_V2 and not experiment:
+            spent = sum(n if n is not None else cap for n, cap, _ in capture.calls)
+            remaining = 65536 - spent
+            if remaining < 1:
+                raise OutputLimitReached("comparison generation cap reached")
+            body = dict(body, max_tokens=min(body["max_tokens"], remaining))
         if experiment and "reasoning_effort" in experiment:
             body["reasoning"] = {
                 "effort": experiment["reasoning_effort"],
                 "exclude": not experiment["capture_reasoning"],
             }
-        return broker.model_call(f"generate-{sequence}", body)
+        if not extended and record is not None:
+            if sequence == 1:
+                observe(
+                    {
+                        "index": 0,
+                        "kind": "start",
+                        "model": job["model"],
+                        "messages": body["messages"],
+                        "tools": body["tools"],
+                        "prefix_turns": 0,
+                        "representation": "model_visible",
+                    }
+                )
+            else:
+                observe_legacy_tools(body["messages"])
+        request_id = f"generate-{sequence}"
+        result = broker.model_call(request_id, body)
+        allowance = body["max_tokens"]
+        if hasattr(broker, "arm") and getattr(broker, "calls", None):
+            allowance = broker.calls[-1]["output_allowance"]
+        capture.returned(
+            request_id, dict(body, max_tokens=allowance), result, allowance
+        )
+        if not extended and record is not None:
+            choices = result.get("choices")
+            if (
+                isinstance(choices, list)
+                and len(choices) == 1
+                and isinstance(choices[0].get("message"), dict)
+            ):
+                choice = choices[0]
+                observe(
+                    {
+                        "index": capture.index,
+                        "kind": "reply",
+                        "turn": sequence - 1,
+                        "model": result.get("model"),
+                        "receipt": result.get("id"),
+                        "usage": result.get("usage"),
+                        "finish_reason": choice.get("finish_reason"),
+                        "message": choice["message"],
+                    }
+                )
+        return result
 
     def observe(event):
-        require_private_evidence(event)
+        capture.check(event, "event-" + event["kind"])
+        capture.observe(event)
+        visible = {
+            "start": ("messages", "tools"),
+            "reply": ("message",),
+            "tool": ("name", "output"),
+        }.get(event["kind"])
+        if visible:
+            event["visible_training_safe"] = not builders.heldout.found_in(
+                _encode([event[k] for k in visible])
+            )
+            capture.visible_training_safe &= event["visible_training_safe"]
         if event["kind"] in {"before", "finish"}:
             state = {
                 "state": event["state"],
@@ -325,9 +440,24 @@ def play_workflow(
                     p: v for p, v in event["files"].items() if task["files"].get(p) != v
                 },
             }
-            event["code_checks"] = builders.grade(task, state)
-        if builders.KEYS.search(_encode(event)):
-            raise ValueError("credential in workflow evidence")
+            if event["kind"] == "finish":
+                capture.archive_run(
+                    {
+                        "model": job["model"],
+                        "finish": event["finish"],
+                        "messages": capture.messages,
+                        "tools": capture.tools,
+                        "out": state,
+                    },
+                    task,
+                    job,
+                )
+            try:
+                event["code_checks"] = builders.grade(task, state)
+            except Exception:
+                if record is not None:
+                    record(event)
+                raise
         if record is not None:
             record(event)
         # Original steps are written once to the private recorder. Only short
@@ -358,34 +488,92 @@ def play_workflow(
             )
 
     world = builders.world(task)
-    run = harness.run_task(
-        {"type": "workflow", "scenario": task},
-        model=job["model"],
-        complete=complete,
-        world=world,
-        **(
+    adapter = getattr(broker, "broker", broker)
+    use_wire = save is not None and hasattr(adapter, "record_generation")
+    if use_wire:
+        prior_hook = adapter.record_generation
+        adapter.record_generation = capture.wire_response
+    try:
+        run = harness.run_task(
+            {"type": "workflow", "scenario": task},
+            model=job["model"],
+            complete=complete,
+            world=world,
+            **(
+                {
+                    "resume": continuation["checkpoint"] if continuation else None,
+                    "record": observe,
+                    "max_steps": max_steps,
+                    "max_tokens": max_tokens,
+                }
+                if extended
+                else {}
+            ),
+        )
+    except QuarantinedWorkflow:
+        raise
+    except Exception as exc:
+        latest = capture.calls[-1][2] if capture.calls else None
+        limited = isinstance(exc, OutputLimitReached) or (
+            latest == "length" and str(exc) == "incomplete model reply"
+        )
+        run = capture.partial(
+            task, world, job["model"], "output_limit" if limited else "interrupted"
+        )
+        if not limited:
+            capture.archive_run(run, task, job)
+            raise
+        if extended:
+            out = run["out"]
+            files = {**task["files"], **out["files"]}
+            observe(
+                {
+                    "kind": "finish",
+                    "index": capture.index,
+                    "finish": "output_limit",
+                    "answer": "",
+                    "files": files,
+                    "state": out["state"],
+                    "log": out["log"],
+                }
+            )
+    finally:
+        if use_wire:
+            adapter.record_generation = prior_hook
+    if not extended and record is not None:
+        observe_legacy_tools(run["messages"])
+        out = run["out"]
+        observe(
             {
-                "resume": continuation["checkpoint"] if continuation else None,
-                "record": observe,
-                "max_steps": max_steps,
-                "max_tokens": max_tokens,
+                "index": capture.index,
+                "kind": "finish",
+                "finish": run["finish"],
+                "answer": out["answer"],
+                "state": out["state"],
+                "files": {**task["files"], **out["files"]},
+                "log": out["log"],
             }
-            if extended
-            else {}
-        ),
-    )
+        )
+    capture.archive_run(run, task, job)
     out = run["out"]
     grade = builders.grade(task, out)
     msgs = run["messages"]
     labels = [n for n, m in enumerate(msgs) if m["role"] == "assistant"]
-    structure = builders.shape_problems(msgs, labels, run["tools"])
+    # A partial tool call can be syntactically unfinished. Never validate it as
+    # an executed action or dispatch it. Its original bytes are already private.
+    structure = (
+        ["output_limit"]
+        if run["finish"] == "output_limit"
+        else builders.shape_problems(msgs, labels, run["tools"])
+    )
     checks = {
         "answered": run["finish"] == "answered",
         "shape": not structure,
         "code_grade": grade["score"] == 1,
         "no_hard_failure": not grade.get("hard_fail"),
         "privacy": not builders.KEYS.search(_encode([msgs, run["tools"]])),
-        "training_split": not builders.heldout.found_in(_encode(msgs)),
+        "training_split": capture.visible_training_safe
+        and not builders.heldout.found_in(_encode(msgs)),
     }
     units = [u for u in builders.units(task, out) if u.get("text")]
     facts = {u["id"]: u["sources"] for u in units}
@@ -401,21 +589,66 @@ def play_workflow(
         "final_output": deliverable,
         "checks": checks,
     }
-    try:
-        for field in ("task", "reference_answer", "grading_notes", "final_output"):
-            if len(packet[field]) > 65536:
-                raise IncompleteEvidence(field + "_exceeds_limit")
-        packet["facts"] = _excerpts(
-            _encode(facts or task["files"]),
-            _anchors(reference + "\n" + deliverable),
-            65536,
+    if capture_version == CAPTURE_V2:
+        from lab_arena.collection_judge_segments import annotate_packet
+
+        packet["facts"] = _encode(
+            {"cited_sources": facts, "original_files": task["files"]}
         )
-        packet["steps"] = _steps(msgs, reference, deliverable)
-    except IncompleteEvidence as exc:
-        # The generator row still contains the full original run, and the job retains
-        # its private source identities. No partial packet is dispatched to a judge.
-        packet["projection_error"] = str(exc)
-        packet["steps"] = []
+        full_results = []
+        for m in msgs:
+            original = capture.tool_outputs.get(m.get("tool_call_id"))
+            if (
+                m["role"] == "tool"
+                and original is not None
+                and original != m["content"]
+            ):
+                # State what the model actually saw when a public tool clipped its
+                # return. The rest is evidence for the verifier, not for the model.
+                result = {
+                    "original_result": original,
+                    "model_visible_prefix_chars": len(m["content"]),
+                }
+                if not original.startswith(m["content"]):
+                    result["model_visible_content"] = m["content"]
+                m = dict(m, content=_encode(result))
+            full_results.append(m)
+        packet["steps"] = _steps(full_results, reference, deliverable, full=True)
+        annotate_packet(packet)
+        if packet.get("projection_error"):
+            # A bounded review cannot accept this run. The original judge material
+            # is still available for a future authorized review with larger limits.
+            capture.check(packet, "full-judge-evidence")
+            full = save("full-judge-evidence", packet) if save else None
+            packet = {
+                k: packet[k]
+                for k in (
+                    "run_id",
+                    "scenario_id",
+                    "checks",
+                    "judge_segments",
+                    "projection_error",
+                )
+            }
+            packet.update(
+                steps=[], claim_reader={"units": [], "results": []}, full_evidence=full
+            )
+    else:
+        try:
+            for field in ("task", "reference_answer", "grading_notes", "final_output"):
+                if len(packet[field]) > 65536:
+                    raise IncompleteEvidence(field + "_exceeds_limit")
+            packet["facts"] = _excerpts(
+                _encode(facts or task["files"]),
+                _anchors(reference + "\n" + deliverable),
+                65536,
+            )
+            packet["steps"] = _steps(msgs, reference, deliverable)
+        except IncompleteEvidence as exc:
+            # The generator row still contains the full original run, and the job retains
+            # its private source identities. No partial packet is dispatched to a judge.
+            packet["projection_error"] = str(exc)
+            packet["steps"] = []
     row = {
         "run": job["job_id"],
         "source": "locked_workflow",
@@ -433,7 +666,14 @@ def play_workflow(
     row["split"] = packet["split"] = scenario_split(builders, task, shape)
     if extended:
         row["experiment"] = experiment
+        before = [e for e in events if e["kind"] in ("before", "finish")]
         row["evidence"] = {
+            "generation": capture.summary(run),
+            "step_checks": [
+                {"turn": a["turn"], "before": a["checks"], "after": b["checks"]}
+                for a, b in zip(before, before[1:])
+                if a["kind"] == "before"
+            ],
             "out": out,
             "grade": grade,
             "finish": run["finish"],
@@ -468,9 +708,19 @@ def play_workflow(
             )
     from lab_arena.collection_claims import ensure_claim_units
 
-    packet = ensure_claim_units(packet, task=task, out=out, messages=msgs)
-    require_private_evidence(packet)
-    require_private_evidence(row)
+    if not extended:
+        row["evidence"] = {
+            "out": out,
+            "grade": grade,
+            "finish": run["finish"],
+            "generation": capture.summary(run),
+        }
+    capture.check(row, "generator")
+    if save is not None:
+        save("generator", row)
+    if not (capture_version == CAPTURE_V2 and packet.get("projection_error")):
+        packet = ensure_claim_units(packet, task=task, out=out, messages=msgs)
+    capture.check(packet, "judge-input")
     return row, packet
 
 

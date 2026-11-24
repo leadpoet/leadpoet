@@ -72,23 +72,36 @@ def process_job(
             if research is None:
                 raise ValueError("missing trusted research runner")
             row, packet = research(job, broker)
-        elif capture:
-            if (
+        else:
+            if capture and (
                 getattr(sources[0], "source_revision", None),
                 getattr(sources[1], "source_revision", None),
             ) != (agent, builder):
                 raise ValueError("comparison worker loaded the wrong pinned sources")
             journal = WorkflowJournal(objects, batch, run_id)
+            if split is not None:
+                journal.save("split", split)
             try:
                 row, packet = play_workflow(
-                    *sources, job, broker, record=journal.append
+                    *sources,
+                    job,
+                    broker,
+                    record=journal.append,
+                    save=journal.save,
+                    capture_version=capture_version,
                 )
-            except Exception:
+            except Exception as exc:
                 journal.finish("interrupted")
+                journal.save(
+                    "interruption",
+                    {
+                        "job_id": run_id,
+                        "cause": type(exc).__name__,
+                        "events": journal.hashes,
+                    },
+                )
                 raise
             journal.finish("completed")
-        else:
-            row, packet = play_workflow(*sources, job, broker)
         if (
             row["run"] != run_id
             or row["teacher"] != job["model"]
@@ -116,7 +129,20 @@ def process_job(
                             record_vote=lambda vote: persist(objects, batch, run_id, "claim-vote", vote), protocol=claim_protocol)
     packet_ref = persist(objects, batch, run_id, "judge-input", packet)
     assessment = judge.judge_run(
-        policy, assignment, packet, broker.judge, prompt=prompt
+        policy,
+        assignment,
+        packet,
+        broker.judge,
+        prompt=prompt,
+        record_segment=(
+            (
+                lambda role, entry: journal.save(
+                    f"judge-part-{role}-{entry['part']:04d}", entry
+                )
+            )
+            if journal is not None
+            else None
+        ),
     )
     judge_ref = persist(objects, batch, run_id, "judge-output", assessment)
     manifest = {

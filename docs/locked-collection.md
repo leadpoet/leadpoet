@@ -47,6 +47,12 @@ A verified model-only 429 may receive one replacement on its original pilot slot
 
 An unresolved miner charge retains its original reservation. If OpenRouter supplied a generation ID on a finished job, the gateway operator can run `python -m scripts.reconcile_collection_generation --job JOB_ID --request REQUEST_ID --environment-file GATEWAY_ENV`. This reads the original generation on its authorized account and records the exact charge once. A missing, revoked or unpriced generation keeps its reservation. The job's outcome and earnings stay tied to the original execution.
 
+### A witnessed route change in a private reference pack
+
+For a capacity outage, a private synthetic pilot can use a separate immutable successor. It pins an approved alternative endpoint for the same generator revision and precision. Its `reference_successor` field identifies the original batch ID, the next unassigned slot and a private owner-funded test receipt. All other frozen batch settings must match. The database owner records the successor and verifies that the parent has no running lease and its next real slot still matches. The previous batch then closes to new claims. Historical jobs stay under their original IDs, and the next claim uses the original slot number, model, scenario, spending cap and daily allowance.
+
+The first witnessed alternative uses CoreWeave FP8 for DeepSeek V4 Pro-0813. The worker preflights its current strict zero-retention endpoint and pins its route on every call. The successor is for private reference inspection. It cannot price work, release training data or contribute a mixed-route qualification cohort.
+
 ## Running one batch
 
 Use an approved operator environment on the gateway. Source revisions are in `lab_arena/collection_workflow.py`. The public champion and authorized private Poet9B Git checkouts must contain those exact commit objects. The worker materializes the source trees from Git. The private checkout supplies guarded scenario generation, reference answers and deterministic graders.

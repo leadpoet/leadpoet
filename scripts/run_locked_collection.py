@@ -15,7 +15,12 @@ from uuid import UUID
 from lab_arena import chain, collection_judge as judge
 from lab_arena.broker import HttpxProviderTransport
 from lab_arena.collection_prices import endpoint_prices
-from lab_arena.collection_broker import CollectionBroker, batch_versions
+from lab_arena.collection_broker import (
+    CollectionBroker,
+    REFERENCE_MODEL,
+    REFERENCE_ROUTE,
+    batch_versions,
+)
 from lab_arena.collection_intake import (
     GENERATOR_ROUTES, LEGACY_COMPARISON_TERMS_HASH, MODELS, SYNTHETIC_TRAINING_TERMS_HASH,
     CollectionIntake, live_finney_arena,
@@ -46,6 +51,7 @@ def load_batch(raw, prompt):
         "capture_version",
         "thresholds",
         "terms_sha256",
+        "reference_successor",
         "control_artifacts",
         "claim_pack_sha256",
     } != {
@@ -102,10 +108,43 @@ def load_batch(raw, prompt):
         re.fullmatch(r"[a-z0-9][a-z0-9._/-]{0,127}", v) for v in raw["routes"].values()
     ):
         raise ValueError("every generator and judge needs one pinned provider route")
-    if any(
-        raw["routes"][model] != route.tag for model, route in GENERATOR_ROUTES.items()
-    ):
-        raise ValueError("unverified generator route")
+    successor = raw.get("reference_successor")
+    if "reference_successor" in raw:
+        from lab_arena.collection_generation import CAPTURE_V2
+
+        if (
+            not isinstance(successor, dict)
+            or set(successor) != {"parent", "next_slot", "owner_witness_sha256"}
+            or not isinstance(successor["parent"], str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]+-[a-f0-9]{24}", successor["parent"])
+            or type(successor["next_slot"]) is not int
+            or not 0 < successor["next_slot"] < len(MODELS) * len(scenarios)
+            or MODELS[successor["next_slot"] % len(MODELS)] != REFERENCE_MODEL
+            or not isinstance(successor["owner_witness_sha256"], str)
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}", successor["owner_witness_sha256"]
+            )
+            or raw["mode"] != "pilot"
+            or raw.get("capture_version") != CAPTURE_V2
+            or raw.get("terms_sha256") != SYNTHETIC_TRAINING_TERMS_HASH
+            or not qualification
+            or not raw.get("split_manifest")
+            or raw["control_slots"]
+            or raw["drift_slots"]
+            or raw.get("control_artifacts")
+        ):
+            raise ValueError("invalid witnessed reference successor")
+        parent_raw = {k: v for k, v in raw.items() if k != "reference_successor"}
+        parent_raw["routes"] = dict(raw["routes"])
+        parent_raw["routes"][REFERENCE_MODEL] = GENERATOR_ROUTES[REFERENCE_MODEL].tag
+        if load_batch(parent_raw, prompt).batch_id != successor["parent"]:
+            raise ValueError("successor changes earlier frozen batch settings")
+    for model, route in GENERATOR_ROUTES.items():
+        expected = (
+            REFERENCE_ROUTE if successor and model == REFERENCE_MODEL else route.tag
+        )
+        if raw["routes"][model] != expected:
+            raise ValueError("unverified generator route")
     bundle_hash = judge.digest(
         {
             "manifest": raw,
@@ -126,7 +165,7 @@ def load_batch(raw, prompt):
     if qualification:
         versions["fable_version"], versions["astra_version"] = judge.QUALIFICATION_JUDGES
     policy = judge.BatchPolicy(
-        raw["name"] + "-" + bundle_hash[:24],
+        ("rs-" + bundle_hash if successor else raw["name"] + "-" + bundle_hash[:24]),
         raw["seed"],
         judge.digest(prompt),
         pilot=raw["mode"] == "pilot",

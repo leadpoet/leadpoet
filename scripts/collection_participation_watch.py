@@ -35,16 +35,24 @@ def validator_snapshot(env, db):
     finally:
         reader.close()
     epoch = snap.settlement_epoch_id(chain.load_arena_cutover(env))
-    state = ArenaStore(db).get_weight_state("finney", 71, epoch)
+    store = ArenaStore(db)
+    weight_start = store.collection_reward_start_epoch()
+    state = store.get_weight_state("finney", 71, epoch)
     if not state:
-        return {"block": snap.current_block, "epoch": epoch, "signed_state": False}
+        return {"block": snap.current_block, "epoch": epoch, "weight_start_epoch": weight_start, "signed_state": False}
     key = signing.KmsSigner(env["LAB_ARENA_SIGNING_KEY_ID"], region_name="us-east-1")
     doc = state["state_doc"]
     verify_accepted_weight_state_signature(doc, public_key_der=key.public_key_der, expected_public_key_hash=key.public_key_hash)
+    scope = ("finney", 71, snap.network_genesis_hash.removeprefix("0x"))
+    if (doc["network"], doc["netuid"], doc["genesis_hash"]) != scope or doc["epoch"] != epoch:
+        raise ValueError("signed state does not belong to this finalized epoch")
     rpc = HttpsJsonRpcTransport(OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT, timeout_seconds=15)
     block = snap.block_hash
     meta = rpc.call(method="state_call", params=[CHAIN_RPC_METHOD, encode_selective_metagraph_params(netuid=71), block], request_id=1)
-    hotkeys = decode_selective_metagraph_result(meta)["hotkeys"]
+    registry = decode_selective_metagraph_result(meta)
+    if registry["netuid"] != 71 or registry["block"] != snap.current_block:
+        raise ValueError("validator registry does not match the finalized SN71 block")
+    hotkeys = registry["hotkeys"]
     expected = derive_arena_weights(doc, hotkeys)
     matches = {}
     for name, hotkey in VALIDATORS.items():
@@ -61,7 +69,20 @@ def validator_snapshot(env, db):
         proof["quoted_jobs_match"] = {k: v for k, v in basis.items() if k != "valuation"} == quotes
         weighted = {hotkeys[i] for i in expected["sparse_uids"]}
         proof["unweighted_funders"] = len(set(quotes["quotes_microusd"]) - weighted)
-    return {"block": snap.current_block, "block_hash": block, "epoch": epoch, "signed_state": True, **proof,
+        if weight_start is not None and epoch >= weight_start and basis["job_count"] == 0:
+            prior = store.get_weight_state("finney", 71, weight_start - 1)
+            proof["signed_burn_only"] = False
+            if prior:
+                previous = prior["state_doc"]
+                verify_accepted_weight_state_signature(previous, public_key_der=key.public_key_der,
+                                                       expected_public_key_hash=key.public_key_hash)
+                proof["signed_burn_only"] = (
+                    previous["epoch"] == weight_start - 1
+                    and (previous["network"], previous["netuid"], previous["genesis_hash"]) == scope
+                    and doc["burn_hotkey"] == previous["burn_hotkey"] and weighted == {doc["burn_hotkey"]}
+                    and expected["sparse_weights_u16"] == [65535] and expected["burned_residual_ppb"] == 1_000_000_000)
+    return {"block": snap.current_block, "block_hash": block, "epoch": epoch, "weight_start_epoch": weight_start,
+            "signed_state": True, **proof,
             "validators": matches, "champion_ppb": expected["champion_share_ppb"],
             "collection_ppb": expected.get("collection_share_ppb", 0), "burn_ppb": expected["burned_residual_ppb"]}
 
@@ -183,15 +204,22 @@ def notices(data):
             if state != "matches":
                 signals[validator + " finalized vector " + state] = 1
         signals["collection allocation is nonzero; verify recipients"] = bool(weights.get("collection_ppb"))
-        cutover = collection.get("first_epoch")
-        if cutover is not None and weights["signed_state"] and weights["epoch"] >= cutover:
+        paid_start = collection.get("first_epoch")
+        weight_start = weights.get("weight_start_epoch") or paid_start
+        signals["first collection-weight epoch"] = weight_start
+        if weight_start is not None and weights["signed_state"] and weights["epoch"] >= weight_start:
             matches = weights.get("validators", {})
             verified = (weights.get("basis_schema") == "leadpoet.collection.fixed_run_quotes.v1"
                         and weights.get("quoted_jobs_match") is True and weights.get("unweighted_funders") == 0
                         and weights.get("champion_ppb") == 0
                         and all(matches.get(name) == "matches" for name in VALIDATORS))
-            signals["post-cutover collection basis and zero champion component verified on all three validators"] = verified
-            signals["inspect post-cutover reward evidence"] = not verified
+            if paid_start is None or weights["epoch"] < paid_start:
+                verified = verified and weights.get("signed_burn_only") is True
+                signals["retired champion weights verified at the designated burn hotkey on all three validators"] = verified
+                signals["inspect burn-only retirement weights"] = not verified
+            else:
+                signals["post-cutover collection basis and zero champion component verified on all three validators"] = verified
+                signals["inspect post-cutover reward evidence"] = not verified
     return {key: value for key, value in signals.items() if value}
 
 

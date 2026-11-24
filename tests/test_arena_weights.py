@@ -342,6 +342,15 @@ def test_runtime_transaction_version_is_bound_across_signed_recovery():
     )
     assert recovered["extrinsic_hex"] == signed["extrinsic_hex"]
 
+    legacy = deepcopy(signed["recovery_record"])
+    legacy["authorization"].pop("runtime_transaction_version")
+    legacy["authorization_hash"] = sha256_json(legacy["authorization"])
+    legacy["record_signature_hex"] = "78" * 64
+    recovered_legacy = restarted.recover(
+        {"accepted_state": state, "recovery_record": legacy}
+    )
+    assert recovered_legacy["extrinsic_hex"] == signed["extrinsic_hex"]
+
 
 def test_protected_signer_rejects_state_burn_key_outside_sealed_policy():
     state, der, key_hash = _signed_state()

@@ -92,7 +92,8 @@ something is wrong. All commands refuse until the vault is deployed.
 4. Run `cli verify`. Its `compose_hash` must be the approved one.
 
 First deploy only: make the GHCR package public so Phala can pull it, and
-fill `deployment.json` (url, app id, KMS root key, contract, chain). The
+fill `deployment.json` (the TLS passthrough url ending `-8080s.<gateway
+domain>`, app id, KMS root key, contract, chain). The
 **Lead-order vault uptime** check then runs `cli verify` every 30 minutes;
 a failed run is the alert.
 

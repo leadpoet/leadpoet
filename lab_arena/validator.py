@@ -375,13 +375,18 @@ class ArenaWeightOrchestrator:
     def _fresh_era_fits(self, state: Mapping[str, Any], current_block: int) -> bool:
         from leadpoet_canonical.hotkey_authority_v2 import mortal_era_bounds
 
+        current = int(current_block)
+        valid_until = int(state["valid_until_block"])
+        if current < int(state["valid_from_block"]) or current > valid_until:
+            return False
+        available = valid_until - current + 1
+        if available < 4:
+            return False
+        period = min(self.extrinsic_period, 1 << (available.bit_length() - 1))
         _birth, death = mortal_era_bounds(
-            period=self.extrinsic_period, current=int(current_block)
+            period=period, current=current
         )
-        return (
-            int(state["valid_from_block"]) <= int(current_block)
-            and int(death) - 1 <= int(state["valid_until_block"])
-        )
+        return int(death) - 1 <= valid_until
 
     def _recover_protected_state(self, signed: Mapping[str, Any]) -> None:
         accepted_state = signed.get("accepted_state")
@@ -484,25 +489,8 @@ class ArenaWeightOrchestrator:
         if not rate_limit_ready:
             return "rate_limited"
         host_result = self._host_derivation(state, metagraph.hotkeys)
-        substrate = self.chain.client
-        nonce = substrate.get_account_nonce(self.validator_hotkey)
-        if nonce is None or isinstance(nonce, bool):
-            raise ArenaValidatorError("finalized validator nonce is unavailable")
-        nonce = int(nonce)
-        if nonce < 0:
-            raise ArenaValidatorError("finalized validator nonce is invalid")
-        era_current = head.number
-        era = substrate.runtime_config.create_scale_object("Era")
-        era.encode({"period": self.extrinsic_period, "current": era_current})
-        birth_hash = str(substrate.get_block_hash(block_id=era.birth(era_current))).removeprefix("0x")
         protected = self.signer.prepare_arena_weight_extrinsic_v1(
-            {
-                "accepted_state": state,
-                "nonce": int(nonce),
-                "era_current": era_current,
-                "runtime_block_hash": head.hash,
-                "block_hash": birth_hash,
-            }
+            {"accepted_state": state}
         )
         protected_fields = {
             "schema_version", "state_hash", "epoch", "netuid", "finalized_block",

@@ -27,11 +27,6 @@ class ArenaWeightSignerError(RuntimeError):
     """A requested Arena chain signature is not authorized."""
 
 
-def _without_hex_prefix(value: Any) -> str:
-    text = str(value or "").lower()
-    return text[2:] if text.startswith("0x") else text
-
-
 class ArenaWeightSigner:
     """Verify accepted state and finalized ownership before signing one call."""
 
@@ -69,7 +64,7 @@ class ArenaWeightSigner:
             return self._prepare_locked(request)
 
     def _prepare_locked(self, request: Mapping[str, Any]) -> Dict[str, Any]:
-        expected = {"accepted_state", "nonce", "era_current", "runtime_block_hash", "block_hash"}
+        expected = {"accepted_state"}
         if not isinstance(request, Mapping) or set(request) != expected:
             raise ArenaWeightSignerError("Arena weight signature request fields are invalid")
         state = request["accepted_state"]
@@ -125,16 +120,29 @@ class ArenaWeightSigner:
                 raise ArenaWeightSignerError("finalized chain epoch differs from accepted state")
             derived = derive_arena_weights(state, snapshot["metagraph"]["hotkeys"])
             runtime = self._chain_source.read_chain_signing_runtime(
-                runtime_block_hash=str(request["runtime_block_hash"]),
+                runtime_block_hash=str(snapshot["finalized_block_hash"]),
                 max_block_drift=int(self.chain_profile["max_snapshot_block_drift"]),
             )
             if not int(state["valid_from_block"]) <= int(runtime["finalized_block"]) <= int(state["valid_until_block"]):
                 raise ArenaWeightSignerError("accepted Arena state is stale at signing finalized head")
-            if int(request["era_current"]) != int(runtime["runtime_block"]):
-                raise ArenaWeightSignerError("era current differs from authenticated runtime block")
+            profile = select_chain_signing_profile(
+                self.chain_profile,
+                runtime_version={"specVersion": runtime["spec_version"], "transactionVersion": runtime["transaction_version"]},
+                genesis_hash=runtime["genesis_hash"],
+            )
+            era_current = int(runtime["runtime_block"])
+            available_blocks = int(state["valid_until_block"]) - era_current + 1
+            if available_blocks < 4:
+                raise ArenaWeightSignerError(
+                    "accepted Arena state has insufficient mortal era validity"
+                )
+            era_period = min(
+                int(profile["extrinsic_period"]),
+                1 << (available_blocks.bit_length() - 1),
+            )
             birth, death = mortal_era_bounds(
-                period=int(self.chain_profile["extrinsic_period"]),
-                current=int(request["era_current"]),
+                period=era_period,
+                current=era_current,
             )
             if int(death) - 1 > int(state["valid_until_block"]):
                 raise ArenaWeightSignerError(
@@ -151,18 +159,9 @@ class ArenaWeightSigner:
             if not birth <= int(runtime["finalized_block"]) < death:
                 raise ArenaWeightSignerError("mortal era is not live at finalized head")
             mortality_hash = self._chain_source.read_canonical_block_hash(block=birth)
-            if _without_hex_prefix(request["block_hash"]) != mortality_hash:
-                raise ArenaWeightSignerError("mortality block hash differs from canonical era birth")
             finalized_nonce = self._chain_source.read_finalized_account_nonce(
                 account_public_key_hex=self.hotkey_public_key_hex,
                 finalized_block_hash=runtime["finalized_block_hash"],
-            )
-            if int(request["nonce"]) != finalized_nonce:
-                raise ArenaWeightSignerError("nonce differs from finalized account state")
-            profile = select_chain_signing_profile(
-                self.chain_profile,
-                runtime_version={"specVersion": runtime["spec_version"], "transactionVersion": runtime["transaction_version"]},
-                genesis_hash=runtime["genesis_hash"],
             )
             commitment, reveal_round = self._drand.generate_commit(
                 uids=derived["sparse_uids"], weights_u16=derived["sparse_weights_u16"],
@@ -183,8 +182,8 @@ class ArenaWeightSigner:
             )
             preimage, signed_message = encode_weight_signature_payload(
                 profile=profile, call_bytes=call,
-                era_current=int(request["era_current"]), nonce=int(request["nonce"]),
-                block_hash=str(request["block_hash"]),
+                era_current=era_current, nonce=finalized_nonce,
+                block_hash=mortality_hash,
             )
             authorization_body = {
                 "schema_version": "leadpoet.arena.weight_extrinsic_authorization.v1",
@@ -203,9 +202,10 @@ class ArenaWeightSigner:
                 "commitment_hash": sha256_bytes(bytes(commitment)),
                 "reveal_round": int(reveal_round), "call_data_hash": sha256_bytes(call),
                 "runtime_spec_version": int(profile["spec_version"]),
-                "era_current": int(request["era_current"]),
-                "era_period": int(profile["extrinsic_period"]), "nonce": int(request["nonce"]),
-                "block_hash": _without_hex_prefix(request["block_hash"]),
+                "runtime_transaction_version": int(profile["transaction_version"]),
+                "era_current": era_current,
+                "era_period": era_period, "nonce": int(finalized_nonce),
+                "block_hash": mortality_hash,
                 "signature_payload_preimage_hash": sha256_bytes(preimage),
                 "signed_message_hash": sha256_bytes(signed_message),
             }
@@ -220,8 +220,8 @@ class ArenaWeightSigner:
                 raise ArenaWeightSignerError("protected sr25519 signer returned invalid signature")
             extrinsic = encode_signed_extrinsic_v2(
                 hotkey_public_key_hex=self.hotkey_public_key_hex,
-                signature_hex=signature.hex(), era_period=int(profile["extrinsic_period"]),
-                era_current=int(request["era_current"]), nonce=int(request["nonce"]),
+                signature_hex=signature.hex(), era_period=era_period,
+                era_current=era_current, nonce=int(finalized_nonce),
                 call_data_hex=call.hex(),
             )
         except ArenaWeightSignerError:
@@ -241,7 +241,7 @@ class ArenaWeightSigner:
             "signature_hex": signature.hex(), "call_data_hex": call.hex(),
             "commitment_hex": bytes(commitment).hex(),
             "extrinsic_hex": extrinsic.hex(), "extrinsic_hash": result["extrinsic_hash"],
-            "minimum_block": int(request["era_current"]),
+            "minimum_block": era_current,
             "maximum_block": min(int(state["valid_until_block"]), int(death) - 1),
             "subnet_epoch_index": int(epoch_authority["subnet_epoch_index"]),
             "reveal_deadline_block": int(epoch_authority.get(
@@ -267,7 +267,7 @@ class ArenaWeightSigner:
                 "result": dict(result), "extrinsic_hex": extrinsic.hex(),
                 "commitment": bytes(commitment), "reveal_round": int(reveal_round),
                 "subnet_epoch_index": int(epoch_authority["subnet_epoch_index"]),
-                "nonce": int(request["nonce"]), "minimum_block": int(request["era_current"]),
+                "nonce": int(finalized_nonce), "minimum_block": era_current,
                 "maximum_block": min(int(state["valid_until_block"]), int(death) - 1),
                 "reveal_deadline_block": recovery_body["reveal_deadline_block"],
             }
@@ -300,7 +300,11 @@ class ArenaWeightSigner:
                 raise ArenaWeightSignerError("Arena recovery authorization targets another state")
             profile = select_chain_signing_profile(
                 self.chain_profile,
-                runtime_version={"specVersion": authorization["runtime_spec_version"], "transactionVersion": self.chain_profile["transaction_version"]},
+                runtime_version={"specVersion": authorization["runtime_spec_version"],
+                                 "transactionVersion": int(authorization.get(
+                                     "runtime_transaction_version",
+                                     self.chain_profile["transaction_version"],
+                                 ))},
                 genesis_hash=self.chain_profile["genesis_hash"],
             )
             call = bytes.fromhex(str(recovery["call_data_hex"]))

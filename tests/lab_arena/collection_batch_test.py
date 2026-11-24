@@ -49,6 +49,8 @@ def pilot(tmp_path, request):
         "anthropic/claude-fable-5.2": "test", "openai/gpt-6.2-astra": "test"
     }
     roles = judge.QUALIFICATION_ROLES if candidate else judge.JUDGES
+    judge_families = {judge.model_family(m) for m in models}
+    drift_slots = [i for i in range(130) if judge.model_family(MODELS[i % len(MODELS)]) not in judge_families][-30:]
     raw = {
         "name": "test",
         "split_manifest": SPLIT,
@@ -66,7 +68,7 @@ def pilot(tmp_path, request):
         "control_slots": {"130": True, "131": False},
         "drift_slots": {
             str(i): {v: dict.fromkeys(judge.PARTS, 3) for v in roles}
-            for i in range(100, 130)
+            for i in drift_slots
         },
     }
     private_cases = {}
@@ -74,7 +76,7 @@ def pilot(tmp_path, request):
         "prior-drift-baseline", "earlier-seed", judge.digest(PROMPT), pilot=True,
         fable_version=tuple(models)[0], astra_version=tuple(models)[1],
     )
-    for i in range(100, 132):
+    for i in [*drift_slots, 130, 131]:
         src = f"reference-{i}"
         sid = raw["scenario_ids"][i // 6]
         original = dict(
@@ -348,12 +350,17 @@ def test_exhausted_noncontrol_slot_does_not_erase_successes_but_failed_control_h
         review.verify_review(b, signed, public)
 
 @pytest.mark.parametrize("pilot", ["open-panel"], indirect=True)
-def test_signed_live_panel_price_compilation_requires_separate_economic_approval(pilot):
+@pytest.mark.parametrize("blind_only", [False, True])
+def test_signed_live_panel_price_compilation_requires_separate_economic_approval(pilot, blind_only):
     _, db, objects, bundle, _, _ = pilot
     reviewer, review_key = keys()
     operator, operator_key = keys()
-    receipt = review.sign_review(bundle, complete_marks(bundle), "blind-reviewer", reviewer)
-    assert receipt["report"]["holds"] == ["judge_qualification"]
+    if blind_only:
+        _, jobs = review.prepare_review(bundle, for_qualification=True)
+        receipt = review.sign_blind_review(jobs, complete_marks(bundle), judge.digest(bundle), "blind-reviewer", reviewer)
+    else:
+        receipt = review.sign_review(bundle, complete_marks(bundle), "blind-reviewer", reviewer)
+        assert receipt["report"]["holds"] == ["judge_qualification"]
     only_corrections = review.approve_qualification(bundle, receipt, review_key, "team-owner", operator)
     with pytest.raises(ValueError, match="excludes compensated"):
         compile_pilot(db, bundle, receipt, review_key, objects, approval=only_corrections, approver_key=operator_key)

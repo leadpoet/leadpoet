@@ -60,8 +60,13 @@ def main(argv=None):
     )
     approve.add_argument("--approver-private-key", type=Path, required=True)
     approve.add_argument("--attestation", type=Path, required=True)
-    for command in [sample, sign, verify, approve]:
+    for command in [sample, verify, approve]:
         command.add_argument("--bundle", type=Path, required=True)
+    signing_input = sign.add_mutually_exclusive_group(required=True)
+    signing_input.add_argument("--jobs", type=Path, help="Blind jobs from the qualification sample")
+    signing_input.add_argument("--bundle", type=Path, help="Historical full-bundle signing procedure")
+    sample.add_argument("--for-qualification", action="store_true",
+                        help="Check the cohort before asking humans to rate 50 runs")
     sample.add_argument("--jobs", type=Path, required=True)
     sample.add_argument("--claim-jobs", type=Path)
     sample.add_argument("--marks-template", type=Path, required=True)
@@ -73,9 +78,9 @@ def main(argv=None):
     verify.add_argument("--public-key", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        bundle = json.loads(read_file(args.bundle))
+        bundle = json.loads(read_file(args.bundle)) if args.bundle else None
         if args.action == "sample":
-            _, jobs = review.prepare_review(bundle)
+            _, jobs = review.prepare_review(bundle, for_qualification=args.for_qualification)
             if (
                 args.jobs == args.marks_template
                 or args.jobs.exists()
@@ -97,6 +102,7 @@ def main(argv=None):
                 args.marks_template,
                 {
                     **extra,
+                    **({"batch_sha256": judge.digest(bundle)} if args.for_qualification else {}),
                     "sample_sha256": judge.digest(jobs),
                     "marks": {alias: dict.fromkeys(judge.PARTS) for alias in jobs},
                 },
@@ -118,18 +124,22 @@ def main(argv=None):
             write_new(args.attestation, approved)
             print(json.dumps({"attestation_sha256": judge.digest(approved)}))
         elif args.action == "sign":
-            signed = review.sign_review(
-                bundle,
-                json.loads(read_file(args.marks)),
-                args.reviewer,
-                read_file(args.private_key, maximum=8192),
-            )
+            marks = json.loads(read_file(args.marks))
+            private_key = read_file(args.private_key, maximum=8192)
+            if args.jobs:
+                batch_sha256 = marks.pop("batch_sha256")
+                signed = review.sign_blind_review(
+                    json.loads(read_file(args.jobs)), marks, batch_sha256,
+                    args.reviewer, private_key,
+                )
+            else:
+                signed = review.sign_review(bundle, marks, args.reviewer, private_key)
             write_new(args.receipt, signed)
             print(
                 json.dumps(
                     {
                         "receipt_sha256": judge.digest(signed),
-                        "holds": signed["report"]["holds"],
+                        **({"holds": signed["report"]["holds"]} if "report" in signed else {}),
                     }
                 )
             )
@@ -149,6 +159,9 @@ def main(argv=None):
                 )
             )
         return 0
+    except review.QualificationSampleUnavailable as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     except (OSError, KeyError, TypeError, ValueError, RecursionError) as exc:
         print(f"review failed ({type(exc).__name__})", file=sys.stderr)
         return 2

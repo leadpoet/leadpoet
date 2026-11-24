@@ -230,6 +230,17 @@ def stack(tmp_path_factory):
                     "722-collection-call-budget.sql",
                     "723-collection-pilot-prices.sql",
                     "724-collection-scenario-ranking.sql",
+                    "725-collection-generator-roster.sql",
+                    "726-collection-first-paid-job.sql",
+                    "727-collection-synthetic-funding.sql",
+                    "728-collection-pilot-attempts.sql",
+                    "729-collection-ready-judge-recovery.sql",
+                    "732-collection-experiment-pilot.sql",
+                    "733-collection-correction-consent.sql",
+                    "738-collection-correction-tariff.sql",
+                    "740-collection-training-only-platform-task.sql",
+                    "741-collection-funding-statement.sql",
+                    "742-collection-participation-readback.sql",
                 ):
                     cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / migration).read_text())
             # Install additive current readers before PostgREST takes its

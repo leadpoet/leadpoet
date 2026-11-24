@@ -44,7 +44,8 @@ MODEL = "openai/gpt-test"
 DEAR = "openai/gpt-dear"  # 10,000 output tokens reserve $1.00: room for the costs the reward tests report
 SECRET = "x" * 40
 SIGNER = signing.LocalSigner.generate()
-POLICY_DOC = sign_policy(SIGNER, DEFAULT_POLICY_BODY)
+# A 30% lane cap, so the payout tests show a capped epoch and its carry-forward.
+POLICY_DOC = sign_policy(SIGNER, dict(DEFAULT_POLICY_BODY, lane_emission_cap="0.30"))
 POLICY = load_policy(POLICY_DOC, public_key_der=SIGNER.public_key_der, expected_public_key_hash=SIGNER.public_key_hash)
 PRICE_TABLE = price_table_from_models_response(
     {"data": [{"id": MODEL, "pricing": {"prompt": "0.000001", "completion": "0.000002"}},

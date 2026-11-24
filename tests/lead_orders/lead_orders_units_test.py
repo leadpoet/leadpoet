@@ -14,7 +14,7 @@ from lab_arena.credentials import CredentialError
 from lab_arena.lead_orders import auth, keys, money, receipts, rewards
 from lab_arena.lead_orders.config import LeadOrdersConfigError, load_config
 from lab_arena.lead_orders.gamma import GammaBalanceReader, GammaReadError
-from lab_arena.lead_orders.policy import unsigned_policy
+from lab_arena.lead_orders.policy import DEFAULT_POLICY_BODY, unsigned_policy
 
 POLICY = unsigned_policy()
 ALICE = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
@@ -316,9 +316,13 @@ def test_payout_document_shadow_without_price_and_live_with_price():
         rewards.epoch_payout_document(POLICY, epoch=3, mode="live", entries=entries, valuation=None)
     with pytest.raises(rewards.EmissionPriceUnavailable):
         rewards.UnavailableEmissionPrice().valuation(3)
-    # $4 of miner emission, 30% cap = $1.20: o1 in full, $0.60 of o2, $0.30 carried.
+    # $4 of miner emission under a 30% policy cap = $1.20: o1 in full, $0.60 of o2, $0.30 carried.
     valuation = {"emission_microusd": 4_000_000, "block": 50}
-    live = rewards.epoch_payout_document(POLICY, epoch=3, mode="live", entries=entries, valuation=valuation)
+    capped = unsigned_policy(dict(DEFAULT_POLICY_BODY, lane_emission_cap="0.30"))
+    live = rewards.epoch_payout_document(capped, epoch=3, mode="live", entries=entries, valuation=valuation)
+    # The default policy leaves the cap to the split: the whole epoch.
+    assert rewards.epoch_payout_document(POLICY, epoch=3, mode="live", entries=entries,
+                                         valuation=valuation)["carry_forward_microusd"] == 0
     assert live["cap_microusd"] == 1_200_000 and live["carry_forward_microusd"] == 300_000
     assert [p["paid_microusd"] for p in live["payments"]] == [600_000, 600_000]
     assert rewards.lane_fractions(live) == {ALICE: Fraction(3, 20), BOB: Fraction(3, 20)}

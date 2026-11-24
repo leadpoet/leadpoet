@@ -1,4 +1,4 @@
-"""Lead-order rewards ride the collection weight state: 80/20 with spill-over both ways."""
+"""Lead-order rewards ride the collection weight state: 70/30 with spill-over both ways."""
 
 from __future__ import annotations
 
@@ -66,18 +66,20 @@ def ppb(numerator, denominator=10):
 @pytest.mark.parametrize("quotes,lead,expected", [
     # Both inside their share: each is paid in full, the rest burns.
     ({A: 500_000}, {B: 100_000}, (ppb(5), ppb(1), ppb(4))),
-    # Collection over 80% takes the 10% lead orders leave.
+    # Collection over 70% takes the 20% lead orders leave.
     ({A: 1_200_000}, {B: 100_000}, (ppb(9), ppb(1), 0)),
-    # Lead orders over 20% take what collection leaves.
+    # Lead orders over 30% take what collection leaves.
     ({A: 300_000}, {B: 600_000}, (ppb(3), ppb(6), ppb(1))),
     ({A: 300_000}, {B: 900_000}, (ppb(3), ppb(7), 0)),
-    # Both over: exactly 80 / 20.
-    ({A: 2_000_000}, {B: 1_000_000}, (ppb(8), ppb(2), 0)),
+    # Both over: exactly 70 / 30.
+    ({A: 2_000_000}, {B: 1_000_000}, (ppb(7), ppb(3), 0)),
+    # Collection asks for everything, lead orders for 25%: lead orders are paid in full.
+    ({A: 1_000_000}, {B: 250_000}, (ppb(75, 100), ppb(25, 100), 0)),
     # No collection work: lead orders may use the whole epoch.
     ({}, {B: 400_000}, (0, ppb(4), ppb(6))),
     ({}, {B: 1_500_000}, (0, ppb(10), 0)),
 ])
-def test_collection_is_guaranteed_80_percent_lead_orders_20_and_each_uses_the_others_unused(quotes, lead, expected):
+def test_collection_is_guaranteed_70_percent_lead_orders_30_and_each_uses_the_others_unused(quotes, lead, expected):
     document = state(quotes, lead)
     verify_accepted_weight_state_signature(
         document, public_key_der=SIGNER.public_key_der, expected_public_key_hash=SIGNER.public_key_hash)
@@ -135,19 +137,19 @@ def test_a_payout_capped_by_the_gateway_allowance_is_never_scaled_by_validators(
     rng = random.Random(71)
     for _ in range(300):
         emission = rng.choice([1, 7, 999_999, USD, 123_456_789])
-        collection = rng.choice([0, emission // 3, emission * 4 // 5, emission, emission * 3])
-        owed = rng.choice([1, emission // 7 + 1, emission // 5, emission, emission * 2])
+        collection = rng.choice([0, emission // 3, emission * 7 // 10, emission, emission * 3])
+        owed = rng.choice([1, emission // 7 + 1, emission * 3 // 10, emission, emission * 2])
         allowance = weights.lead_order_allowance_microusd(emission, collection)
-        assert allowance >= emission // 5
+        assert allowance >= emission * 3 // 10
         paid = min(owed, allowance)
         if not paid:
             continue
         document = state({A: collection} if collection else {}, {B: paid}, emission=emission)
         got = derive_arena_weights(document, KEYS)
         assert got["lead_order_share_ppb"] == PARTS_PER_BILLION * paid // emission
-        # Collection keeps its full claim, or at least its 80%.
+        # Collection keeps its full claim, or at least its 70%.
         asked = PARTS_PER_BILLION * collection // emission
-        assert got["collection_share_ppb"] >= min(asked, ppb(8)) - 1
+        assert got["collection_share_ppb"] >= min(asked, ppb(7)) - 1
 
 
 def test_a_payment_too_small_to_weigh_waits_and_adds_up():
@@ -271,7 +273,7 @@ def test_lane_pays_only_in_live_mode_and_caps_at_the_allowance():
     (_, kwargs), = service.calls
     # The burn hotkey is never paid, and the payout names the collection total it was capped against.
     assert kwargs["registered_hotkeys"]() == [A, B, C] and kwargs["collection_microusd"] == 900_000
-    assert kwargs["payable_cap_microusd"](USD) == 200_000  # collection asks 90%: lead orders keep their 20%
+    assert kwargs["payable_cap_microusd"](USD) == 300_000  # collection asks 90%: lead orders keep their 30%
     assert kwargs["valuation"]()["tao_price_source"] == weights.TAO_PRICE_SOURCE
     # A live epoch that paid nothing adds nothing to the state.
     idle = weights.LeadOrderLane(FakeService("live", dict(document, paid_microusd=0, payments=[])),

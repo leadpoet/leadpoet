@@ -33,7 +33,7 @@ ACCEPTED_WEIGHT_STATE_SCHEMA_VERSION = "leadpoet.arena.accepted_weight_state.v1"
 COLLECTION_BASIS_SCHEMA = "leadpoet.collection.fixed_run_quotes.v1"
 # Collection is guaranteed this share of an epoch's miner emission and lead
 # orders the rest. Either lane may also use what the other leaves unused.
-COLLECTION_EMISSION_SHARE = Fraction(4, 5)
+COLLECTION_EMISSION_SHARE = Fraction(7, 10)
 LEAD_ORDER_EMISSION_SHARE = Fraction(1) - COLLECTION_EMISSION_SHARE
 WEIGHT_STATE_SIGNATURE_PREFIX = "arena_weight_state_hash:"
 PARTS_PER_BILLION = 1_000_000_000

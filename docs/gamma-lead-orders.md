@@ -38,7 +38,7 @@ shadow cannot move the live order of keys.
 | `min_leads_per_order` | 10 |
 | `min_charge_ratio` | 0.40 |
 | `spend_ceiling_per_lead_usd` | 0.50 |
-| `lane_emission_cap` | 0.30 of miner emission per epoch |
+| `lane_emission_cap` | 1.00 of miner emission per epoch |
 | `ranking_window_epochs` | 140 |
 | `daily_leads_per_hotkey` | 500 |
 | `order_deadline_minutes` | 60 |
@@ -62,8 +62,10 @@ refused:
 
 Known limit: the first invariant holds only for the assumed discounts. A miner
 whose real provider discount is above `max_provider_discounts` can profit from
-ordering against their own keys. `lane_emission_cap` bounds what that can earn
-per epoch.
+ordering against their own keys. Collection's guaranteed 70% of each epoch
+bounds what that can earn while collection work fills it; in an epoch with no
+collection work nothing but the owed amount bounds it. Lowering
+`lane_emission_cap` in a new signed policy is the brake.
 
 Each order records the policy version it was placed under. Its charge, rewards
 and receipt always use that stored version, never the current one.
@@ -461,19 +463,20 @@ Lead-order rewards are paid through the same signed weight state as locked
 collection ([locked-collection.md](locked-collection.md)). They are paid only
 in `live`, and only in epochs where collection rewards are active.
 
-- **Split.** Collection is guaranteed 80% of the epoch's miner emission and
-  lead orders 20%. Each may also use what the other leaves unused. With
+- **Split.** Collection is guaranteed 70% of the epoch's miner emission and
+  lead orders 30%. Each may also use what the other leaves unused, up to the
+  whole epoch. With
   emission `B`, collection quotes `C` and lead-order payments `L`:
-  collection gets `min(C, max(0.8B, B - min(L, 0.2B)))` and lead orders get
-  `min(L, max(0.2B, B - min(C, 0.8B)))`. What neither uses goes to burn.
+  collection gets `min(C, max(0.7B, B - min(L, 0.3B)))` and lead orders get
+  `min(L, max(0.3B, B - min(C, 0.7B)))`. What neither uses goes to burn.
   Validators apply this in `leadpoet_canonical.arena_weights.derive_arena_weights`.
 - **One price.** Both lanes use the single valuation the state signs.
 - **Gateway half.** When the Arena service issues the epoch's state it calls
   `lab_arena.lead_orders.weights.LeadOrderLane.settle`. That pays owed rewards
   oldest first, to registered hotkeys only, up to the lead orders' allowance
-  (`max(0.2B, B - C)`) and never above the policy's `lane_emission_cap`. So
-  with the policy at 0.30, lead orders reach at most 30% of an epoch even when
-  collection is idle; raising that takes a new signed policy.
+  (`max(0.3B, B - C)`) and never above the policy's `lane_emission_cap`. The
+  policy sets that at 1.00, so the split alone decides: 30% guaranteed, up to
+  100% when collection is idle.
 - **What the state carries.** A paying epoch adds `lead_orders` to the state:
   the payout document's `payout_hash` and micro-USD paid per miner. An epoch
   that pays no lead orders has exactly the collection state as before.
@@ -517,7 +520,7 @@ lead-order settings (mode, policy file) on its host.
   from the payout by up to half a step of the epoch's largest weight.
 - The emission price is one read. Someone who moves the alpha price at the
   epoch's first block, or a wrong CoinGecko quote, shifts that epoch's lane
-  cap and every miner's lane share with it. The lane cap bounds the effect.
+  cap and every miner's lane share with it. Collection's guaranteed 70% bounds the effect.
   The TAO/USD quote is published but cannot be proven from the chain.
 - Late costs on a failed order are mostly not repaid (see Money), and a late
   Deepline cost is repaid only when Deepline's answer arrives after finish:

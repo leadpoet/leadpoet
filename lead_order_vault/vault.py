@@ -592,6 +592,11 @@ class BoundedServer(ThreadingHTTPServer):
 
         self._reading.timer.cancel()
 
+    def handle_error(self, request, client_address) -> None:
+        # socketserver would print a traceback with the client's address;
+        # the vault never logs requests. A reset client is not an error.
+        pass
+
 
 def _shutdown(connection: socket.socket) -> None:
     # The base method, so the TLS layer is not torn down under its reader.

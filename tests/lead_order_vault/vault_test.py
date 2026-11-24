@@ -438,6 +438,23 @@ def test_an_unexpected_upstream_failure_still_gets_its_receipt():
     assert result["receipt"]["document"]["outcome"] == "transport_error"
 
 
+def test_a_client_that_resets_mid_request_leaves_no_trace(capsys):
+    import struct
+
+    vault, tls = _tls_vault()
+    with _serving(make_handler(vault), tls) as (server, _):
+        client = UNVERIFIED.wrap_socket(socket.create_connection(server.server_address))
+        client.sendall(b"POST /v1/call HTTP/1.1\r\ncontent-length: 1000\r\n" + CALLER_HEADER.encode()
+                       + b": " + TOKEN.encode() + b"\r\n\r\n{")
+        time.sleep(0.1)
+        # Close with a reset, not a clean shutdown.
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        client.close()
+        time.sleep(0.2)
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == ""
+
+
 def test_stopping_the_server_lets_a_call_in_flight_finish():
     started, release = threading.Event(), threading.Event()
 
@@ -490,6 +507,16 @@ def test_every_answer_closes_its_connection_and_slow_clients_are_cut(monkeypatch
         refused.read()
         assert refused.status == 401 and refused.will_close
         connection.close()
+        # A client that never finishes the TLS handshake is cut too.
+        silent = socket.create_connection(server.server_address)
+        silent.settimeout(3)
+        started = time.monotonic()
+        try:
+            assert silent.recv(1) == b""
+        except ConnectionResetError:
+            pass
+        assert time.monotonic() - started < 2
+        silent.close()
         # A client sending one byte at a time holds the only slot only until
         # the read deadline, not for as long as it keeps trickling.
         slow = UNVERIFIED.wrap_socket(socket.create_connection(server.server_address))

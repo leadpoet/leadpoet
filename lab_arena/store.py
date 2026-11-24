@@ -377,6 +377,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_reopen_review_outage_v1": (("p_round_id", "text"), ("p_round_sha256", "text"), ("p_submissions", "jsonb"), ("p_review_deadline", "timestamptz"), ("p_stage_2_close", "timestamptz"), ("p_final_scoring_close", "timestamptz"), ("p_publication_deadline", "timestamptz"), ("p_request_id", "text"), ("p_actor_ref", "text"), ("p_approval_ref", "text"), ("p_dry_run", "boolean")),
     "lab_arena_advance_review_outage_v1": (("p_round_id", "text"),),
     "lab_arena_record_run_scores": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_scores", "jsonb")),
+    "collection_participation_v1": (),
     "collection_reward_start_v1": (),
     "collection_reward_schedule_v1": (),
     "collection_batch_jobs_v1": (("p_batch", "text"),),

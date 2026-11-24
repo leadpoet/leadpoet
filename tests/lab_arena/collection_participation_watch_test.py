@@ -98,3 +98,18 @@ def test_edge_counts_only_allowlisted_new_complete_responses_and_detects_rotatio
     path.write_bytes(b'"POST /arena/v1/collection/register HTTP/1.1" 200 OK\n')
     third = edge_snapshot(tmp_path, second)
     assert third["windows_with_gap"] == 1 and third["http"]["POST register 200"] == 1
+
+
+def test_readback_uses_the_private_rpc_through_normal_scoped_transport():
+    import httpx
+    from lab_arena.store import PostgrestTransport
+
+    def respond(request):
+        assert request.method == "POST"
+        assert request.url.path == "/rest/v1/rpc/collection_participation_v1"
+        assert json.loads(request.content) == {}
+        return httpx.Response(200, json={"enrollments": []})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        db = PostgrestTransport("https://arena.example", service_key="sb_secret_test", http_client=client)
+        assert db.rpc("collection_participation_v1", {}) == {"enrollments": []}

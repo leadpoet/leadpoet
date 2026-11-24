@@ -161,3 +161,7 @@ every approved hash should be one you can rebuild.
 - The vault does not judge which Deepline tools are worth paying for; the
   gateway does, and the receipts show every call.
 - Partial key echoes, such as a few characters in a label, are not caught.
+- `cli receipts` proves each call was reported, not that it was paid.
+  Compare the statement's costs with the provider's usage log for that.
+- A call that waits on a vault reconnect can finish after its order's
+  300 s window and settle late.

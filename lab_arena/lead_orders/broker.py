@@ -144,7 +144,7 @@ def deepline_cost_microusd(body: bytes) -> Optional[int]:
     unchanged and still reads credits only.
     """
 
-    document = _document(body)
+    document = lead_keys.json_document(body)
     billing = document.get("billing") if isinstance(document, Mapping) else None
     cost = billing.get("cost_usd") if isinstance(billing, Mapping) else None
     if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0:
@@ -152,15 +152,6 @@ def deepline_cost_microusd(body: bytes) -> Optional[int]:
     credits = provider_costs.deepline_cost(document)
     return None if credits is None else credits.microusd
 
-
-def _document(body: bytes) -> Any:
-    """A JSON body, or None when it is not JSON. A deeply nested body raises
-    RecursionError, not ValueError, and must not skip settling the call."""
-
-    try:
-        return json.loads(bytes(body).decode("utf-8"))
-    except (UnicodeDecodeError, ValueError, RecursionError):
-        return None
 
 
 def _nonnegative_number(value: Any) -> bool:
@@ -474,7 +465,7 @@ class LeadOrderBroker:
 
         status = int(response.status)
         if provider == "openrouter":
-            document = _document(response.body)
+            document = lead_keys.json_document(response.body)
             # Admission already checked the catalog. The provider reports the
             # actual charge, including fallback models, in the response.
             bill = provider_costs.openrouter_cost(document)
@@ -500,7 +491,7 @@ class LeadOrderBroker:
                 return error.openrouter_generation_id
             if response is None:
                 return None
-            document = _document(response.body)
+            document = lead_keys.json_document(response.body)
             return arena_broker._openrouter_generation_identity(document, dict(response.headers))[1]
         if error is not None:
             return error.deepline_job_id

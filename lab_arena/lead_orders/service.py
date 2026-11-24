@@ -635,11 +635,11 @@ class LeadOrderService:
             raise LeadOrderServiceError(403, "hotkey_not_allowed")
         since = _since(since)
         page = self._store.vault_receipts(hotkey, since=since, limit=STATEMENT_PAGE_SIZE)
-        receipts = list(page.get("receipts") or [])
+        rows = list(page.get("receipts") or [])
         keys = [{"key_id": row["key_id"], "provider": row["provider"], "key_fingerprint": row["key_fingerprint"],
                  "sealed_to": lead_keys.sealed_to(row.get("envelope"))} for row in page.get("keys") or []]
-        return {"receipts": receipts, "keys": keys, "next_since": receipts[-1]["sequence"] if receipts else since,
-                "more": len(receipts) == STATEMENT_PAGE_SIZE}
+        return {"receipts": rows, "keys": keys, "next_since": rows[-1]["sequence"] if rows else since,
+                "more": len(rows) == STATEMENT_PAGE_SIZE}
 
     # -- public -------------------------------------------------------------
     def public_policy(self, version: Any) -> Dict[str, Any]:

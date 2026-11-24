@@ -1571,7 +1571,8 @@ def test_vault_receipts_are_kept_for_calls_and_read_backs_and_shown_only_to_thei
     other_key = "sha256:" + "e" * 64
     for kind, bad in (("call", vault_receipt(miner, 9, fp)), ("call", vault_receipt(other, 9, fp)),
                       ("call", vault_receipt(miner, 0, fp)), ("call", vault_receipt(miner, 9, other_key)),
-                      ("readback", vault_receipt(miner, 9, fp)), ("call", vault_receipt(miner, 9, fp, readback=True))):
+                      ("readback", vault_receipt(miner, 9, fp)), ("call", vault_receipt(miner, 9, fp, readback=True)),
+                      ("readback", vault_receipt(miner, 1, fp, readback=True))):  # a stored receipt's key sequence
         assert store.record_vault_receipt(call_id=first["call_id"], kind=kind, receipt=bad)["status"] == "not_recordable"
     with pytest.raises(LeadOrderServiceError):
         service.vault_receipts(miner, "-1")

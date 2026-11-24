@@ -265,3 +265,51 @@ def test_fresh_expert_can_export_without_a_student_or_fabricated_grade():
             experiment={"id": "repeats", "arm": "other", "role": "expert", "repeat": 1}
         )["repeat_group_id"]
     )
+
+
+def test_partial_interruption_has_an_observed_finish_and_unknown_task_outcome(tmp_path):
+    from lab_arena import collection_trajectories as t
+    from lab_arena.collection_journal import WorkflowJournal
+    from lab_arena.service import LocalObjectStore
+
+    objects = LocalObjectStore(tmp_path / "objects")
+    fields = examples()
+    job = fields["job"]
+    journal = WorkflowJournal(objects, job["batch_id"], job["job_id"])
+    journal.append(
+        {
+            "index": 0,
+            "kind": "start",
+            "model": job["model"],
+            "messages": [],
+            "tools": [],
+            "visible_training_safe": True,
+        }
+    )
+
+    def project():
+        generator, calls, hold = t.partial_generator(objects, job, journal.hashes)
+        return t.trajectory_row(
+            **dict(
+                fields,
+                generator=generator,
+                packet=None,
+                calls=calls,
+                partial=True,
+                hold=hold,
+            )
+        )
+
+    assert project()["finish_reason"] is None
+    journal.append(
+        {
+            "index": 1,
+            "kind": "interrupted",
+            "turn": 0,
+            "error_type": "private provider error",
+        }
+    )
+    observed = project()
+    assert observed["finish_reason"] == "interrupted" and observed["unanswered"]
+    assert observed["verified_task_pass"] is None and not observed["final_turn_present"]
+    assert "private provider error" not in json.dumps(observed)

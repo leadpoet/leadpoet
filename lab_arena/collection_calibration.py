@@ -43,6 +43,8 @@ def compile_pilot(
         expected_builder=POET_REV,
     )
     verified["split_manifest_sha256"] = bundle.get("split_manifest_sha256")
+    if "claim_protocol" in bundle:
+        verified["claim_protocol"]=bundle["claim_protocol"]
     if judge.digest(verified) != judge.digest(bundle):
         raise ValueError("submitted pilot review differs from stored artifacts")
     panel = {}
@@ -75,6 +77,7 @@ def compile_pilot(
         "builder_commit": POET_REV,
         "control_ids": controls,
         "split_manifest_sha256": verified["split_manifest_sha256"],
+        **({"claim_protocol":bundle["claim_protocol"]} if "claim_protocol" in bundle else {}),
         **panel,
         **calibration,
     }

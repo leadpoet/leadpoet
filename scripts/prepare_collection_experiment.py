@@ -103,6 +103,7 @@ def main(argv=None):
     raw = {
         "schema": SCHEMA,
         "mode": "pilot",
+        "claim_protocol": "collection.fresh-claims.v2",
         "id": args.experiment_id,
         "question": args.question,
         "pass_mark": args.pass_mark,

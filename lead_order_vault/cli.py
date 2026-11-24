@@ -80,17 +80,21 @@ def connect(deployment: Mapping) -> Tuple[Mapping, str]:
     """
 
     parts = urlsplit(str(deployment["url"]))
-    if parts.scheme != "https" or not parts.hostname:
-        raise CliError("deployment.json url must be https")
+    if parts.scheme != "https" or not parts.hostname or parts.path not in ("", "/") or parts.query:
+        raise CliError("deployment.json url must be https with no path")
     connection = http.client.HTTPSConnection(parts.hostname, parts.port or 443, timeout=30,
                                              context=_tls_context(None))
     try:
         connection.request("GET", "/v1/identity")
-        certificate = connection.sock.getpeercert(binary_form=True)
+        certificate = connection.sock.getpeercert(binary_form=True) if connection.sock else None
+        if not certificate:
+            raise CliError("The vault sent no certificate.")
         response = connection.getresponse()
         if response.status != 200:
             raise CliError("The vault's identity answered %d." % response.status)
         identity = json.loads(response.read(65536))
+    except http.client.HTTPException:
+        raise CliError("The vault's identity answer is not HTTP.") from None
     finally:
         connection.close()
     identity = verified_identity(deployment, identity)

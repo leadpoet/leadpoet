@@ -296,7 +296,7 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
                         "producer-attestation", manifest["producer_attestation"]
                     )
                     verify_provenance(
-                        spec, provenance, {case["source_sha256"]: student}
+                        spec, provenance, {case["source_sha256"]: student}, objects=objects
                     )
                 observed = {}
                 protocol = spec.raw.get("claim_protocol", "collection.fresh-claims.v1")

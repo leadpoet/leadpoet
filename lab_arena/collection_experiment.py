@@ -196,10 +196,14 @@ def load_experiment(raw, prompt):
     return Experiment(raw, "sha256:" + identity, batch, routes, slots, policy)
 
 
-def verify_provenance(spec, receipt, sources):
+def verify_provenance(spec, receipt, sources, *, objects=None):
     """Authenticate the Poet producer independently of the funding and release operators."""
     from scripts.collection_review import read_file
     from cryptography.exceptions import InvalidSignature
+
+    from lab_arena.collection_gateway_student import RECEIPT, object_store, verify_gateway_source
+    if receipt.get("schema") == RECEIPT:
+        return verify_gateway_source(spec, receipt, sources, objects if objects is not None else object_store())
 
     path = os.environ.get("LAB_ARENA_COLLECTION_TRAINER_PUBLIC_KEY_FILE")
     if not path:
@@ -251,7 +255,7 @@ def verify_provenance(spec, receipt, sources):
     return body
 
 
-def read_inputs(spec, directory, sources):
+def read_inputs(spec, directory, sources, *, objects=None):
     """Verify every source and split before leasing or charging any key."""
     from scripts.collection_review import read_file
     from lab_arena.collection_workflow import (
@@ -293,7 +297,7 @@ def read_inputs(spec, directory, sources):
         )
         resolved[case["source_sha256"]] = (source, stamp)
     provenance = read(spec.raw["provenance_sha256"])
-    verify_provenance(spec, provenance, {k: v[0] for k, v in resolved.items()})
+    verify_provenance(spec, provenance, {k: v[0] for k, v in resolved.items()}, objects=objects)
     return resolved, split, provenance
 
 

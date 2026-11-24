@@ -17,9 +17,22 @@ class WorkflowJournal:
             for s in (batch, run_id)
         ):
             raise ValueError("invalid collection journal coordinates")
+        self.batch, self.run_id = batch, run_id
         self.objects = objects
         self.path = f"collection/{batch}/{run_id}/events/"
         self.hashes = []
+
+    def save(self, kind, value):
+        """Publish a private recovery pointer before later grading or billing steps."""
+        from lab_arena.collection_workflow import store_artifact
+
+        ref = store_artifact(self.objects, self.batch, self.run_id, kind, value)
+        data = judge._json(ref).encode()
+        key = f"collection/{self.batch}/{self.run_id}/saved/{kind}.json"
+        self.objects.put(key, data)
+        if self.objects.get_bounded(key, len(data)) != data:
+            raise ValueError("private recovery pointer failed readback")
+        return ref
 
     def append(self, event):
         index = len(self.hashes)

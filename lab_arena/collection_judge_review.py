@@ -135,6 +135,9 @@ def _read_bundle(bundle, *, require_split=True):
             )
             continue
         scenario, run = judge._packet(p)
+        from lab_arena.collection_judge_segments import verify_notes
+
+        verify_notes(p, a)
         judge._require(
             a["packet_sha256"] == judge.digest([scenario, run]),
             "assessment packet digest",

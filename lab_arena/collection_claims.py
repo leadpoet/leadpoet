@@ -432,7 +432,26 @@ def read_fresh(
             s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", unit["text"]) if s.strip()
         ]
         # Size guards abstain on the whole unit, never classify a prefix as complete.
-        if not sentences or len(sentences) > 60 or len(judge._json(unit)) > 65536:
+        # The keyed protocol already votes in groups of eight original sentences.
+        # New capture packs allow more groups while keeping the complete source
+        # and context in each request. Oversized units cannot acquire a pass.
+        expanded = "judge_segments" in packet and keyed
+        sentence_limit = 240 if expanded else 60
+        unit_bytes = len(judge._json(unit).encode())
+        too_large = (
+            unit_bytes > 128 * 1024 if expanded else len(judge._json(unit)) > 65536
+        )
+        if not sentences or len(sentences) > sentence_limit or too_large:
+            if "judge_segments" in packet:
+                packet = dict(
+                    packet,
+                    claim_size_hold={
+                        "unit_sha256": key,
+                        "sentences": len(sentences),
+                        "source_bytes": unit_bytes,
+                        "reason": "claim_context_limit",
+                    },
+                )
             break
         role = roles[int(key, 16) % len(roles)]
         model = policy.version(role)

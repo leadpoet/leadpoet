@@ -21,7 +21,7 @@ MIGRATIONS = (
     *DEFAULT_MIGRATIONS,
     *(
         next(Path("scripts").glob(f"{n}-*.sql")).name
-        for n in (720, 721, 722, 723, 724, 725, 726, 727, 728, 729, 732, 733, 738, 740)
+        for n in (720, 721, 722, 723, 724, 725, 726, 727, 728, 729, 732, 733, 738, 740, 741)
     ),
 )
 
@@ -224,6 +224,30 @@ def test_replayed_call_never_spends_twice_and_cap_cannot_be_bypassed(transport):
         p_amount=4000000,
     )
     assert denied["status"] == "budget_exhausted"
+
+
+def test_funding_statement_reports_only_own_confirmed_and_pending_costs(transport):
+    enrolled = registered(transport, "H")
+    job = claim(enrolled, "statement-proof", "B1-s2027")
+    miner = job["miner_hotkey"]
+    reader = setup_broker(enrolled, transport, job, StandIn())
+    reader.model_call("step-1", {
+        "model": job["model"], "messages": [{"role": "user", "content": "Test"}], "max_tokens": 16,
+    })
+    for provider, amount in (("openrouter", 50), ("judge", 100)):
+        reader._rpc("collection_reserve_call_v1", "pending-" + provider,
+                    p_provider=provider, p_hash="a" * 64, p_amount=amount)
+    statement = enrolled.statement(miner)
+    assert statement["enrollments"][0]["task_scope"] == "synthetic_workflows"
+    assert statement["enrollments"][0]["daily_cap_microusd"] == intake_fixture.CAP
+    run = statement["jobs"][0]
+    assert run["confirmed_miner_cost_microusd"] == 10
+    assert run["pending_miner_reservations_microusd"] == 50
+    assert run["unresolved_miner_calls"] == 1
+    assert run["price_microusd"] == 0
+    assert enrolled.statement("5" + "z" * 47) == {"enrollments": [], "jobs": []}
+    assert not any(name in json.dumps(statement) for name in ("fingerprint", "ciphertext", "key_id", "credentials", "lease_token"))
+
 
 
 def test_full_six_slot_cohort_and_public_review_projection(transport, tmp_path):

@@ -4,7 +4,40 @@ Miners enroll an OpenRouter funding key for operator-run synthetic sales workflo
 
 ## Enrollment
 
-`leadpoet collection-terms` displays the mode, terms and digest. Set `OPENROUTER_API_KEY` for a dedicated funded runtime key and `OPENROUTER_MANAGEMENT_KEY` for read-only access to verify its ownership. Keep private input/output logging, input/output sharing and external trace broadcast off for this key. The CLI sends only the two OpenRouter credentials. Sign `leadpoet collection-register --mode pilot --daily-cap-usd 10 --accept-terms <digest>` with the miner wallet; the example cap applies to the OpenRouter key over a rolling 24 hours. The management credential is used only during key validation. The owner can inspect `collection-statement` and use `collection-revoke` with the registration ID. Pilot and live enrollment require distinct signed consent. A pilot incurs real provider charges and pays no emission reward.
+The pilot uses **your OpenRouter credits and pays no emissions**. Leadpoet pays for verification. Choose one scope per hotkey. A comparison funds one assigned open model on a simulated sales task. A correction funds an expert continuing a smaller model’s run on a synthetic task.
+
+1. Use a registered Finney subnet 71 hotkey and the miner runtime from [Install and register](../README.md#install-and-register). If you have an existing checkout, update it and activate its miner environment. The examples use wallet `miner` and hotkey `default`. Substitute your names or add `--wallet-path` for a custom location.
+2. Create a dedicated funded [OpenRouter API key](https://openrouter.ai/settings/keys) and a [read-only management key](https://openrouter.ai/blog/announcements/scoped-management-keys/) for the same workspace. Disable prompt and output logging, sharing, and external trace broadcast. The gateway uses the management key once to verify ownership and stores only the encrypted runtime key.
+3. Choose a scope and read the published terms. Use one of these commands:
+
+   ```bash
+   leadpoet collection-terms --task-scope synthetic_workflows
+   leadpoet collection-terms --task-scope synthetic_corrections
+   ```
+
+4. To enroll, copy the full `terms_sha256` value for your chosen scope. Run the matching command below, replacing `DIGEST` with that value. The example authorizes up to **$0.30 per rolling 24 hours**. Choose your own cap. A smaller cap may end a run early. At the two hidden prompts enter the runtime key and management key. For unattended use, supply `OPENROUTER_API_KEY` and `OPENROUTER_MANAGEMENT_KEY` in the environment.
+
+   ```bash
+   leadpoet collection-register --mode pilot --task-scope synthetic_workflows --wallet-name miner --hotkey-name default --daily-cap-usd 0.30 --accept-terms DIGEST
+   ```
+
+   ```bash
+   leadpoet collection-register --mode pilot --task-scope synthetic_corrections --wallet-name miner --hotkey-name default --daily-cap-usd 0.30 --accept-terms DIGEST
+   ```
+
+5. Save the returned registration ID. The worker polls every five minutes and can assign at most one new job per funding owner per UTC day while slots are available. Check your enrollments and jobs with the same hotkey:
+
+   ```bash
+   leadpoet collection-statement --mode pilot --wallet-name miner --hotkey-name default
+   ```
+
+   Each job shows confirmed miner charges and unresolved reservations in micro-USD (1,000,000 = $1). Match the charges to your dedicated key’s OpenRouter activity. A pilot quote is zero. To switch scopes or stop new calls, use the registration ID from your statement. Calls already dispatched may still be billed.
+
+   ```bash
+   leadpoet collection-revoke --mode pilot --wallet-name miner --hotkey-name default --registration-id REGISTRATION_ID
+   ```
+
+Paid assignments require fresh live consent after the pilot qualifies.
 
 The six slots in each comparison pack use the same scenario and the approved generator routes below. Each subsequent complete group advances to a fresh scenario. A provider receipt records known spend even when the run fails. Unknown bills retain their reservation. The worker cannot issue the same paid request identifier twice. Synthetic tools run locally. The miner funds the billed generator calls. Private verifier calls use an owner-controlled credential and count against the job budget.
 

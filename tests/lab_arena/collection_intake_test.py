@@ -453,7 +453,9 @@ def test_miner_cli_signs_synthetic_scope_and_sends_only_openrouter(monkeypatch):
         daily_cap_usd="0.01",
     )
     assert (
-        collection_cli.run(args, lambda _: keypair, session=SimpleNamespace(post=post))
+        collection_cli.run(args, lambda _: keypair, session=SimpleNamespace(
+            get=lambda *a, **kw: SimpleNamespace(status_code=200, json=lambda: intake.terms("pilot")), post=post
+        ))
         == 0
     )
 

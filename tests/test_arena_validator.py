@@ -110,7 +110,7 @@ class _Signer:
 
     def prepare_arena_weight_extrinsic_v1(self, _request):
         self.prepares += 1
-        return dict(self.protected)
+        return {**self.protected, "attempt_sequence": self.prepares}
 
     def confirm_arena_weight_extrinsic_v1(self, _request):
         self.confirms += 1
@@ -228,6 +228,12 @@ def test_protected_expiry_proof_closes_old_journal_and_allows_next_epoch(tmp_pat
          "finalized_head": {"block": 1200}, "finalized_nonce": 7},
     ])
     orchestrator = _orchestrator(tmp_path, signer, broadcasts)
+    orchestrator._verified_state = lambda _epoch, _key: {
+        "state_hash": "sha256:" + "4" * 64,
+        "epoch": 9,
+        "valid_from_block": 1000,
+        "valid_until_block": 1092,
+    }
     assert orchestrator.run_once(9) == "broadcast"
     orchestrator.chain.finalized_head = lambda: SimpleNamespace(
         number=1090, hash="0x" + ("2" * 64)
@@ -253,13 +259,23 @@ def test_included_commit_waits_for_reveal_without_blocking_next_epoch(tmp_path):
     assert signer.prepares == 2
 
 
-def test_missing_finalized_nonce_fails_before_protected_signing(tmp_path):
+def test_validator_leaves_finalized_nonce_preparation_to_protected_signer(tmp_path):
     signer = _Signer(_protected(), [])
     orchestrator = _orchestrator(tmp_path, signer, [])
     orchestrator.chain.client.get_account_nonce = lambda _hotkey: None
-    with pytest.raises(ArenaValidatorError, match="nonce is unavailable"):
-        orchestrator.run_once(9)
-    assert signer.prepares == 0
+    assert orchestrator.run_once(9) == "broadcast"
+    assert signer.prepares == 1
+
+
+def test_retry_era_shortens_to_fit_the_accepted_state_window(tmp_path):
+    signer = _Signer(_protected(), [])
+    orchestrator = _orchestrator(tmp_path, signer, [])
+    assert orchestrator._fresh_era_fits(
+        {"valid_from_block": 1000, "valid_until_block": 1055}, 1050
+    )
+    assert not orchestrator._fresh_era_fits(
+        {"valid_from_block": 1000, "valid_until_block": 1052}, 1050
+    )
 
 
 def test_broken_prior_epoch_does_not_block_current_epoch(tmp_path):

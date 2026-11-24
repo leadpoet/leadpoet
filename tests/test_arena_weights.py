@@ -128,13 +128,7 @@ def test_historical_signed_state_without_reward_factor_verifies_and_recovers():
         **signer_kwargs,
         sign_sr25519=lambda _payload: b"x" * 64,
     )
-    request = {
-        "accepted_state": state,
-        "nonce": 7,
-        "era_current": 1000,
-        "runtime_block_hash": "2" * 64,
-        "block_hash": "2" * 64,
-    }
+    request = {"accepted_state": state}
     signed = signer.prepare(request)
 
     restarted = ArenaWeightSigner(
@@ -217,7 +211,7 @@ def _chain_profile():
         "commit_call_index": "0776", "serve_axon_call_index": "0704",
         "commit_reveal_version": 4, "mechid": 0, "tempo": 360,
         "subnet_reveal_period_epochs": 1, "block_time_millis": 12000,
-        "max_snapshot_block_drift": 64, "extrinsic_period": 8,
+        "max_snapshot_block_drift": 64, "extrinsic_period": 32,
         "signed_extensions": ["CheckMortality", "CheckNonce", "ChargeTransactionPayment", "CheckMetadataHash", "CheckSpecVersion", "CheckTxVersion", "CheckGenesis", "CheckMortalityAdditionalSigned", "CheckMetadataHashAdditionalSigned"],
     }
 
@@ -259,8 +253,7 @@ def test_protected_signer_checks_gateway_state_finalized_nonce_and_recovers_exac
         arena_public_key_der=der, arena_public_key_hash=key_hash,
         network="finney", netuid=71, burn_hotkey=HOTKEYS[0], state_source=_StateSource(state),
     )
-    request = {"accepted_state": state, "nonce": 7, "era_current": 1000,
-               "runtime_block_hash": "2" * 64, "block_hash": "2" * 64}
+    request = {"accepted_state": state}
     signed = signer.prepare(request)
     assert signed["state_hash"] == state["state_hash"]
     assert signed["extrinsic_hash"].startswith("0x")
@@ -295,8 +288,59 @@ def test_protected_signer_checks_gateway_state_finalized_nonce_and_recovers_exac
         arena_public_key_der=der, arena_public_key_hash=key_hash,
         network="finney", netuid=71, burn_hotkey=HOTKEYS[0], state_source=_StateSource(state),
     )
-    with pytest.raises(ArenaWeightSignerError, match="nonce"):
-        fresh.prepare(dict(request, nonce=7, era_current=1000))
+    fresh_signed = fresh.prepare({"accepted_state": state})
+    assert fresh_signed["recovery_record"]["authorization"]["nonce"] == 8
+
+
+def test_runtime_transaction_version_is_bound_across_signed_recovery():
+    state, der, key_hash = _signed_state()
+    profile = _chain_profile()
+    profile.update(
+        supported_spec_versions=[432, 494],
+        transaction_version_overrides={"494": 2},
+    )
+
+    class Runtime494Chain(_ArenaChain):
+        def read_chain_signing_runtime(self, **_kwargs):
+            return {
+                "runtime_block": 1000,
+                "runtime_block_hash": "2" * 64,
+                "finalized_block": 1000,
+                "finalized_block_hash": "2" * 64,
+                "spec_version": 494,
+                "transaction_version": 2,
+                "genesis_hash": "1" * 64,
+            }
+
+    chain = Runtime494Chain(state)
+    signer = ArenaWeightSigner(
+        validator_hotkey=HOTKEYS[0], hotkey_public_key_hex="3" * 64,
+        chain_profile=profile, chain_source=chain, drand_backend=_Drand(),
+        sign_sr25519=lambda _payload: b"x" * 64,
+        verify_sr25519=lambda signature, _payload: signature == b"x" * 64,
+        arena_public_key_der=der, arena_public_key_hash=key_hash,
+        network="finney", netuid=71, burn_hotkey=HOTKEYS[0],
+        state_source=_StateSource(state),
+    )
+    signed = signer.prepare({"accepted_state": state})
+    authorization = signed["recovery_record"]["authorization"]
+    assert authorization["runtime_transaction_version"] == 2
+
+    restarted = ArenaWeightSigner(
+        validator_hotkey=HOTKEYS[0], hotkey_public_key_hex="3" * 64,
+        chain_profile=profile, chain_source=chain, drand_backend=_Drand(),
+        sign_sr25519=lambda _payload: (_ for _ in ()).throw(
+            AssertionError("recovery must not sign again")
+        ),
+        verify_sr25519=lambda signature, _payload: signature == b"x" * 64,
+        arena_public_key_der=der, arena_public_key_hash=key_hash,
+        network="finney", netuid=71, burn_hotkey=HOTKEYS[0],
+        state_source=_StateSource(state),
+    )
+    recovered = restarted.recover(
+        {"accepted_state": state, "recovery_record": signed["recovery_record"]}
+    )
+    assert recovered["extrinsic_hex"] == signed["extrinsic_hex"]
 
 
 def test_protected_signer_rejects_state_burn_key_outside_sealed_policy():
@@ -311,8 +355,7 @@ def test_protected_signer_rejects_state_burn_key_outside_sealed_policy():
         state_source=_StateSource(state),
     )
     with pytest.raises(ArenaWeightSignerError, match="burn hotkey"):
-        signer.prepare({"accepted_state": state, "nonce": 7, "era_current": 1000,
-                        "runtime_block_hash": "2" * 64, "block_hash": "2" * 64})
+        signer.prepare({"accepted_state": state})
 
 
 def test_protected_signer_will_not_sign_an_era_past_state_expiry():
@@ -326,9 +369,25 @@ def test_protected_signer_will_not_sign_an_era_past_state_expiry():
         network="finney", netuid=71, burn_hotkey=HOTKEYS[0],
         state_source=_StateSource(state),
     )
-    with pytest.raises(ArenaWeightSignerError, match="mortal era extends"):
-        signer.prepare({"accepted_state": state, "nonce": 7, "era_current": 1000,
-                        "runtime_block_hash": "2" * 64, "block_hash": "2" * 64})
+    signed = signer.prepare({"accepted_state": state})
+    authorization = signed["recovery_record"]["authorization"]
+    assert authorization["era_period"] == 4
+    assert signed["recovery_record"]["maximum_block"] == 1003
+
+
+def test_protected_signer_rejects_state_shorter_than_minimum_mortal_era():
+    state, der, key_hash = _signed_state(valid_until_block=1002)
+    signer = ArenaWeightSigner(
+        validator_hotkey=HOTKEYS[0], hotkey_public_key_hex="3" * 64,
+        chain_profile=_chain_profile(), chain_source=_ArenaChain(state), drand_backend=_Drand(),
+        sign_sr25519=lambda _payload: b"x" * 64,
+        verify_sr25519=lambda _signature, _payload: True,
+        arena_public_key_der=der, arena_public_key_hash=key_hash,
+        network="finney", netuid=71, burn_hotkey=HOTKEYS[0],
+        state_source=_StateSource(state),
+    )
+    with pytest.raises(ArenaWeightSignerError, match="insufficient mortal era validity"):
+        signer.prepare({"accepted_state": state})
 
 
 def test_recovered_retry_sequence_uses_highest_protected_attempt_number():
@@ -343,8 +402,7 @@ def test_recovered_retry_sequence_uses_highest_protected_attempt_number():
         network="finney", netuid=71, burn_hotkey=HOTKEYS[0],
         state_source=_StateSource(state),
     )
-    request = {"accepted_state": state, "nonce": 7, "era_current": 1000,
-               "runtime_block_hash": "2" * 64, "block_hash": "2" * 64}
+    request = {"accepted_state": state}
     signer = ArenaWeightSigner(**kwargs)
     first = signer.prepare(request)
     assert first["attempt_sequence"] == 1
@@ -372,10 +430,7 @@ def test_signed_authorization_binds_rewarded_uids_to_finalized_hotkeys():
         network="finney", netuid=71, burn_hotkey=HOTKEYS[0],
         state_source=_StateSource(state),
     )
-    signed = signer.prepare({"accepted_state": state, "nonce": 7,
-                             "era_current": 1000,
-                             "runtime_block_hash": "2" * 64,
-                             "block_hash": "2" * 64})
+    signed = signer.prepare({"accepted_state": state})
     assert signed["recipient_uid_hotkeys"] == [
         {"uid": 0, "hotkey": HOTKEYS[0]},
         {"uid": 2, "hotkey": HOTKEYS[2]},

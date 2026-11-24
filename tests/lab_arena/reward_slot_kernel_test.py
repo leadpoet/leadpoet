@@ -378,10 +378,7 @@ def test_v2_host_and_signer_derive_same_vector_and_restart_recovers_exact_bytes(
         "netuid": 71, "burn_hotkey": BURN, "state_source": _StateSource(state),
     }
     signer = ArenaWeightSigner(**options, sign_sr25519=lambda _payload: b"x" * 64)
-    signed = signer.prepare({
-        "accepted_state": state, "nonce": 7, "era_current": 1000,
-        "runtime_block_hash": "2" * 64, "block_hash": "2" * 64,
-    })
+    signed = signer.prepare({"accepted_state": state})
     host = arena_weights.derive_arena_weights(state, HOTKEYS)
     for field in ("state_hash", "weights_hash", "sparse_uids", "sparse_weights_u16"):
         assert signed[field] == host[field]

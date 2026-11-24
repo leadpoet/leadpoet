@@ -17,7 +17,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Mapping, Tuple
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes, serialization
@@ -71,12 +71,15 @@ def _check_header(header: Header) -> None:
         raise EnvelopeError("vault_key_invalid") from None
 
 
+def canonical(document: Mapping) -> bytes:
+    """The one JSON encoding that is signed, hashed or bound as associated data."""
+
+    return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
 def _aad(header: Header) -> bytes:
-    return json.dumps(
-        {"v": 1, "provider": header.provider, "purpose": header.purpose,
-         "miner_hotkey": header.miner_hotkey, "vault_key": header.vault_key},
-        sort_keys=True, separators=(",", ":"),
-    ).encode("ascii")
+    return canonical({"v": 1, "provider": header.provider, "purpose": header.purpose,
+                      "miner_hotkey": header.miner_hotkey, "vault_key": header.vault_key})
 
 
 def _aes_key(shared: bytes, ephemeral: bytes, vault_key: bytes) -> bytes:
@@ -106,7 +109,7 @@ def seal(secret: str, header: Header) -> str:
         "v": 1, "provider": header.provider, "purpose": header.purpose, "miner_hotkey": header.miner_hotkey,
         "vault_key": header.vault_key, "epk": ephemeral.hex(), "nonce": nonce.hex(), "ct": ciphertext.hex(),
     }
-    raw = json.dumps(document, sort_keys=True, separators=(",", ":")).encode("ascii")
+    raw = canonical(document)
     return PREFIX + base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 

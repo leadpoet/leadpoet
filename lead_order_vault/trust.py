@@ -4,8 +4,10 @@ Used by the miner CLI and by Leadpoet's gateway alike, so both trust exactly
 the same thing: a vault whose keys chain to Phala's KMS root for the app in
 ``deployment.json``, reached over a TLS session that ends inside it.
 
-The app id and the KMS root key in ``deployment.json`` can be compared with
-the on-chain records on Base, so the check needs nothing from Leadpoet.
+``on_chain`` then reads Base itself: the KMS root key, the app's
+registration and the approval of the build the vault reports. What is left
+to compare by hand is one address, ``kms_contract``, with the one Phala
+publishes.
 """
 
 from __future__ import annotations
@@ -22,7 +24,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from . import chain
-from .vault import ENCRYPTION_DOMAIN, KEY_ALGORITHM, RECEIPTS_DOMAIN, TLS_SCHEMA, canonical, spki_sha256
+from .envelope import canonical
+from .vault import ENCRYPTION_DOMAIN, KEY_ALGORITHM, RECEIPTS_DOMAIN, TLS_SCHEMA, spki_sha256
 
 DEPLOYMENT_FILE = Path(__file__).with_name("deployment.json")
 _DEPLOYMENT_FIELDS = ("url", "app_id", "kms_root_public_key", "kms_contract", "chain")
@@ -109,6 +112,18 @@ def verified_identity(deployment: Mapping, identity: Any) -> Mapping:
         except chain.ChainError as error:
             raise TrustError("The vault's %s key does not chain to the KMS root (%s)." % (name, error)) from None
     return identity
+
+
+def on_chain(deployment: Mapping, identity: Mapping, rpc_url: str) -> str:
+    """The app's owner on Base, once Base confirms what ``deployment.json`` and the vault claim."""
+
+    try:
+        return chain.on_chain(rpc_url=rpc_url, chain=str(deployment["chain"]),
+                              kms_contract_hex=str(deployment["kms_contract"]), app_id_hex=str(deployment["app_id"]),
+                              kms_root_public_key_hex=str(deployment["kms_root_public_key"]),
+                              compose_hash_hex=str(identity.get("compose_hash") or ""))
+    except chain.ChainError as error:
+        raise TrustError("Base does not confirm the vault (%s)." % error) from None
 
 
 def verify_signed(identity: Mapping, signed: Any) -> Mapping:

@@ -202,6 +202,47 @@ def test_trust_refuses_until_deployed(tmp_path):
         trust.load_deployment(path)
 
 
+COMPOSE_HASH = "cc" * 32
+
+
+def _base(monkeypatch, *, root=None, registered=True, approved=True, chain_id=8453):
+    """A fake Base RPC that answers what the KMS and app contracts would."""
+
+    root = root if root is not None else bytes.fromhex(DEPLOYMENT["kms_root_public_key"])
+    word = lambda flag: "0x" + (int(flag)).to_bytes(32, "big").hex()
+    padded = root + b"\0" * (-len(root) % 32)
+    kms_info = ((128).to_bytes(32, "big") + b"\0" * 96 + len(root).to_bytes(32, "big") + padded).hex()
+    selector = lambda signature: "0x" + chain.keccak256(signature.encode())[:4].hex()
+    answers = {(DEPLOYMENT["kms_contract"], selector("kmsInfo()")): "0x" + kms_info,
+               (DEPLOYMENT["kms_contract"], selector("registeredApps(address)") + "00" * 12 + APP_ID.hex()): word(registered),
+               ("0x" + APP_ID.hex(), selector("allowedComposeHashes(bytes32)") + COMPOSE_HASH): word(approved),
+               ("0x" + APP_ID.hex(), selector("owner()")): "0x" + "00" * 12 + "99" * 20}
+
+    def rpc(url, method, params):
+        if method == "eth_chainId":
+            return hex(chain_id)
+        return answers.get((params[0]["to"], params[0]["data"]), "0x")
+
+    monkeypatch.setattr(chain, "_rpc", rpc)
+
+
+def test_trust_reads_base_itself(monkeypatch):
+    _base(monkeypatch)
+    assert trust.on_chain(DEPLOYMENT, _identity(compose_hash=COMPOSE_HASH), "rpc") == "0x" + "99" * 20
+
+
+@pytest.mark.parametrize("changes,reason", [
+    ({"root": _compressed(_key(0x6666))}, "kms_root_mismatch"),  # deployment.json names another KMS root
+    ({"registered": False}, "app_not_registered"),
+    ({"approved": False}, "compose_hash_not_approved"),  # a build the owner never approved on Base
+    ({"chain_id": 1}, "wrong_chain"),
+])
+def test_trust_refuses_what_base_does_not_confirm(monkeypatch, changes, reason):
+    _base(monkeypatch, **changes)
+    with pytest.raises(trust.TrustError, match=reason):
+        trust.on_chain(DEPLOYMENT, _identity(compose_hash=COMPOSE_HASH), "rpc")
+
+
 def test_cli_seals_both_openrouter_keys_to_the_verified_vault():
     secrets = iter([OPENROUTER_KEY, MANAGEMENT_KEY])
     sealed = cli.seal_key(provider="openrouter", hotkey=HOTKEY, identity=_identity(), read_secret=lambda _: next(secrets))
@@ -294,6 +335,8 @@ def test_caller_headers_cannot_smuggle_a_host_or_second_credential():
     ([], b'{"k":"' + "".join("\\u%04x" % ord(c) for c in OPENROUTER_KEY).encode() + b'"}'),
     ([], b"key=" + "".join("%%%02X" % ord(c) for c in OPENROUTER_KEY).encode()),
     ([("X-Echo", "%73" + OPENROUTER_KEY[1:])], b"{}"),
+    # A streamed answer: one JSON document per data: line.
+    ([], b'data: {"k":"' + "".join("\\u%04x" % ord(c) for c in OPENROUTER_KEY).encode() + b'"}\n\ndata: [DONE]\n'),
 ])
 def test_a_response_that_echoes_the_key_is_withheld(headers, body):
     echo = UpstreamResponse(200, headers, body)
@@ -302,10 +345,10 @@ def test_a_response_that_echoes_the_key_is_withheld(headers, body):
     assert _check_receipt(result["receipt"])["outcome"] == "key_echo_withheld"
 
 
-def test_a_transport_error_still_gets_a_receipt():
-    failing = FakeProvider({"/api/v1/chat/completions": UpstreamError("upstream_unavailable", 200)})
-    result = _vault(failing).call(_call())
-    assert result["transport_error"] == "upstream_unavailable" and result["observed_status"] == 200
+@pytest.mark.parametrize("failure", [UpstreamError("upstream_unavailable", 200), AttributeError("surprise")])
+def test_every_failed_call_still_gets_a_receipt(failure):
+    result = _vault(FakeProvider({"/api/v1/chat/completions": failure})).call(_call())
+    assert result["transport_error"] == "upstream_unavailable"
     assert _check_receipt(result["receipt"])["outcome"] == "transport_error"
 
 
@@ -432,10 +475,20 @@ def test_http_server_routes_authenticates_and_never_logs(capsys):
     captured = capsys.readouterr()
     assert captured.out == "" and captured.err == ""
 
-def test_an_unexpected_upstream_failure_still_gets_its_receipt():
-    result = _vault(FakeProvider({"/api/v1/chat/completions": AttributeError("surprise")})).call(_call())
-    assert result["transport_error"] == "upstream_unavailable"
-    assert result["receipt"]["document"]["outcome"] == "transport_error"
+def test_a_request_head_is_capped_before_it_is_buffered():
+    vault, tls = _tls_vault()
+    with _serving(make_handler(vault), tls) as (server, _):
+        connection = _connect(server)
+        connection.putrequest("GET", "/healthz")
+        for index in range(4):
+            connection.putheader("x-pad-%d" % index, "a" * 10000)
+        connection.endheaders()
+        assert connection.getresponse().status == 431
+        connection.close()
+        connection = _connect(server)
+        connection.request("GET", "/healthz")
+        assert connection.getresponse().status == 200
+        connection.close()
 
 
 def test_a_client_that_resets_mid_request_leaves_no_trace(capsys):

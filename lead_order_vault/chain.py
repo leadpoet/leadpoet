@@ -18,7 +18,9 @@ links are verified with ``cryptography``; recovery alone proves nothing.
 
 from __future__ import annotations
 
+import json
 import struct
+import urllib.request
 from typing import Sequence
 
 from cryptography.exceptions import InvalidSignature
@@ -159,4 +161,60 @@ def verify_key(
     verify(kms_root, keccak256(issued_message(app_id, root)), link1)
 
 
-__all__ = ["ChainError", "app_root_key", "claim_message", "issued_message", "keccak256", "recover", "verify_key"]
+# -- Base ----------------------------------------------------------------------
+
+CHAIN_IDS = {"base": 8453}
+_TRUE = (1).to_bytes(32, "big")
+
+
+def _rpc(url: str, method: str, params: list):
+    request = urllib.request.Request(url, headers={"content-type": "application/json"}, data=json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode("ascii"))
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.loads(response.read(1 << 20))["result"]
+
+
+def _call(url: str, contract: bytes, signature: str, argument: bytes = b"") -> bytes:
+    data = keccak256(signature.encode("ascii"))[:4] + argument
+    return bytes.fromhex(_rpc(url, "eth_call", [{"to": "0x" + contract.hex(), "data": "0x" + data.hex()},
+                                                "latest"]).removeprefix("0x"))
+
+
+def on_chain(*, rpc_url: str, chain: str, kms_contract_hex: str, app_id_hex: str,
+             kms_root_public_key_hex: str, compose_hash_hex: str) -> str:
+    """Read the chain itself, never ``deployment.json``, and return the app's owner.
+
+    Raise ``ChainError`` unless the KMS contract holds this root key and has
+    registered the app, and the app's owner approved this compose hash.
+    """
+
+    try:
+        if int(_rpc(rpc_url, "eth_chainId", []), 16) != CHAIN_IDS.get(chain):
+            raise ChainError("wrong_chain")
+        kms, app = (bytes.fromhex(value.removeprefix("0x")) for value in (kms_contract_hex, app_id_hex))
+        compose_hash = bytes.fromhex(compose_hash_hex.removeprefix("0x"))
+        if len(kms) != 20 or len(app) != 20 or len(compose_hash) != 32:
+            raise ChainError("address_invalid")
+        # kmsInfo() returns (bytes k256Pubkey, bytes caPubkey, bytes quote, bytes eventlog).
+        info = _call(rpc_url, kms, "kmsInfo()")
+        start = int.from_bytes(info[:32], "big")
+        length = int.from_bytes(info[start:start + 32], "big")
+        if _compressed(info[start + 32:start + 32 + length]) != _compressed(
+                bytes.fromhex(kms_root_public_key_hex.removeprefix("0x"))):
+            raise ChainError("kms_root_mismatch")
+        if _call(rpc_url, kms, "registeredApps(address)", app.rjust(32, b"\0")) != _TRUE:
+            raise ChainError("app_not_registered")
+        if _call(rpc_url, app, "allowedComposeHashes(bytes32)", compose_hash) != _TRUE:
+            raise ChainError("compose_hash_not_approved")
+        owner = _call(rpc_url, app, "owner()")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        if isinstance(error, ChainError):
+            raise
+        raise ChainError("chain_unreadable") from None
+    if len(owner) != 32:
+        raise ChainError("chain_unreadable")
+    return "0x" + owner[12:].hex()
+
+
+__all__ = ["ChainError", "app_root_key", "claim_message", "issued_message", "keccak256", "on_chain", "recover",
+           "verify_key"]

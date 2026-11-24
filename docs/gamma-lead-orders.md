@@ -125,9 +125,21 @@ and receipt always use that stored version, never the current one.
   epoch pass.
 - Per epoch, rewards owed are paid oldest first up to the lane cap; the rest
   carries forward in USD and converts to alpha at the paying epoch's price.
-  Late rewards join the same queue by the epoch they were recorded in. The
-  emission price source is not decided yet: until it is, `live` payouts are
-  refused. A `shadow` epoch publishes a payout document with no payments;
+  Late rewards join the same queue by the epoch they were recorded in.
+- The epoch's miner emission is valued once, when the payout starts (Gavin,
+  Nov 23 2026: one read, no averaging): the alpha emitted to miners at the
+  epoch's first block, times the chain's alpha price in TAO at that block
+  (`SwapRuntimeApi.current_alpha_price`), times one TAO/USD quote from
+  CoinGecko no older than 15 minutes. It is the same valuation the collection
+  lane uses (`lab_arena.collection_rewards.emission_valuation`). The payout
+  document publishes every input as `emission_valuation` (block, block hash,
+  `miner_alpha_rao`, `tao_rao_per_alpha`, `tao_price_microusd`, its
+  timestamps and `tao_price_source`), so anyone can redo
+  `miner_alpha_rao × tao_rao_per_alpha × tao_price_microusd ÷ 10^18`.
+- Only the current finalized epoch is valued. If the chain read or the quote
+  fails, or the value is not positive, a `live` epoch pays nothing and
+  records nothing: the rewards stay owed and are paid at a later epoch's
+  price. A `shadow` epoch then publishes a payout document with no payments;
   shadow orders owe nothing (their what-if rewards are in their receipts).
 - A `live` payout counts only `live` orders; recording a payment against a
   non-live order is refused. Staff and shadow orders earn nothing.
@@ -461,6 +473,10 @@ validator's weight signer: wiring it in is a separate reviewed change.
   in `live` (Gavin's choice, Nov 20 2026), so a miner can read the request
   shapes, models and Deepline operations in their own provider account. The
   lead-finding code stays private; the method behind it is visible.
+- The emission price is one read. Someone who moves the alpha price at the
+  epoch's first block, or a wrong CoinGecko quote, shifts that epoch's lane
+  cap and every miner's lane share with it. The lane cap bounds the effect.
+  The TAO/USD quote is published but cannot be proven from the chain.
 - Late costs on a failed order are mostly not repaid (see Money), and a late
   Deepline cost is repaid only when Deepline's answer arrives after finish:
   there is no Deepline read-back.

@@ -21,7 +21,7 @@ import pytest
 from lab_arena import signing
 from lab_arena.broker import ProviderResponse, ProviderTransportError, price_table_from_models_response
 from lab_arena.credentials import CredentialError
-from lab_arena.lead_orders import money, receipts, suppressions
+from lab_arena.lead_orders import money, receipts, rewards, suppressions
 from lab_arena.lead_orders.auth import BuyerIdentity, order_token_hash
 from lab_arena.lead_orders.broker import BrokerRequest, LeadOrderBroker, LeadOrderBrokerError
 from lab_arena.lead_orders.config import LeadOrdersConfig
@@ -530,6 +530,44 @@ def test_shadow_runs_on_leadpoet_keys_and_publishes_what_if_rewards_only(store):
         store.record_payout(epoch=4_000_000, mode="live", document={"payout_hash": "sha256:" + "c" * 64},
                             payments=[{"order_id": order["order_id"], "miner_hotkey": miner, "paid_microusd": 1}])
     revoke_all_keys(store)
+
+
+class FixedPrice:
+    def __init__(self, emission_microusd):
+        self.emission = emission_microusd
+
+    def valuation(self, epoch):
+        if self.emission is None:
+            raise rewards.EmissionPriceUnavailable("no quote")
+        return {"emission_microusd": self.emission, "block": 50, "tao_price_source": "test"}
+
+
+def test_live_epoch_pays_owed_rewards_from_a_published_price_and_owes_them_without_one(store, owner):
+    order, miner = live_order_with_miner_reward(store, owner, epoch_value=7000)
+    config, _, epoch = make(store, "live", gamma=FakeGamma(), epoch=Epoch(7000))
+
+    def service(price):
+        return LeadOrderService(config=config, policy=POLICY, policy_document=POLICY_DOC, store=store, signer=SIGNER,
+                                current_epoch=epoch, gamma_reader=FakeGamma(), emission_price=price)
+
+    def remaining():
+        return [(r["owed_microusd"], r["paid_microusd"]) for r in store.owed(through_epoch=10**9, mode="live")
+                if r["order_id"] == order["order_id"]]
+
+    # No price: nothing is paid or recorded, and the reward stays owed.
+    assert service(FixedPrice(None)).run_epoch(7001, registered_hotkeys=[miner]) is None
+    assert store.reward_epoch(7001) is None and remaining() == [(500_000, 0)]
+    # $1 of miner emission, 30% cap: $0.30 of the $0.50 is paid now, $0.20 carries forward.
+    doc = service(FixedPrice(1_000_000)).run_epoch(7001, registered_hotkeys=[miner])
+    assert doc["emission_valuation"] == {"emission_microusd": 1_000_000, "block": 50, "tao_price_source": "test"}
+    assert doc["payments"] == [{"order_id": order["order_id"], "miner_hotkey": miner, "paid_microusd": 300_000,
+                                "call_id": None}]
+    assert doc["carry_forward_microusd"] == 200_000 and remaining() == [(500_000, 300_000)]
+    # The stored document is the signed one anyone can fetch.
+    assert store.reward_epoch(7001)["payout_hash"] == doc["payout_hash"]
+    # The next epoch pays the rest at that epoch's own price.
+    later = service(FixedPrice(10_000_000)).run_epoch(7002, registered_hotkeys=[miner])
+    assert [p["paid_microusd"] for p in later["payments"]] == [200_000] and remaining() == [(500_000, 500_000)]
 
 
 def sql(owner, query, params):

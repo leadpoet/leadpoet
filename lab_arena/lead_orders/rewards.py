@@ -11,17 +11,20 @@
   published only and nothing is recorded as paid; in live mode the payments
   are recorded and ``weights.merge_lane_weights`` turns them into weight.
 
-The lane cap is a share of the epoch's miner emission in USD, so it needs a
-USD price for emission. No such price is on chain and the source is not
-decided, so the default ``EmissionPriceSource`` fails closed: a live payout
-is refused (the Arena vector is unchanged) and a shadow document publishes
-what is owed with no payments.
+The lane cap is a share of the epoch's miner emission in USD.
+``ChainEmissionPrice`` values it once, when the payout starts: the alpha
+emitted to miners at the epoch's first block, times the chain's alpha price
+in TAO at that block, times one fresh TAO/USD quote (Gavin, Nov 23 2026: one
+read, no averaging). The inputs are published in the signed payout document.
+When any read fails the source fails closed: a live payout is refused (the
+Arena vector is unchanged, the rewards stay owed) and a shadow document
+publishes what is owed with no payments.
 """
 
 from __future__ import annotations
 
 from fractions import Fraction
-from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence
 
 from lab_arena import signing
 from lab_arena.contracts import document_hash
@@ -37,14 +40,51 @@ class EmissionPriceUnavailable(RuntimeError):
 
 
 class EmissionPriceSource(Protocol):
-    def miner_emission_microusd(self, epoch: int) -> int: ...
+    def valuation(self, epoch: int) -> Mapping[str, Any]:
+        """The epoch's miner emission: ``emission_microusd`` plus its inputs."""
 
 
 class UnavailableEmissionPrice:
-    """Fail-closed default until the emission USD source is decided."""
+    """Fail-closed default when no emission USD source is wired in."""
 
-    def miner_emission_microusd(self, epoch: int) -> int:
+    def valuation(self, epoch: int) -> Mapping[str, Any]:
         raise EmissionPriceUnavailable("no emission USD price source is configured")
+
+
+class ChainEmissionPrice:
+    """One read at payout start, shared with the collection lane's valuation.
+
+    ``scope`` returns the finalized epoch and its first block; ``valuation``
+    values the miner emission at a block
+    (``lab_arena.collection_rewards.emission_valuation``). Only the current
+    finalized epoch is valued: a fresh TAO/USD quote says nothing about an
+    older epoch.
+    """
+
+    def __init__(
+        self,
+        *,
+        scope: Callable[[], Mapping[str, Any]],
+        valuation: Callable[[int], Mapping[str, Any]],
+        tao_price_source: str,
+    ) -> None:
+        self._scope = scope
+        self._valuation = valuation
+        self._tao_price_source = tao_price_source
+
+    def valuation(self, epoch: int) -> Mapping[str, Any]:
+        try:
+            scope = self._scope()
+            current = int(scope["epoch"])
+            document = None if current != int(epoch) else dict(self._valuation(int(scope["valid_from_block"])))
+        except Exception as exc:  # any chain or quote failure: no price, no payout
+            raise EmissionPriceUnavailable("emission valuation is unavailable") from exc
+        if document is None:
+            raise EmissionPriceUnavailable("only the current finalized epoch can be valued")
+        emission = document.get("emission_microusd")
+        if type(emission) is not int or emission <= 0:
+            raise EmissionPriceUnavailable("emission valuation is not a positive amount")
+        return dict(document, tao_price_source=self._tao_price_source)
 
 
 def _rewardable_calls(calls: Sequence[Mapping[str, Any]]) -> List[tuple]:
@@ -94,10 +134,13 @@ def epoch_payout_document(
     epoch: int,
     mode: str,
     entries: Sequence[money.OwedEntry],
-    miner_emission_microusd: Optional[int],
+    valuation: Optional[Mapping[str, Any]],
     payable_cap_microusd: Optional[int] = None,
 ) -> Dict[str, Any]:
     """The published epoch document (unsigned body plus its hash).
+
+    ``valuation`` is the emission price source's answer, published whole so
+    anyone can redo the arithmetic; ``None`` means no price was available.
 
     ``payable_cap_microusd`` lets the caller lower the cap further, for
     example to the burn residual's USD value in live mode.
@@ -106,7 +149,7 @@ def epoch_payout_document(
     if mode not in ("shadow", "live"):
         raise money.MoneyError("payouts exist only in shadow and live mode")
     owed_total = sum(e.remaining_microusd for e in entries if e.settled_epoch <= epoch)
-    if miner_emission_microusd is None:
+    if valuation is None:
         if mode == "live":
             raise EmissionPriceUnavailable("live payouts need the emission USD price")
         body = {
@@ -116,6 +159,7 @@ def epoch_payout_document(
             "carry_forward_microusd": owed_total, "payments": [], "weight_fractions": {},
         }
         return dict(body, **{PAYOUT_HASH_FIELD: document_hash(body)})
+    miner_emission_microusd = int(valuation["emission_microusd"])
     cap = money.lane_cap_microusd(policy, miner_emission_microusd)
     if payable_cap_microusd is not None:
         cap = min(cap, max(0, int(payable_cap_microusd)))
@@ -124,7 +168,7 @@ def epoch_payout_document(
     body = {
         "schema_version": PAYOUT_SCHEMA_VERSION, "epoch": int(epoch), "mode": mode,
         "policy_version": policy.version, "emission_price_available": True,
-        "miner_emission_microusd": int(miner_emission_microusd),
+        "miner_emission_microusd": miner_emission_microusd, "emission_valuation": dict(valuation),
         "cap_microusd": cap, "paid_microusd": payout.paid_microusd, "owed_microusd": owed_total,
         "carry_forward_microusd": payout.carry_forward_microusd,
         "payments": [
@@ -151,6 +195,7 @@ def sign_payout(signer: signing.ArenaSigner, document: Mapping[str, Any]) -> Dic
 
 
 __all__ = [
+    "ChainEmissionPrice",
     "EmissionPriceSource",
     "EmissionPriceUnavailable",
     "PAYOUT_HASH_FIELD",

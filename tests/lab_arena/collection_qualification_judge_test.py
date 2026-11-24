@@ -30,7 +30,7 @@ def manifest():
     )
 
 
-def test_candidates_have_truthful_ids_double_judgments_and_a_release_hold():
+def test_candidates_have_truthful_independent_judgments_and_a_release_hold():
     policy = load_batch(manifest(), PROMPT)
     assert judge.BatchPolicy(**asdict(policy)) == policy
     run = packet()
@@ -40,9 +40,9 @@ def test_candidates_have_truthful_ids_double_judgments_and_a_release_hold():
     schedule = judge.assign_judges(policy, assignments)
     call = Caller()
     result = judge.judge_run(policy, schedule[run["run_id"]], run, call, prompt=PROMPT)
-    assert {v["judge_version"] for v in result["records"]} == set(PAIR)
-    assert {v["judge"] for v in result["records"]} == {"kimi", "mistral"}
-    assert {v["max_tokens"] for v in call.requests} == {600, 1200}
+    assert {v["judge_version"] for v in result["records"]} == {policy.version("mistral")}
+    assert {v["judge"] for v in result["records"]} == {"mistral"}
+    assert {v["max_tokens"] for v in call.requests} == {600}
     report = judge.quality_report(
         policy,
         assignments=assignments,
@@ -63,11 +63,10 @@ def test_candidate_pair_cannot_enter_live_or_change_route_or_grade_own_model():
     with pytest.raises(ValueError, match="judge route"):
         load_batch(raw, PROMPT)
     policy = load_batch(manifest(), PROMPT)
-    with pytest.raises(ValueError, match="own generator"):
-        judge.assign_judges(
-            policy,
-            [dict(run_id="r", miner="m", generator=next(iter(PAIR)), harness="h")],
-        )
+    independent = judge.assign_judges(
+        policy, [dict(run_id="r", miner="m", generator=next(iter(PAIR)), harness="h")]
+    )["r"]
+    assert policy.version(independent["primary"]) != next(iter(PAIR)) and not independent["overlap"]
     mixed = dict(asdict(policy), astra_version="openai/gpt-6.2-astra")
     with pytest.raises(ValueError, match="judge models"):
         judge.BatchPolicy(**mixed)
@@ -181,7 +180,7 @@ def test_metered_judges_use_owner_funding_and_strict_routes(
             "WHERE c.job_id = %s",
             (job["job_id"],),
         )
-        assert cursor.fetchall() == [("judge", 10), ("judge", 10)]
+        assert cursor.fetchall() == [("judge", 10)] * (1 if qualification else 2)
     for body in sent:
         settings = body["provider"]
         assert settings["zdr"] and settings["enforce_distillable_text"]
@@ -194,7 +193,7 @@ def test_metered_judges_use_owner_funding_and_strict_routes(
         channel.judge(
             request_id="live", model="moonshotai/kimi-k3", messages=[], max_tokens=100
         )
-    assert len(sent) == 2
+    assert len(sent) == (1 if qualification else 2)
 
     channel.job = job
 

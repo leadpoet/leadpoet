@@ -27,7 +27,7 @@ class QualificationJudge(NamedTuple):
     max_tokens: int
 
 
-# These independently hosted revisions may collect blind calibration evidence only.
+# Candidate revisions need independent signed calibration and operator approval before paid live use.
 QUALIFICATION_JUDGES = {
     "moonshotai/kimi-k3": QualificationJudge(
         "kimi", "moonshotai/kimi-k3-20260715", "deepinfra/mxfp4", 1200
@@ -156,7 +156,7 @@ class BatchPolicy:
             "batch thresholds",
         )
         if self.qualification:
-            _require(self.pilot, "candidate judges require a qualification pilot")
+            # Live use is authorized by the signed, staged pilot at dispatch.
             return
         _require(
             re.fullmatch(r"anthropic/claude-fable-\d+(?:[.-]\d+)*", self.fable_version)
@@ -214,6 +214,31 @@ def validate_prompt(policy, prompt):
         )
 
 
+def model_family(model):
+    # All supported routes have canonical publisher/model IDs. Treat siblings from
+    # the same publisher conservatively, including forks of the pilot model names.
+    name = model.split("/")[-1].casefold()
+    for prefix, family in (
+        ("kimi-", "moonshotai"),
+        ("mistral-", "mistralai"),
+        ("deepseek-", "deepseek"),
+        ("qwen", "qwen"),
+        ("claude-", "anthropic"),
+        ("gpt-", "openai"),
+    ):
+        if name.startswith(prefix):
+            return family
+    return model.partition("/")[0].casefold()
+
+
+def independent_roles(policy, generator):
+    return tuple(
+        j
+        for j in policy.roles
+        if model_family(policy.version(j)) != model_family(generator)
+    )
+
+
 def assign_judges(policy, assignments):
     """Assign before seeing outputs. Counterbalance across each factor using seeded tie breaks."""
     cohort_rows = [r for r in assignments if "cohort" in r]
@@ -254,7 +279,9 @@ def assign_judges(policy, assignments):
                     int(digest([policy.seed, "agreement run", r["run_id"]]), 16) % 10
                     == 0
                 )
-            out[r["run_id"]]["overlap"] = policy.pilot or sampled
+            out[r["run_id"]]["overlap"] = len(
+                independent_roles(policy, r["generator"])
+            ) > 1 and (policy.pilot or sampled)
         return out
     ordered = sorted(
         assignments, key=lambda r: digest([policy.seed, "assignment", r["run_id"]])
@@ -278,19 +305,22 @@ def assign_judges(policy, assignments):
                 digest([policy.seed, r["run_id"], j]),
             )
 
-        _require(
-            r["generator"] not in (policy.fable_version, policy.astra_version),
-            "judge cannot grade its own generator",
-        )
-        judge = min(policy.roles, key=imbalance)
+        eligible = independent_roles(policy, r["generator"])
+        _require(eligible, "no independent verifier family")
+        judge = min(eligible, key=imbalance)
         for k, v in factors:
             counts[k, v, judge] += 1
-        out[r["run_id"]] = {"run_id": r["run_id"], "primary": judge, "overlap": False}
+        out[r["run_id"]] = {
+            "run_id": r["run_id"],
+            "generator": r["generator"],
+            "primary": judge,
+            "overlap": False,
+        }
     sampled = sorted(out, key=lambda k: digest([policy.seed, "agreement", k]))[
         : (len(out) + 9) // 10
     ]
     for k in out if policy.pilot else sampled:
-        out[k]["overlap"] = True
+        out[k]["overlap"] = len(independent_roles(policy, out[k]["generator"])) > 1
     return out
 
 
@@ -338,7 +368,8 @@ def _packet(p):
         projected.append({k: step[k] for k in ("step", "action", "evidence")})
         if step.get("reasoning") is not None:
             _require(
-                type(step["reasoning"]) is str and len(step["reasoning"]) <= MAX_VISIBLE_REASONING_CHARS,
+                type(step["reasoning"]) is str
+                and len(step["reasoning"]) <= MAX_VISIBLE_REASONING_CHARS,
                 "visible reasoning",
             )
             projected[-1]["reasoning"] = step["reasoning"]
@@ -467,7 +498,9 @@ def _request(policy, call, judge, stage, messages, validate):
         qualification = QUALIFICATION_JUDGES.get(model)
         options = {}
         if qualification and qualification.role == "kimi":
-            options["reasoning_effort"] = "none" if stage == "ranking" else "low"
+            options["reasoning_effort"] = (
+                "none" if stage.startswith("ranking") else "low"
+            )
         raw = call(
             request_id=f"collection-{base}-{attempt}",
             model=model,
@@ -507,9 +540,20 @@ def judge_run(policy, assignment, packet, call, *, prompt, previous=None):
         and type(assignment["overlap"]) is bool,
         "assigned run mismatch",
     )
+    eligible = (
+        independent_roles(policy, assignment["generator"])
+        if "generator" in assignment
+        else policy.roles
+    )
+    _require(assignment["primary"] in eligible, "judge family conflicts with generator")
     result = {
         "batch_id": policy.batch_id,
         "run_id": packet["run_id"],
+        **(
+            {"generator_family": model_family(assignment["generator"])}
+            if "generator" in assignment
+            else {}
+        ),
         "scenario_id": packet["scenario_id"],
         "policy_sha256": digest(asdict(policy)),
         "prompt_sha256": policy.prompt_sha256,
@@ -519,7 +563,7 @@ def judge_run(policy, assignment, packet, call, *, prompt, previous=None):
         "status": "code_rejected",
         "keep_steps": 0,
         "hard_steps": [],
-        "overlap": policy.pilot or assignment["overlap"],
+        "overlap": len(eligible) > 1 and (policy.pilot or assignment["overlap"]),
     }
     checks = packet.get("checks")
     _require(
@@ -536,6 +580,14 @@ def judge_run(policy, assignment, packet, call, *, prompt, previous=None):
             status="cannot_judge",
             projection_error=packet["projection_error"],
             claim_review="missing",
+        )
+    gate = claim_verdict(packet)
+    if gate in ("failed", "missing"):
+        return dict(
+            result,
+            status="claim_rejected" if gate == "failed" else "cannot_judge",
+            claim_gate=gate,
+            claim_review=gate,
         )
     scenario, run = _packet(packet)
     result["packet_sha256"] = digest([scenario, run])
@@ -602,8 +654,10 @@ def judge_run(policy, assignment, packet, call, *, prompt, previous=None):
     try:
         if not records:
             records.append(evaluate(primary))
-        if result["overlap"] or records[0]["confidence"] == "low":
-            records.append(evaluate(next(j for j in policy.roles if j != primary)))
+        if len(eligible) > 1 and (
+            result["overlap"] or records[0]["confidence"] == "low"
+        ):
+            records.append(evaluate(next(j for j in eligible if j != primary)))
     except JudgeUnavailable as exc:
         result.update(
             status="cannot_judge",
@@ -705,10 +759,12 @@ def claim_review(packet, records):
                 return "missing"
             if sentence["level"] is not None:
                 flagged_sentences.append(normalize(sentence["text"]))
-        if result["strict"] and not any(s.get("level") for s in result["sentences"]):
-            return "disputed"
+        if result["strict"]:
+            return "failed"
     if seen != set(evidence):
         return "missing"
+    if flagged_sentences:
+        return "failed"
     for v in records:
         claims = [normalize(x["claim"]) for x in v["unsupported_claims"]]
         if any(
@@ -718,11 +774,17 @@ def claim_review(packet, records):
     return "agreed"
 
 
+def claim_verdict(packet):
+    verdict = claim_review(packet, [])
+    return "passed" if verdict == "agreed" else verdict
+
+
 def training_selection(assessment, *, approved_claim_runs=()):
     """Runner/exporter passes only claim overrides from verified human review reports."""
     return assessment["status"] in ("accepted", "salvaged") and (
         assessment.get("claim_review") in ("agreed", "not_applicable")
-        or assessment["run_id"] in approved_claim_runs
+        or assessment.get("claim_review") == "disputed"
+        and assessment["run_id"] in approved_claim_runs
     )
 
 
@@ -756,7 +818,7 @@ def rank_scenario(policy, candidates, call, *, prompt):
         # Rank complete, judge-accepted runs while the worker still holds the lease.
         # Export later applies independent claim and signed human-review gates before
         # honoring a ranking preference. Missing claim evidence never becomes a label.
-        if assessment["status"] == "accepted":
+        if assessment["status"] == "accepted" and training_selection(assessment):
             scenario, run = _packet(packet)
             _require(
                 assessment["packet_sha256"] == digest([scenario, run]),
@@ -766,7 +828,14 @@ def rank_scenario(policy, candidates, call, *, prompt):
             total = sum(sum(v["scores"].values()) for v in records) / len(records)
             common = {k: v for k, v in scenario.items() if k != "facts"}
             fact_sets.add(digest(common))
-            eligible.append((total, rid, {**run, "facts": scenario["facts"]}))
+            eligible.append(
+                (
+                    total,
+                    rid,
+                    {**run, "facts": scenario["facts"]},
+                    assessment.get("generator_family"),
+                )
+            )
     _require(
         len(scenarios) <= 1 and len(fact_sets) <= 1, "ranking requires one scenario"
     )
@@ -776,7 +845,15 @@ def rank_scenario(policy, candidates, call, *, prompt):
     eligible.sort(key=lambda c: (-c[0], digest([policy.seed, "tiebreak", c[1]])))
     top = sorted(eligible[:3], key=lambda c: digest([policy.seed, "blind rank", c[1]]))
     by_label = {chr(65 + i): c for i, c in enumerate(top)}
-    judge = policy.roles[int(digest([policy.seed, "rank judge", sid]), 16) % 2]
+    families = {c[3] for c in top}
+    eligible_judges = [
+        j for j in policy.roles if model_family(policy.version(j)) not in families
+    ]
+    if not eligible_judges or (policy.qualification and None in families):
+        return {"status": "no_independent_ranker", "labels": {}, "record": None}
+    judge = eligible_judges[
+        int(digest([policy.seed, "rank judge", sid]), 16) % len(eligible_judges)
+    ]
     identity = {
         "spec_version": SPEC,
         "scenario_id": digest([policy.seed, "scenario", sid])[:16],
@@ -817,12 +894,40 @@ def rank_scenario(policy, candidates, call, *, prompt):
         },
     ]
     v = _request(policy, call, judge, "ranking", messages, validate)
+    if v:
+        labels = list(by_label)
+        reverse = dict(zip(labels, reversed(labels)))
+        messages[-1] = {
+            "role": "user",
+            "content": _json(
+                {
+                    "identity": identity,
+                    "runs": {k: by_label[r][2] for k, r in reverse.items()},
+                }
+            ),
+        }
+        swapped = _request(policy, call, judge, "ranking-swapped", messages, validate)
+        if (
+            not swapped
+            or swapped["margin"] != v["margin"]
+            or (
+                v["margin"] != "tie"
+                and [reverse[k] for k in swapped["order"]] != v["order"]
+            )
+        ):
+            return {
+                "status": "order_disagreement",
+                "record": None,
+                "labels": {},
+                "blind_records": [v, swapped],
+            }
     return {
         "batch_id": policy.batch_id,
         "scenario_id": sid,
         "policy_sha256": digest(asdict(policy)),
         "labels": {k: c[1] for k, c in by_label.items()},
         "record": dict(v, scenario_id=sid) if v else None,
+        **({"swapped_order": swapped["order"]} if v else {}),
         "status": "ranked" if v else "cannot_judge",
     }
 
@@ -895,17 +1000,19 @@ def quality_report(
             and assessment["batch_id"] == policy.batch_id,
             "foreign assessment",
         )
+        eligible = independent_roles(policy, frozen[rid]["generator"])
         records = assessment["records"]
         if assessment.get("verifier_unavailable"):
             validate_unavailable(policy, assessment, assigned[rid]["primary"])
             if rid in control_ids:
                 problems.add("unjudged_control")
-            elif assigned[rid]["overlap"] or policy.pilot:
+            elif len(eligible) > 1 and (assigned[rid]["overlap"] or policy.pilot):
                 total += 1  # A requested comparison without two votes is not agreement.
             continue
         if not records:
             _require(
                 assessment["status"] == "code_rejected"
+                or assessment.get("claim_gate") in ("failed", "missing")
                 or (
                     assessment["status"] == "cannot_judge"
                     and assessment.get("projection_error")
@@ -930,7 +1037,7 @@ def quality_report(
             or records[0]["confidence"] == "low"
         )
         expected_judges = (
-            set(policy.roles) if second_required else {assigned[rid]["primary"]}
+            set(eligible) if second_required else {assigned[rid]["primary"]}
         )
         _require(
             len(records) == len(expected_judges)
@@ -949,7 +1056,7 @@ def quality_report(
                     problems.add("drift_detected")
         if rid in control_ids:
             continue
-        if assigned[rid]["overlap"] or policy.pilot:
+        if len(eligible) > 1 and (assigned[rid]["overlap"] or policy.pilot):
             total += 1
             if len(records) == 2 and not any(v["cannot_judge"] for v in records):
                 agree += passes(policy, records[0]) == passes(policy, records[1])
@@ -962,7 +1069,12 @@ def quality_report(
         for v in records:
             if not v["cannot_judge"]:
                 per_model[frozen[rid]["generator"]][v["judge"]].append(v["scores"])
-    if not total or agree * 100 < total * policy.agreement_percent:
+    agreement_floor = (
+        max(85, policy.agreement_percent)
+        if policy.qualification
+        else policy.agreement_percent
+    )
+    if not total or agree * 100 < total * agreement_floor:
         problems.add("judge_agreement")
     if policy.pilot:
         complete = {
@@ -1006,6 +1118,11 @@ def quality_report(
     if len(human_marks) < 50:
         problems.add("human_sample_incomplete")
     human_agreement = {p: {"matches": 0, "comparisons": 0} for p in PARTS}
+    human_decisions = {j: {"matches": 0, "comparisons": 0} for j in policy.roles}
+    by_judge_dimension = {
+        role: {p: {"matches": 0, "comparisons": 0} for p in PARTS}
+        for role in policy.roles
+    }
     for alias, mark in human_marks.items():
         _require(
             type(mark) is dict
@@ -1019,9 +1136,27 @@ def quality_report(
         )
         for v in observed[blind[alias]]:
             if not v["cannot_judge"]:
+                ref = human_decisions[v["judge"]]
+                ref["comparisons"] += 1
+                ref["matches"] += passes(policy, v) == passes(
+                    policy, {"cannot_judge": False, "scores": mark["scores"]}
+                )
                 for p in PARTS:
-                    human_agreement[p]["comparisons"] += 1
-                    human_agreement[p]["matches"] += v["scores"][p] == mark["scores"][p]
+                    for count in (
+                        human_agreement[p],
+                        by_judge_dimension[v["judge"]][p],
+                    ):
+                        count["comparisons"] += 1
+                        count["matches"] += v["scores"][p] == mark["scores"][p]
+    if any(
+        not n["comparisons"]
+        or n["matches"] * 100 < max(85, agreement_floor) * n["comparisons"]
+        for n in (
+            *human_decisions.values(),
+            *(n for d in by_judge_dimension.values() for n in d.values()),
+        )
+    ):
+        problems.add("human_agreement")
     means = {
         m: {
             j: {p: sum(v[p] for v in vv) / len(vv) for p in PARTS}
@@ -1060,6 +1195,8 @@ def quality_report(
         "hard_step_set_agreement_count": matched_hard,
         "blind_human_marks": len(human_marks),
         "human_agreement": human_agreement,
+        "human_decision_agreement_by_judge": human_decisions,
+        "human_score_agreement_by_judge": by_judge_dimension,
         "means_by_generator_judge": means,
         "judge_score_differences_by_generator": differences,
     }

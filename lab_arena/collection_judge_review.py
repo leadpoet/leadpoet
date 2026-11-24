@@ -12,6 +12,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    PublicFormat,
     load_pem_private_key,
     load_pem_public_key,
 )
@@ -22,8 +24,10 @@ BUNDLE_SCHEMA = "collection.review.v1"
 RECEIPT_SCHEMA = "collection.human-review.v1"
 
 
-def _read_bundle(bundle):
+def _read_bundle(bundle, *, require_split=True):
     fields = {"schema", "policy", "assignments", "runs", "planted", "drift"}
+    if require_split or "split_manifest_sha256" in bundle:
+        fields.add("split_manifest_sha256")
     if "failed_attempts" in bundle:
         fields.add("failed_attempts")
     judge._fields(bundle, fields)
@@ -47,6 +51,15 @@ def _read_bundle(bundle):
             "immutable run manifest digest",
         )
         p, a = item["packet"], item["assessment"]
+        if require_split:
+            stamp = p.get("split") or {}
+            judge._require(
+                re.fullmatch(r"[a-f0-9]{64}", str(bundle["split_manifest_sha256"]))
+                and stamp.get("manifest_sha256") == bundle["split_manifest_sha256"]
+                and p["checks"].get("training_split") is True
+                and p["checks"].get("privacy") is True,
+                "unverified review split",
+            )
         rid = p["run_id"]
         judge._require(
             rid in schedule
@@ -89,6 +102,19 @@ def _read_bundle(bundle):
                 "invalid input gap",
             )
             continue
+        gate = judge.claim_verdict(p)
+        if gate in ("failed", "missing"):
+            judge._require(
+                a.get("claim_gate") == gate
+                and a["claim_review"] == gate
+                and a["status"]
+                == ("claim_rejected" if gate == "failed" else "cannot_judge")
+                and not a["records"]
+                and a["keep_steps"] == 0
+                and not a["hard_steps"],
+                "invalid claim gate",
+            )
+            continue
         scenario, run = judge._packet(p)
         judge._require(
             a["packet_sha256"] == judge.digest([scenario, run]),
@@ -101,7 +127,11 @@ def _read_bundle(bundle):
             and (0 if unavailable else 1) <= len(a["records"]) <= 2,
             "judge record count",
         )
+        generator = schedule[rid]["generator"]
+        if policy.qualification:
+            judge._require(a.get("generator_family") == judge.model_family(generator), "wrong generator family")
         for v in a["records"]:
+            judge._require(v["judge"] in judge.independent_roles(policy, generator), "judge family conflicts with generator")
             identity = {
                 "spec_version": judge.SPEC,
                 "run_id": rid,
@@ -279,7 +309,7 @@ def sign_review(bundle, blind_marks, reviewer_id, private_key_pem):
     }
 
 
-def verify_review(bundle, receipt, public_key_pem):
+def _verified_report(bundle, receipt, public_key_pem):
     """Verify against the deployment's pinned reviewer key before releasing any batch."""
     judge._fields(
         receipt,
@@ -313,10 +343,108 @@ def verify_review(bundle, receipt, public_key_pem):
     )
     report = _report(bundle, marks, receipt["reviewer"])
     judge._require(
-        report == receipt["report"] and report["quality_ready"],
+        report == receipt["report"],
         "batch did not pass review",
     )
     return report
+
+
+def verify_review(bundle, receipt, public_key_pem):
+    report = _verified_report(bundle, receipt, public_key_pem)
+    judge._require(report["quality_ready"], "batch did not pass review")
+    return report
+
+
+def _qualification_body(bundle, receipt, reviewer_key, approver, allow_live):
+    from lab_arena.collection_claims import CLAIM_RUBRIC
+
+    policy = judge.BatchPolicy(**bundle["policy"])
+    report = _verified_report(bundle, receipt, reviewer_key)
+    judge._require(
+        type(allow_live) is bool
+        and policy.pilot
+        and policy.qualification
+        and report["holds"] == ["judge_qualification"]
+        and judge._text(approver, 128)
+        and approver != receipt["reviewer"],
+        "independent qualification review required",
+    )
+    return {
+        "schema": "collection.judge-qualification.v1",
+        "claim_rubric_sha256": judge.digest(CLAIM_RUBRIC),
+        "bundle_sha256": judge.digest(bundle),
+        "review_sha256": judge.digest(receipt),
+        "prompt_sha256": policy.prompt_sha256,
+        "approver": approver,
+        "allow_live": allow_live,
+        "judges": {
+            m: {"revision": spec.revision, "route": spec.route}
+            for m, spec in judge.QUALIFICATION_JUDGES.items()
+        },
+    }
+
+
+def approve_qualification(
+    bundle,
+    receipt,
+    reviewer_key_pem,
+    approver,
+    approver_private_pem,
+    *,
+    allow_live=False,
+):
+    """Explicit offline human decision after signed blind calibration."""
+    body = _qualification_body(bundle, receipt, reviewer_key_pem, approver, allow_live)
+    key = load_pem_private_key(approver_private_pem, password=None)
+    judge._require(
+        isinstance(key, Ed25519PrivateKey), "expected qualification signing key"
+    )
+    pub = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    judge._require(
+        pub
+        != load_pem_public_key(reviewer_key_pem).public_bytes(
+            Encoding.Raw, PublicFormat.Raw
+        ),
+        "separate approval key required",
+    )
+    return {
+        **body,
+        "signature": base64.b64encode(key.sign(judge._json(body).encode())).decode(),
+    }
+
+
+def verify_qualification(
+    bundle, receipt, reviewer_key_pem, attestation, approver_key_pem
+):
+    """Authenticate the operator's explicit decision against the registered pilot evidence."""
+    body = _qualification_body(
+        bundle,
+        receipt,
+        reviewer_key_pem,
+        attestation.get("approver"),
+        attestation.get("allow_live"),
+    )
+    judge._require(
+        {k: v for k, v in attestation.items() if k != "signature"} == body,
+        "qualification approval differs from measured evidence",
+    )
+    pub = load_pem_public_key(approver_key_pem)
+    judge._require(
+        isinstance(pub, Ed25519PublicKey)
+        and pub.public_bytes(Encoding.Raw, PublicFormat.Raw)
+        != load_pem_public_key(reviewer_key_pem).public_bytes(
+            Encoding.Raw, PublicFormat.Raw
+        ),
+        "separate approval key required",
+    )
+    try:
+        pub.verify(
+            base64.b64decode(attestation["signature"], validate=True),
+            judge._json(body).encode(),
+        )
+    except (InvalidSignature, ValueError, KeyError, TypeError) as exc:
+        raise ValueError("qualification approval signature invalid") from exc
+    return body
 
 
 def terminal_pilot_attempts(rows):
@@ -449,7 +577,10 @@ def registered_bundle(
             and manifest["judge_policy"] == asdict(policy)
             and manifest["model"] == record["model"]
             and manifest["harness_commit"] == record["harness_commit"]
-            and (expected_builder is None or manifest.get("builder_commit") == expected_builder)
+            and (
+                expected_builder is None
+                or manifest.get("builder_commit") == expected_builder
+            )
             and manifest["scenario_id"] == record["scenario_id"],
             "registered manifest identity",
         )
@@ -530,6 +661,8 @@ def registered_bundle(
             )
             case = verified(rid, "control-case", control, 16 * 1024 * 1024)
             checked = controls.validate_case(case)
+            if policy.qualification:
+                controls.verify_control_family(case, [policy.version(r) for r in policy.roles])
             expected = planted[rid] if rid in planted else drift[rid]
             judge._require(
                 control["sha256"] == "sha256:" + checked
@@ -573,7 +706,9 @@ def registered_bundle(
                 )
         else:
             judge._require(control is None, "unexpected control case on generation job")
-            judge._require(isinstance(manifest.get("generator"), dict), "missing generator upload")
+            judge._require(
+                isinstance(manifest.get("generator"), dict), "missing generator upload"
+            )
             row = verified(rid, "generator", manifest["generator"], 128 * 1024 * 1024)
             judge._require(
                 row.get("run") == rid and row.get("teacher") == record["model"],
@@ -597,5 +732,5 @@ def registered_bundle(
     }
     if failed_attempts:
         result["failed_attempts"] = failed_attempts
-    _read_bundle(result)
+    _read_bundle(result, require_split=False)
     return result

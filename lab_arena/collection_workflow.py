@@ -15,16 +15,33 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from lab_arena import collection_judge as judge
+from lab_arena.collection_checkpoint import (
+    correction_checks,
+    correction_scenario,
+    prepare_student_source,
+    require_private_evidence,
+    scenario_split,
+    validate_student_source,
+)
 
 CHAMPION_REV = "1f3b2039bdd1234b69ecfa5d6ef8c61c549948ff"
 POET_REV = "2c9a9ab870f2e8f15a4c81615d91876a4c80c874"
+# Existing comparison batches retain both pinned revisions in their batch identity.
+CORRECTION_CHAMPION_REV = "a9be241e0060b5ae8eefe55b79779eb6e73bd863"
+CORRECTION_POET_REV = "d37173aca32ea59c7c5ffea46b0941726c55f30f"
 
 
 def _materialize(repo, commit, destination, *paths):
     # Ignore mutable working-tree files, node caches and .git hooks. Only regular
     # files actually recorded by the selected git tree can become modules.
+    selected = [commit]
+    if paths:
+        # The gateway holds only the approved subtree. Asking Git to filter a
+        # root archive can still traverse unavailable, unrelated private trees.
+        subtree, = paths
+        selected = ["--prefix=" + subtree + "/", commit + ":" + subtree]
     archive = subprocess.check_output(
-        ["git", "-C", str(repo), "archive", "--format=tar", commit, *paths]
+        ["git", "-C", str(repo), "archive", "--format=tar", *selected]
     )
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
         for item in tar:
@@ -45,20 +62,30 @@ def _load(name, path):
 
 
 @contextmanager
-def workflow_sources(champion_repo, poet_repo):
+def workflow_sources(champion_repo, poet_repo, *, corrections=False):
     """Enter once in a dedicated worker process: Poet9B uses flat sibling imports."""
     with tempfile.TemporaryDirectory(prefix="collection-pinned-") as temp:
         root = Path(temp).resolve()
         agent, poet = root / "agent", root / "poet"
-        _materialize(champion_repo, CHAMPION_REV, agent)
-        _materialize(poet_repo, POET_REV, poet, "harness/gtm-tasks")
+        _materialize(
+            champion_repo,
+            CORRECTION_CHAMPION_REV if corrections else CHAMPION_REV,
+            agent,
+        )
+        _materialize(
+            poet_repo,
+            CORRECTION_POET_REV if corrections else POET_REV,
+            poet,
+            "harness/gtm-tasks",
+        )
         tasks = poet / "harness/gtm-tasks"
         before = list(sys.path)
         try:
             sys.path[:0] = [str(agent), str(tasks)]
-            yield _load("collection_harness", agent / "harness.py"), _load(
-                "collection_tasks", tasks / "trace_rows.py"
-            )
+            builders = _load("collection_tasks", tasks / "trace_rows.py")
+            if corrections:
+                builders.branch = _load("collection_branches", tasks / "branch_runs.py")
+            yield _load("collection_harness", agent / "harness.py"), builders
         finally:
             sys.path[:] = before
             for name, mod in list(sys.modules.items()):
@@ -192,14 +219,97 @@ def _steps(messages, reference, final_output):
     return [turn for turn, _ in turns]
 
 
-def play_workflow(harness, builders, job, broker):
-    task = build_scenario(builders, job["scenario_id"])
+def play_workflow(
+    harness,
+    builders,
+    job,
+    broker,
+    *,
+    continuation=None,
+    student_source=None,
+    max_steps=90,
+    max_tokens=8192,
+    record=None,
+):
+    if continuation is not None and student_source is not None:
+        raise ValueError("a run has one starting state")
+    source = continuation if continuation is not None else student_source
+    extended = hasattr(builders, "branch")
+    if not extended and (
+        source is not None
+        or record is not None
+        or max_steps != 90
+        or max_tokens != 8192
+    ):
+        raise ValueError("a correction needs the pinned checkpoint harness")
+    shape = None
+    if source is not None:
+        validate_student_source(harness, builders, source)
+        if source["scenario_id"] != job["scenario_id"]:
+            raise ValueError("source and assigned scenario differ")
+        task = correction_scenario(builders, source)
+        shape = json.loads(source["original"]["trace.json"]).get("shape")
+    else:
+        task = build_scenario(builders, job["scenario_id"])
+    require_private_evidence(
+        {k: task.get(k) for k in ("prompt", "state", "files", "tools")}
+    )
+    events = []
+    experiment = job.get("experiment", {})
     sequence = 0
 
     def complete(body):
         nonlocal sequence
         sequence += 1
+        if experiment and "reasoning_effort" in experiment:
+            body["reasoning"] = {
+                "effort": experiment["reasoning_effort"],
+                "exclude": not experiment["capture_reasoning"],
+            }
         return broker.model_call(f"generate-{sequence}", body)
+
+    def observe(event):
+        require_private_evidence(event)
+        if event["kind"] in {"before", "finish"}:
+            state = {
+                "state": event["state"],
+                "log": event["log"],
+                "answer": event.get("answer", ""),
+                "files": {
+                    p: v for p, v in event["files"].items() if task["files"].get(p) != v
+                },
+            }
+            event["code_checks"] = builders.grade(task, state)
+        if builders.KEYS.search(_encode(event)):
+            raise ValueError("credential in workflow evidence")
+        if record is not None:
+            record(event)
+        # Original steps are written once to the private recorder. Only short
+        # labels are duplicated in the generator row for offline slicing.
+        if event["kind"] in {"before", "finish"}:
+            events.append(
+                {
+                    "index": event["index"],
+                    "kind": event["kind"],
+                    "turn": event.get("turn"),
+                    "checks": event["code_checks"],
+                }
+            )
+        if event["kind"] == "reply":
+            events.append(
+                {
+                    k: event[k]
+                    for k in (
+                        "index",
+                        "kind",
+                        "turn",
+                        "receipt",
+                        "usage",
+                        "model",
+                        "finish_reason",
+                    )
+                }
+            )
 
     world = builders.world(task)
     run = harness.run_task(
@@ -207,6 +317,16 @@ def play_workflow(harness, builders, job, broker):
         model=job["model"],
         complete=complete,
         world=world,
+        **(
+            {
+                "resume": continuation["checkpoint"] if continuation else None,
+                "record": observe,
+                "max_steps": max_steps,
+                "max_tokens": max_tokens,
+            }
+            if extended
+            else {}
+        ),
     )
     out = run["out"]
     grade = builders.grade(task, out)
@@ -264,6 +384,47 @@ def play_workflow(harness, builders, job, broker):
         ),
         "steps": [{"seq": n + 1, "message": at} for n, at in enumerate(labels)],
     }
+    row["split"] = packet["split"] = scenario_split(builders, task, shape)
+    if extended:
+        row["experiment"] = experiment
+        row["evidence"] = {
+            "out": out,
+            "grade": grade,
+            "finish": run["finish"],
+            "events": events,
+            "initial_files": task["files"],
+            "initial_state": task.get("state"),
+        }
+        if continuation is not None:
+            checkpoint = source["checkpoint"]
+            cut = len(checkpoint["messages"])
+            row["correction"] = {
+                k: source[k]
+                for k in (
+                    "source_sha256",
+                    "student_model",
+                    "branch_turn",
+                    "rejected",
+                    "rejected_fatal",
+                    "checkpoint",
+                    "checkpoint_sha256",
+                    "failure",
+                )
+            }
+            row["correction"].update(
+                prefix_messages=cut,
+                correction_step_checks=correction_checks(
+                    builders, task, source, msgs, grade
+                ),
+            )
+            row["no_loss_turns"] = sorted(
+                set(row["no_loss_turns"]) | {i for i in labels if i < cut}
+            )
+    from lab_arena.collection_claims import ensure_claim_units
+
+    packet = ensure_claim_units(packet, task=task, out=out, messages=msgs)
+    require_private_evidence(packet)
+    require_private_evidence(row)
     return row, packet
 
 
@@ -293,8 +454,11 @@ def export_row(row, assessment, mode):
         if thought and (mode == "reasoning" or mode == "hard_steps" and at in hard):
             m["reasoning_content"] = thought
         messages.append(m)
+    # World snapshots and negative/student rows contain private grader inputs.
+    # Each training recipe projects only the public interaction and its targets.
+    public = {k: v for k, v in row.items() if k not in {"evidence", "correction"}}
     return dict(
-        row,
+        public,
         messages=messages,
         label_turns=labels,
         steps=row["steps"][:keep],

@@ -70,12 +70,12 @@ def test_last_concurrent_finisher_owns_one_immutable_paid_ranking(database, tmp_
     with ThreadPoolExecutor(max_workers=6) as pool:
         outputs = list(pool.map(lambda args: ranking.rank_pack_if_ready(*args), items))
     (idx,) = [i for i, r in enumerate(outputs) if r]
-    assert len(broker.judge.requests) == 1
+    assert len(broker.judge.requests) == 2
     record = json.loads(objects.get(outputs[idx]["key"]))
     assert record["status"] == "ranked" and len(record["labels"]) == 3
     assert (
         ranking.rank_pack_if_ready(*items[idx]) == outputs[idx]
-        and len(broker.judge.requests) == 1
+        and len(broker.judge.requests) == 2
     )
     old = items[idx]
     p = dict(old[1], facts="edited")

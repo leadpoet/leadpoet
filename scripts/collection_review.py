@@ -47,7 +47,20 @@ def main(argv=None):
     sample = sub.add_parser("sample")
     sign = sub.add_parser("sign")
     verify = sub.add_parser("verify")
-    for command in [sample, sign, verify]:
+    approve = sub.add_parser(
+        "qualify",
+        help="Independently approve a measured pilot panel for correction review",
+    )
+    approve.add_argument("--reviewer-public-key", type=Path, required=True)
+    approve.add_argument("--approver", required=True)
+    approve.add_argument(
+        "--allow-live",
+        action="store_true",
+        help="Also approve this exact measured panel for compensated collection",
+    )
+    approve.add_argument("--approver-private-key", type=Path, required=True)
+    approve.add_argument("--attestation", type=Path, required=True)
+    for command in [sample, sign, verify, approve]:
         command.add_argument("--bundle", type=Path, required=True)
     sample.add_argument("--jobs", type=Path, required=True)
     sample.add_argument("--claim-jobs", type=Path)
@@ -55,7 +68,7 @@ def main(argv=None):
     sign.add_argument("--reviewer", required=True)
     sign.add_argument("--marks", type=Path, required=True)
     sign.add_argument("--private-key", type=Path, required=True)
-    for command in [sign, verify]:
+    for command in [sign, verify, approve]:
         command.add_argument("--receipt", type=Path, required=True)
     verify.add_argument("--public-key", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -93,6 +106,17 @@ def main(argv=None):
                     {"blind_jobs": len(jobs), "sample_sha256": judge.digest(jobs)}
                 )
             )
+        elif args.action == "qualify":
+            approved = review.approve_qualification(
+                bundle,
+                json.loads(read_file(args.receipt)),
+                read_file(args.reviewer_public_key, maximum=8192, private=False),
+                args.approver,
+                read_file(args.approver_private_key, maximum=8192),
+                allow_live=args.allow_live,
+            )
+            write_new(args.attestation, approved)
+            print(json.dumps({"attestation_sha256": judge.digest(approved)}))
         elif args.action == "sign":
             signed = review.sign_review(
                 bundle,

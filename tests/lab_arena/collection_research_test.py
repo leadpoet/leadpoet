@@ -35,7 +35,9 @@ def params(model):
     }
 
 
-def test_gateway_projects_only_bound_model_turns_and_keeps_labels_separate(monkeypatch):
+def test_gateway_projects_only_bound_model_turns_and_keeps_labels_separate(
+    monkeypatch, tmp_path
+):
     j = job()
     c = {
         "reference": {"scorer_image_digest": "sha256:" + "1" * 64},
@@ -43,6 +45,39 @@ def test_gateway_projects_only_bound_model_turns_and_keeps_labels_separate(monke
         "deepline_catalog": None,
         "evaluation_date": "2026-11-23",
     }
+    from lab_arena.collection_research_capture import ResearchGrant, REQUIRED_APPROVALS
+    from lab_arena.service import LocalObjectStore
+
+    j.update(
+        task_scope="licensed_research",
+        deepline_key_id="test",
+        terms_sha256="sha256:" + "b" * 64,
+        miner_hotkey="5" + "A" * 47,
+        owner_coldkey="5" + "B" * 47,
+        registration_id=str(uuid.uuid4()),
+    )
+    grant_doc = {
+        "schema": "collection.research-grant.v1",
+        "approvals": dict.fromkeys(REQUIRED_APPROVALS, "sha256:" + "b" * 64),
+        **{
+            k: j[k]
+            for k in (
+                "batch_id",
+                "registration_id",
+                "miner_hotkey",
+                "owner_coldkey",
+                "terms_sha256",
+                "scenario_id",
+                "model",
+            )
+        },
+        "expires_at": 4102444800,
+        "hosts": ["example.com"],
+        "deepline_requests": [],
+        "icp_sha256": contracts.document_hash(c["icp"]),
+    }
+    grant = ResearchGrant(grant_doc, contracts.document_hash(grant_doc))
+    objects = LocalObjectStore(tmp_path)
     source = io.BytesIO()
     req = params(j["model"])
     research.send(
@@ -64,6 +99,7 @@ def test_gateway_projects_only_bound_model_turns_and_keeps_labels_separate(monke
             "job_id": j["job_id"],
             "companies": [],
             "execution_completed": True,
+            "http_capture": {"recorder_complete": True, "direct_connections": 0},
         },
     )
     source.seek(0)
@@ -99,6 +135,8 @@ def test_gateway_projects_only_bound_model_turns_and_keeps_labels_separate(monke
             "grading_notes": "No verified native result",
             "checks": {"native_coverage": False},
         },
+        grant=grant,
+        objects=objects,
     )
     row, packet = run(j, SimpleNamespace(job=j, model_call=fetch))
     assert (

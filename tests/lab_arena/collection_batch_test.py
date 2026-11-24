@@ -2,8 +2,6 @@
 
 from copy import deepcopy
 from dataclasses import asdict
-import json
-from zipfile import ZipFile
 
 import pytest
 
@@ -18,7 +16,7 @@ from lab_arena.collection_workflow import CHAMPION_REV, POET_REV, store_artifact
 from lab_arena.service import LocalObjectStore
 from scripts import collection_batch as release
 from scripts.run_locked_collection import load_batch, assignment
-from tests.lab_arena.collection_judge_test import PROMPT, Caller, fail_truth, packet
+from tests.lab_arena.collection_judge_test import PROMPT, SPLIT, Caller, fail_truth, packet
 from tests.lab_arena.collection_judge_review_test import keys, complete_marks
 
 
@@ -44,28 +42,35 @@ class Database:
 def pilot(tmp_path, request):
     db = Database()
     objects = LocalObjectStore(tmp_path / "objects")
+    variant = getattr(request, "param", 22)
+    candidate = variant == "open-panel"
+    models = {m: j.route for m,j in judge.QUALIFICATION_JUDGES.items()} if candidate else {
+        "anthropic/claude-fable-5.2": "test", "openai/gpt-6.2-astra": "test"
+    }
+    roles = judge.QUALIFICATION_ROLES if candidate else judge.JUDGES
     raw = {
         "name": "test",
+        "split_manifest": SPLIT,
         "mode": "pilot",
         "seed": "test-seed",
         "routes": {
             **{model: route.tag for model, route in GENERATOR_ROUTES.items()},
-            "anthropic/claude-fable-5.2": "test",
-            "openai/gpt-6.2-astra": "test",
+            **models,
         },
         "scenario_ids": [
-            f"C01-s{2000+i}" for i in range(getattr(request, "param", 22))
+            f"C01-s{2000+i}" for i in range(22 if candidate else variant)
         ],
         "budgets_microusd": dict.fromkeys(MODELS, 1000000),
         "control_slots": {"130": True, "131": False},
         "drift_slots": {
-            str(i): {v: dict.fromkeys(judge.PARTS, 3) for v in judge.JUDGES}
+            str(i): {v: dict.fromkeys(judge.PARTS, 3) for v in roles}
             for i in range(100, 130)
         },
     }
     private_cases = {}
     source_policy = judge.BatchPolicy(
-        "prior-drift-baseline", "earlier-seed", judge.digest(PROMPT), pilot=True
+        "prior-drift-baseline", "earlier-seed", judge.digest(PROMPT), pilot=True,
+        fable_version=tuple(models)[0], astra_version=tuple(models)[1],
     )
     for i in range(100, 132):
         src = f"reference-{i}"
@@ -80,14 +85,16 @@ def pilot(tmp_path, request):
                 reviewer="fixture",
                 rationale="Known fixture control outcome",
                 source_sha256="sha256:" + judge.digest(original),
+                source_generator="human",
             )
         else:
-            sa = {"run_id": src, "primary": "fable", "overlap": True}
+            sa = {"run_id": src, "primary": roles[0], "overlap": True}
             verdict = judge.judge_run(
                 source_policy, sa, original, Caller(), prompt=PROMPT
             )
             baseline = {
                 "job_id": src,
+                "model": MODELS[1],
                 "scenario_id": sid,
                 "batch_id": source_policy.batch_id,
                 "judge_policy": asdict(source_policy),
@@ -190,32 +197,15 @@ def pilot(tmp_path, request):
 def test_reviewed_registered_generator_release_and_pricing(tmp_path, pilot):
     raw, db, objects, bundle, receipt, public = pilot
     output = tmp_path / "release.zip"
-    meta = release.write_exports(bundle, receipt, public, objects, output)
-    assert meta["views"]["decisions"]["rows"] == 100
-    with ZipFile(output) as z:
-        only = z.read("decisions.jsonl").decode()
-        assert (
-            "generator-only" not in only
-            and "Grounded claim" not in only
-            and "run-131" not in only
-        )
-        assert "generator-only" in z.read("reasoning.jsonl").decode()
-        sampled = json.loads(z.read("hard_steps.jsonl").decode().splitlines()[0])
-        assert [
-            n + 1 for n, m in enumerate(sampled["messages"]) if "reasoning_content" in m
-        ] == [1, 3]
+    with pytest.raises(ValueError, match="training release rights"):
+        release.write_exports(bundle, receipt, public, objects, output)
+    assert not output.exists()
     assert (
         compile_pilot(db, bundle, receipt, public, objects)["prices"]["C"][MODELS[0]]
         == 125
     )
-    with pytest.raises(FileExistsError):
-        release.write_exports(bundle, receipt, public, objects, output)
-
     with pytest.raises(ValueError, match="signature"):
-        release.write_exports(
-            bundle, receipt, keys()[1], objects, tmp_path / "invalid.zip"
-        )
-    assert not (tmp_path / "invalid.zip").exists()
+        compile_pilot(db, bundle, receipt, keys()[1], objects)
     alien = deepcopy(raw)
     alien["control_slots"] = {"129": True, "131": False}
     with pytest.raises(ValueError):
@@ -262,7 +252,7 @@ def test_export_binds_reviewed_judges_to_generator_manifest(pilot, tmp_path):
         altered, complete_marks(altered), "unit-test", test_private
     )
     out = tmp_path / "mismatched.zip"
-    with pytest.raises(ValueError, match="source authority"):
+    with pytest.raises(ValueError, match="training release rights"):
         release.write_exports(altered, signed, test_public, objects, out)
     assert not out.exists()
 
@@ -319,13 +309,40 @@ def test_exhausted_noncontrol_slot_does_not_erase_successes_but_failed_control_h
         signed["report"]["quality_ready"]
         and signed["report"]["terminal_failed_attempts"] == 2
     )
-    data = release.write_exports(b, signed, public, objects, tmp_path / "frozen.zip")
-    assert data["views"]["decisions"]["rows"] == 105
+    assert len(b["runs"]) - len(b["drift"]) - len(b["planted"]) == 105
+    assert review.verify_review(b, signed, public)["quality_ready"]
     db.rows[130].update(status="failed", artifact_sha256=None)
     b = release.source_bundle(raw, PROMPT, db, objects)
     signed = review.sign_review(b, complete_marks(b), "test-human", private)
     assert "unjudged_control" in signed["report"]["holds"]
     with pytest.raises(ValueError, match="did not pass review"):
-        release.write_exports(
-            b, signed, public, objects, tmp_path / "unjudged-control.zip"
-        )
+        review.verify_review(b, signed, public)
+
+@pytest.mark.parametrize("pilot", ["open-panel"], indirect=True)
+def test_signed_live_panel_price_compilation_requires_separate_economic_approval(pilot):
+    _, db, objects, bundle, _, _ = pilot
+    reviewer, review_key = keys()
+    operator, operator_key = keys()
+    receipt = review.sign_review(bundle, complete_marks(bundle), "blind-reviewer", reviewer)
+    assert receipt["report"]["holds"] == ["judge_qualification"]
+    only_corrections = review.approve_qualification(bundle, receipt, review_key, "team-owner", operator)
+    with pytest.raises(ValueError, match="excludes compensated"):
+        compile_pilot(db, bundle, receipt, review_key, objects, approval=only_corrections, approver_key=operator_key)
+    both = review.approve_qualification(bundle, receipt, review_key, "team-owner", operator, allow_live=True)
+    result = compile_pilot(db, bundle, receipt, review_key, objects, approval=both, approver_key=operator_key)
+    assert result["panel_qualification_sha256"] == judge.digest(both)
+    assert result["split_manifest_sha256"] == judge.digest(SPLIT)
+    assert set(result["prices"]["C"]) == set(MODELS)
+
+
+def test_legacy_comparison_bundle_refuses_hidden_or_unpartitioned_review(pilot):
+    raw, db, objects, bundle, _, _ = pilot
+    from copy import deepcopy
+    for state in ("missing", "hidden"):
+        forged = deepcopy(bundle)
+        if state == "missing":
+            forged.pop("split_manifest_sha256")
+        else:
+            forged["runs"][0]["packet"]["checks"]["training_split"] = False
+        with pytest.raises(ValueError):
+            review.prepare_review(forged)

@@ -8,14 +8,11 @@ import json
 import os
 from pathlib import Path
 import re
-import tempfile
-from zipfile import ZIP_DEFLATED, ZipFile
 
 from lab_arena import collection_judge as judge, collection_judge_review as review
 from lab_arena.collection_calibration import compile_pilot
 from lab_arena.collection_intake import MODELS, live_finney_arena
-from lab_arena.collection_research import export_research_rows
-from lab_arena.collection_workflow import CHAMPION_REV, POET_REV, export_row
+from lab_arena.collection_workflow import CHAMPION_REV, POET_REV
 from lab_arena.service import S3ObjectStore
 from lab_arena.store import PostgrestTransport
 from scripts.collection_review import read_file, write_new
@@ -90,7 +87,15 @@ def source_bundle(raw, prompt, transport, objects):
     }
     if checked_controls != expected_controls:
         raise ValueError("registered control differs from frozen private case")
-    return bundle
+    from lab_arena.collection_quality import verify_split
+    if "split_manifest" not in raw:
+        raise ValueError("review requires a frozen template, rule and tool split")
+    for item in bundle["runs"]:
+        verify_split(item["packet"].get("split"), raw["split_manifest"])
+        if (item["packet"]["checks"].get("training_split") is not True
+                or item["packet"]["checks"].get("privacy") is not True):
+            raise ValueError("hidden or unchecked material in review batch")
+    return {**bundle, "split_manifest_sha256": judge.digest(raw["split_manifest"])}
 
 
 def read_artifact(objects, batch, run, kind, link, limit):
@@ -107,141 +112,11 @@ def read_artifact(objects, batch, run, kind, link, limit):
 
 
 def write_exports(bundle, receipt, public_key, objects, output):
-    """Publish an exclusive private ZIP after verifying all members. Failure leaves no partial ZIP."""
-    report = review.verify_review(bundle, receipt, public_key)
-    policy = judge.BatchPolicy(**bundle["policy"])
-    assignments = {a["run_id"]: a for a in bundle["assignments"]}
-    controls = set(bundle["planted"]) | set(bundle["drift"])
-    modes = ("decisions", "reasoning", "hard_steps")
-    metadata = {
-        "schema": "leadpoet.collection.training-release.v1",
-        "batch": policy.batch_id,
-        "review_sha256": judge.digest(receipt),
-        "views": {},
-        "preferred_runs": {},
-    }
-    if output.exists():
-        raise FileExistsError(output)
-    with tempfile.TemporaryDirectory(dir=output.parent) as temporary:
-        root = Path(temporary)
-        paths = {m: root / (m + ".jsonl") for m in modes}
-        import contextlib
-
-        with contextlib.ExitStack() as stack:
-            handles = {m: stack.enter_context(p.open("xb")) for m, p in paths.items()}
-            hashes = {m: hashlib.sha256() for m in modes}
-            counts = dict.fromkeys(modes, 0)
-            allowed = {
-                item["assessment"]["run_id"]
-                for item in bundle["runs"]
-                if item["assessment"]["run_id"] not in controls
-                and judge.training_selection(
-                    item["assessment"],
-                    approved_claim_runs=report.get("approved_claim_runs", []),
-                )
-            }
-            for item in bundle["runs"]:
-                a = item["assessment"]
-                run = a["run_id"]
-                assignment_doc = assignments[run]
-                sid = a["scenario_id"]
-                manifest = read_artifact(
-                    objects,
-                    policy.batch_id,
-                    run,
-                    "manifest",
-                    {"sha256": item["manifest_sha256"]},
-                    1024 * 1024,
-                )
-                if (
-                    manifest["job_id"] != run
-                    or manifest["batch_id"] != policy.batch_id
-                    or manifest["model"] != assignment_doc["generator"]
-                    or manifest["model"] not in MODELS
-                    or manifest["harness_commit"] != CHAMPION_REV
-                    or manifest["builder_commit"] != POET_REV
-                    or manifest["scenario_id"] != sid
-                    or manifest.get("judge_policy") != bundle["policy"]
-                    or manifest["assessment"]["sha256"] != "sha256:" + judge.digest(a)
-                    or manifest["packet"]["sha256"] != "sha256:" + judge.digest(item["packet"])
-                ):
-                    raise ValueError("generator source authority differs")
-                if manifest.get("ranking"):
-                    ranking = read_artifact(
-                        objects,
-                        policy.batch_id,
-                        run,
-                        "ranking",
-                        manifest["ranking"],
-                        1024 * 1024,
-                    )
-                    if ranking is not None and ranking.get("status") == "ranked":
-                        if (
-                            ranking["batch_id"] != policy.batch_id
-                            or ranking["scenario_id"] != sid
-                            or ranking["policy_sha256"]
-                            != judge.digest(bundle["policy"])
-                        ):
-                            raise ValueError("ranking binding differs")
-                        first = ranking["labels"][ranking["record"]["order"][0]]
-                        if first in allowed:
-                            metadata["preferred_runs"][sid] = first
-                if run not in allowed:
-                    continue
-                row = read_artifact(
-                    objects,
-                    policy.batch_id,
-                    run,
-                    "generator",
-                    manifest["generator"],
-                    128 * 1024 * 1024,
-                )
-                if row["run"] != run:
-                    raise ValueError("generator run differs")
-                if sid.startswith("research-"):
-                    segments = row["research_rows"]
-                else:
-                    segments = [row]
-                if not segments or any(
-                    s["teacher"] != manifest["model"]
-                    or s["task"] != sid
-                    or s["run"] != run
-                    for s in segments
-                ):
-                    raise ValueError("generator identity differs")
-                for mode in modes:
-                    views = (
-                        export_research_rows(row, a, mode)
-                        if sid.startswith("research-")
-                        else [export_row(row, a, mode)]
-                    )
-                    if not views or any(v is None for v in views):
-                        raise ValueError("selected run has no trainable prefix")
-                    for view in views:
-                        data = (
-                            json.dumps(
-                                view,
-                                ensure_ascii=False,
-                                allow_nan=False,
-                                separators=(",", ":"),
-                            )
-                            + "\n"
-                        ).encode()
-                        hashes[mode].update(data)
-                        handles[mode].write(data)
-                        counts[mode] += 1
-        for m in modes:
-            metadata["views"][m] = {"rows": counts[m], "sha256": hashes[m].hexdigest()}
-        if not counts["decisions"]:
-            raise ValueError("no trainable rows")
-        archive = root / "release.zip"
-        with ZipFile(archive, "x", compression=ZIP_DEFLATED) as z:
-            for m, path in paths.items():
-                z.write(path, arcname=path.name)
-            z.writestr("manifest.json", json.dumps(metadata, sort_keys=True))
-        archive.chmod(0o600)
-        os.link(archive, output)
-    return metadata
+    """Legacy comparison enrollment covers funding and private review only."""
+    raise ValueError(
+        "comparison enrollment did not grant training release rights; "
+        "use a separately consented correction experiment"
+    )
 
 
 def cutover_anchor(transport, *, launch_job=None):
@@ -310,13 +185,18 @@ def cutover_anchor(transport, *, launch_job=None):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=("bundle", "prices", "export"))
+    p.add_argument("action", choices=("bundle", "prices", "export", "experiment-audit", "corrections", "training-feedback"))
     p.add_argument("--batch", type=Path, required=True)
     p.add_argument("--prompt", type=Path, required=True)
     p.add_argument("--receipt", type=Path)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--panel-batch", type=Path)
+    p.add_argument("--panel-prompt", type=Path)
+    p.add_argument("--qualification", type=Path)
+    p.add_argument("--dataset-metadata", type=Path)
+    p.add_argument("--evaluation", type=Path)
     args = p.parse_args(argv)
-    if args.action != "bundle" and args.receipt is None:
+    if args.action in {"prices", "export", "corrections"} and args.receipt is None:
         p.error("--receipt is required")
     if not live_finney_arena():
         raise ValueError("expected Finney/71 operator configuration")
@@ -329,6 +209,36 @@ def main(argv=None):
         prefix=os.environ.get("LAB_ARENA_OBJECT_PREFIX", ""),
     )
     raw, prompt = (json.loads(read_file(path)) for path in (args.batch, args.prompt))
+    if args.action in {"experiment-audit", "corrections", "training-feedback"}:
+        from lab_arena.collection_experiment import load_experiment
+        from lab_arena.collection_experiment_export import record_feedback, write_dataset
+
+        spec = load_experiment(raw, prompt)
+        if args.action == "training-feedback":
+            if not args.dataset_metadata or not args.evaluation:
+                p.error("supply the released dataset metadata and signed Poet evaluation")
+            metadata = json.loads(read_file(args.dataset_metadata))
+            if metadata["batch_id"] != spec.batch_id:
+                raise ValueError("evaluation references a different experiment")
+            ref = record_feedback(
+                metadata, json.loads(read_file(args.evaluation)), objects,
+                read_file(Path(os.environ["LAB_ARENA_COLLECTION_TRAINER_PUBLIC_KEY_FILE"]), private=False),
+            )
+            write_new(args.output, ref)
+            return 0
+        qualification = None
+        if args.action == "corrections":
+            if not (args.panel_batch and args.panel_prompt and args.qualification):
+                p.error("supply the registered qualification pilot and its independent approvals")
+            qualification = {
+                "raw":json.loads(read_file(args.panel_batch)), "prompt":json.loads(read_file(args.panel_prompt)),
+                "receipt":json.loads(read_file(args.receipt)), "approval":json.loads(read_file(args.qualification)),
+                "reviewer_key":read_file(Path(os.environ["LEADPOET_COLLECTION_REVIEW_PUBLIC_KEY_FILE"]), private=False),
+                "approver_key":read_file(Path(os.environ["LEADPOET_COLLECTION_QUALIFICATION_PUBLIC_KEY_FILE"]), private=False),
+            }
+        result = write_dataset(spec, db, objects, args.output, qualification=qualification)
+        print(json.dumps({"batch":spec.batch_id,"attempts":result["attempts"],"rows":result["rows"]}))
+        return 0
     bundle = source_bundle(raw, prompt, db, objects)
     if args.action == "bundle":
         write_new(args.output, bundle)
@@ -344,7 +254,12 @@ def main(argv=None):
             write_new(
                 args.output,
                 dict(
-                    compile_pilot(db, bundle, receipt, public_key, objects),
+                    compile_pilot(
+                        db, bundle, receipt, public_key, objects,
+                        approval=json.loads(read_file(args.qualification)) if args.qualification else None,
+                        approver_key=read_file(Path(os.environ["LEADPOET_COLLECTION_QUALIFICATION_PUBLIC_KEY_FILE"]),
+                                               maximum=8192, private=False) if args.qualification else None,
+                    ),
                     cutover_anchor=cutover_anchor(db),
                 ),
             )

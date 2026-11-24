@@ -1,10 +1,15 @@
-"""Fixed run quotes settle once in the next epoch. No balance carries forward."""
+"""Fixed run quotes settle once in the next epoch. No balance carries forward.
+
+The same signed state pays lead-order rewards (``lab_arena.lead_orders.weights``),
+valued by the same single price read.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
+import logging
 import time
 import urllib.request
 
@@ -125,7 +130,7 @@ def existing_collection_state(row, *, epoch, genesis_hash, signer):
     return state
 
 
-def epoch_state(store, chain, signer, *, epoch, burn_hotkey, valuation_source):
+def epoch_state(store, chain, signer, *, epoch, burn_hotkey, valuation_source, lead_orders=None):
     """Read the accepted state, or freeze completed work and issue its first signed state."""
     scope = chain.accepted_weight_epoch_scope()
     genesis = scope["genesis_hash"].removeprefix("0x").lower()
@@ -137,10 +142,30 @@ def epoch_state(store, chain, signer, *, epoch, burn_hotkey, valuation_source):
     if scope["epoch"] != epoch:
         raise ValueError("cannot issue a collection state outside its epoch")
     basis = store.collection_reward_quotes(epoch)
-    if basis["job_count"]:
-        basis["valuation"] = valuation_source(scope["valid_from_block"])
+    read = []  # one price read values both lanes
+
+    def valuation():
+        if not read:
+            read.append(valuation_source(scope["valid_from_block"]))
+        return read[0]
+
+    lead = None
+    if lead_orders is not None:
+        try:
+            lead = lead_orders.settle(
+                epoch, valuation=valuation,
+                collection_microusd=sum(basis["quotes_microusd"].values()),
+            )
+        except Exception:
+            # Lead orders never hold up collection pay. If their payout was
+            # in fact recorded, the database refuses the state below and the
+            # next request signs it with that payout.
+            logging.getLogger(__name__).warning(
+                "lead order payout for epoch %s failed; rewards stay owed", epoch, exc_info=True)
+    if lead:
+        basis["valuation"] = lead["valuation"]
     else:
-        basis["valuation"] = None
+        basis["valuation"] = valuation() if basis["job_count"] else None
     # The DB serializes publication with acceptance. A raced snapshot is retried
     # using the immutable first winner, never by creating a second obligation.
     state = weight_state.build_accepted_weight_state(
@@ -154,6 +179,7 @@ def epoch_state(store, chain, signer, *, epoch, burn_hotkey, valuation_source):
         reward_basis=basis,
         burn_hotkey=burn_hotkey,
         issued_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        lead_orders=lead["lead_orders"] if lead else None,
     )
     from lab_arena.store import ArenaStoreError
 

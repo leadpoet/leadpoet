@@ -9,7 +9,7 @@
 * Each epoch, ``epoch_payout_document`` pays owed USD oldest first under the
   lane cap and carries the rest forward. In shadow mode the document is
   published only and nothing is recorded as paid; in live mode the payments
-  are recorded and ``weights.merge_lane_weights`` turns them into weight.
+  are recorded and ``weights.LeadOrderLane`` puts them in the epoch's signed weight state.
 
 The lane cap is a share of the epoch's miner emission in USD.
 ``ChainEmissionPrice`` values it once, when the payout starts: the alpha

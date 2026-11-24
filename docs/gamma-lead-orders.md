@@ -457,13 +457,37 @@ prompts, call order and lead data are never published.
 
 ## Weights
 
-In `live`, a payout document's paid shares become a lane fraction per miner
-hotkey. `lab_arena.lead_orders.weights.merge_lane_weights` takes that weight
-only from the burn residual of the Arena weight vector, never from Arena
-winners, keeps the lane under `lane_emission_cap`, and refuses hotkeys that
-are not registered. With no lane fractions (any mode but `live`, or an empty
-epoch) it returns the Arena weights unchanged. It is not yet called by the
-validator's weight signer: wiring it in is a separate reviewed change.
+Lead-order rewards are paid through the same signed weight state as locked
+collection ([locked-collection.md](locked-collection.md)). They are paid only
+in `live`, and only in epochs where collection rewards are active.
+
+- **Split.** Collection is guaranteed 80% of the epoch's miner emission and
+  lead orders 20%. Each may also use what the other leaves unused. With
+  emission `B`, collection quotes `C` and lead-order payments `L`:
+  collection gets `min(C, max(0.8B, B - min(L, 0.2B)))` and lead orders get
+  `min(L, max(0.2B, B - min(C, 0.8B)))`. What neither uses goes to burn.
+  Validators apply this in `leadpoet_canonical.arena_weights.derive_arena_weights`.
+- **One price.** Both lanes use the single valuation the state signs.
+- **Gateway half.** When the Arena service issues the epoch's state it calls
+  `lab_arena.lead_orders.weights.LeadOrderLane.settle`. That pays owed rewards
+  oldest first, to registered hotkeys only, up to the lead orders' allowance
+  (`max(0.2B, B - C)`) and never above the policy's `lane_emission_cap`. So
+  with the policy at 0.30, lead orders reach at most 30% of an epoch even when
+  collection is idle; raising that takes a new signed policy.
+- **What the state carries.** A paying epoch adds `lead_orders` to the state:
+  the payout document's `payout_hash` and micro-USD paid per miner. An epoch
+  that pays no lead orders has exactly the collection state as before.
+- **Ledger equals weights.** `scripts/730-lead-order-weight-state.sql` refuses
+  a state whose `lead_orders` differs from the payout recorded for its epoch,
+  and refuses a payout for an epoch whose state is already published.
+- **Failure.** A failing lead-order payout never holds up the collection
+  state: it is logged, nothing is paid, and the rewards stay owed.
+- **Shadow.** The same call records the what-if document; it adds nothing to
+  the state.
+
+Rollout order: validators first (older validator code rejects a state that
+has `lead_orders`), then script 730, then the Arena service with the
+lead-order settings (mode, policy file) on its host.
 
 ## Known limits
 
@@ -474,6 +498,11 @@ validator's weight signer: wiring it in is a separate reviewed change.
   in `live` (Gavin's choice, Nov 20 2026), so a miner can read the request
   shapes, models and Deepline operations in their own provider account. The
   lead-finding code stays private; the method behind it is visible.
+- A payout is recorded just before its state is published. If the Arena
+  service then publishes no state for the rest of that epoch, those rewards
+  are marked paid without weight. The payout document and the missing state
+  are both public, so it is visible, but nothing repays it automatically.
+- Lead orders are paid only once collection rewards are active.
 - The emission price is one read. Someone who moves the alpha price at the
   epoch's first block, or a wrong CoinGecko quote, shifts that epoch's lane
   cap and every miner's lane share with it. The lane cap bounds the effect.

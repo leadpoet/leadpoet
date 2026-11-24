@@ -31,6 +31,10 @@ from leadpoet_canonical.lab_arena_rewards import (
 
 ACCEPTED_WEIGHT_STATE_SCHEMA_VERSION = "leadpoet.arena.accepted_weight_state.v1"
 COLLECTION_BASIS_SCHEMA = "leadpoet.collection.fixed_run_quotes.v1"
+# Collection is guaranteed this share of an epoch's miner emission and lead
+# orders the rest. Either lane may also use what the other leaves unused.
+COLLECTION_EMISSION_SHARE = Fraction(4, 5)
+LEAD_ORDER_EMISSION_SHARE = Fraction(1) - COLLECTION_EMISSION_SHARE
 WEIGHT_STATE_SIGNATURE_PREFIX = "arena_weight_state_hash:"
 PARTS_PER_BILLION = 1_000_000_000
 U16_MAX = 65_535
@@ -42,6 +46,9 @@ _BODY_FIELDS = (
     "burn_hotkey", "issued_at",
 )
 _OPTIONAL_BODY_FIELDS = ("slot_eligibility", "weekly_slot_decay")
+# Present only in an epoch that pays lead orders, so other epochs keep the
+# exact state shape validators already accept.
+_LEAD_ORDERS_FIELD = "lead_orders"
 _HOTKEY_CHARS = frozenset("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
 _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$")
 
@@ -68,7 +75,8 @@ def compare_weights_hash(netuid: int, epoch_id: int, weights: Sequence[tuple[int
 def accepted_weight_state_body(value: Mapping[str, Any]) -> Dict[str, Any]:
     """Return the exact body covered by ``state_hash``."""
 
-    return {field: value[field] for field in _BODY_FIELDS + _OPTIONAL_BODY_FIELDS if field in value}
+    return {field: value[field] for field in _BODY_FIELDS + _OPTIONAL_BODY_FIELDS + (_LEAD_ORDERS_FIELD,)
+            if field in value}
 
 
 def classify_arena_signed_request_message(message: bytes, *, validator_hotkey: str) -> str:
@@ -132,7 +140,21 @@ def _collection_basis(state: Mapping[str, Any]) -> bool:
     return isinstance(state.get("reward_basis"), Mapping) and state["reward_basis"].get("schema_version") == COLLECTION_BASIS_SCHEMA
 
 
-def validate_collection_basis(basis: Mapping[str, Any], epoch: int, start_block: int) -> None:
+def validate_lead_orders(value: Any) -> Dict[str, int]:
+    """Lead-order rewards paid this epoch: the public payout's hash and whole micro-USD per miner."""
+    _require(type(value) is dict and set(value) == {"payout_hash", "paid_microusd"}, "lead order fields are invalid")
+    _require(isinstance(value["payout_hash"], str) and
+             re.fullmatch(r"sha256:[0-9a-f]{64}", value["payout_hash"]), "lead order payout hash is invalid")
+    paid = value["paid_microusd"]
+    _require(type(paid) is dict and 0 < len(paid) <= 65536, "lead order beneficiaries are invalid")
+    for key, amount in paid.items():
+        _hotkey(key, "lead order beneficiary")
+        _require(_integer(amount, "lead order payment") > 0, "lead order payment must be positive")
+    return paid
+
+
+def validate_collection_basis(basis: Mapping[str, Any], epoch: int, start_block: int, *,
+                              pays_lead_orders: bool = False) -> None:
     """All monetary inputs are whole micro-USD or explicitly named chain base units."""
     _require(set(basis) == {"schema_version", "source_epoch", "job_count", "job_set_sha256",
                             "quotes_microusd", "valuation"}, "collection basis fields are invalid")
@@ -147,7 +169,7 @@ def validate_collection_basis(basis: Mapping[str, Any], epoch: int, start_block:
         _hotkey(key, "beneficiary")
         _require(_integer(amount, "quote total") > 0, "quote total must be positive")
     valuation = basis["valuation"]
-    if not count:
+    if not count and not pays_lead_orders:
         _require(valuation is None, "empty collection has a valuation")
         return
     _require(isinstance(valuation, dict) and set(valuation) == {
@@ -169,7 +191,8 @@ def validate_collection_basis(basis: Mapping[str, Any], epoch: int, start_block:
 def validate_accepted_weight_state(value: Any) -> Dict[str, Any]:
     _require(isinstance(value, Mapping), "accepted weight state must be an object")
     required = set(_BODY_FIELDS) | {"state_hash", "signature"}
-    _require(required <= set(value) and not set(value) - required - set(_OPTIONAL_BODY_FIELDS), "accepted weight state fields are invalid")
+    _require(required <= set(value) and not set(value) - required - set(_OPTIONAL_BODY_FIELDS) - {_LEAD_ORDERS_FIELD},
+             "accepted weight state fields are invalid")
     _require(value.get("schema_version") == ACCEPTED_WEIGHT_STATE_SCHEMA_VERSION, "accepted weight state schema is invalid")
     network = str(value.get("network") or "")
     _require(network and len(network) <= 64, "network is invalid")
@@ -185,9 +208,13 @@ def validate_accepted_weight_state(value: Any) -> Dict[str, Any]:
         _require(not (set(value) & set(_OPTIONAL_BODY_FIELDS)), "collection cannot pay champion slots")
         _require((network, netuid) == ("finney", 71), "collection subnet differs")
         reward_basis = value["reward_basis"]
-        validate_collection_basis(reward_basis, epoch, valid_from)
+        validate_collection_basis(reward_basis, epoch, valid_from, pays_lead_orders=_LEAD_ORDERS_FIELD in value)
         _require(value.get("burn_hotkey") not in reward_basis["quotes_microusd"], "burn cannot fund a job")
+        if _LEAD_ORDERS_FIELD in value:
+            _require(value.get("burn_hotkey") not in validate_lead_orders(value[_LEAD_ORDERS_FIELD]),
+                     "burn cannot be paid for lead orders")
     else:
+        _require(_LEAD_ORDERS_FIELD not in value, "lead orders are paid only with collection rewards")
         reward_basis = validate_reward_basis(value.get("reward_basis"))
         _require(int(reward_basis["effective_reward_epoch"]) <= epoch, "reward basis is not effective for epoch")
     if "slot_eligibility" in value:
@@ -249,16 +276,32 @@ def derive_arena_weights(value: Any, metagraph_hotkeys: Sequence[str]) -> Dict[s
     registered_hotkeys = set(hotkeys)
     burn_hotkey = str(state["burn_hotkey"])
     _require(burn_hotkey in registered_hotkeys, "burn_hotkey is not registered at finalized state")
-    collection_share = Fraction(0)
+    collection_share = lead_order_share = Fraction(0)
     if _collection_basis(state):
         basis = state["reward_basis"]
         quotes = basis["quotes_microusd"]
-        budget = (basis["valuation"] or {}).get("emission_microusd", 0)
-        if quotes:
-            divisor = max(budget, sum(quotes.values()))
-            by_hotkey = {key: Fraction(amount, divisor) for key, amount in quotes.items()
-                         if key in registered_hotkeys}
-            collection_share = sum(by_hotkey.values(), Fraction(0))
+        lead = state.get(_LEAD_ORDERS_FIELD, {}).get("paid_microusd", {})
+        # A zero budget still divides: every claim then exceeds it and is scaled.
+        budget = max((basis["valuation"] or {}).get("emission_microusd", 0), 1)
+        asked_collection = Fraction(sum(quotes.values()), budget)
+        asked_lead = Fraction(sum(lead.values()), budget)
+        # Each lane gets what it asks, up to its own share plus what the other leaves.
+        shares = (
+            (quotes, asked_collection, min(asked_collection, max(
+                COLLECTION_EMISSION_SHARE, 1 - min(asked_lead, LEAD_ORDER_EMISSION_SHARE)))),
+            (lead, asked_lead, min(asked_lead, max(
+                LEAD_ORDER_EMISSION_SHARE, 1 - min(asked_collection, COLLECTION_EMISSION_SHARE)))),
+        )
+        lane_totals = []
+        for lane, asked, share in shares:
+            total = Fraction(0)
+            for key, amount in lane.items():
+                if key in registered_hotkeys:
+                    part = Fraction(amount, budget) * share / asked
+                    by_hotkey[key] = by_hotkey.get(key, Fraction(0)) + part
+                    total += part
+            lane_totals.append(total)
+        collection_share, lead_order_share = lane_totals
         champion_share = Fraction(0)
     elif state["reward_basis"]["schema_version"] == REWARD_BASIS_V2_SCHEMA_VERSION:
         by_hotkey = slot_allocations(
@@ -276,7 +319,7 @@ def derive_arena_weights(value: Any, metagraph_hotkeys: Sequence[str]) -> Dict[s
         else:
             champion_share = Fraction(0)
     _require(champion_share <= 1, "Arena allocation exceeds total emissions")
-    unused = Fraction(1) - champion_share - collection_share
+    unused = Fraction(1) - champion_share - collection_share - lead_order_share
     if unused:
         by_hotkey[burn_hotkey] = by_hotkey.get(burn_hotkey, Fraction(0)) + unused
     registered = []
@@ -301,4 +344,5 @@ def derive_arena_weights(value: Any, metagraph_hotkeys: Sequence[str]) -> Dict[s
         "champion_share_ppb": int(champion_share * PARTS_PER_BILLION),
         "burned_residual_ppb": int(unused * PARTS_PER_BILLION),
         **({"collection_share_ppb": int(collection_share * PARTS_PER_BILLION)} if _collection_basis(state) else {}),
+        **({"lead_order_share_ppb": int(lead_order_share * PARTS_PER_BILLION)} if _LEAD_ORDERS_FIELD in state else {}),
     }

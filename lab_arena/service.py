@@ -859,6 +859,8 @@ class ServiceConfig:
     accepted_burn_hotkey: str = ""
     # Enable only after normal validators support signed model tenure.
     collection_emission_valuation: Optional[Callable[[int], Mapping[str, Any]]] = None
+    # ``lab_arena.lead_orders.weights.LeadOrderLane``; None when lead orders are off.
+    lead_order_lane: Optional[Any] = None
     weekly_slot_decay_enabled: bool = False
     # Identity-only test seam for existing leases. New claims and capacity
     # always require the finalized permit/stake snapshot, never this override.
@@ -9410,7 +9412,8 @@ class ArenaService:
             try:
                 state = collection_rewards.epoch_state(self._store, self._config.chain, self._reward_signer(),
                     epoch=requested_epoch, burn_hotkey=self._config.accepted_burn_hotkey,
-                    valuation_source=self._config.collection_emission_valuation)
+                    valuation_source=self._config.collection_emission_valuation,
+                    lead_orders=getattr(self._config, "lead_order_lane", None))
             except Exception as exc:
                 raise ServiceError("collection_weight_state_unavailable", 503) from exc
             return {"state": state, "lookup_ok": True}

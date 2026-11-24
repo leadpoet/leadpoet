@@ -1,89 +1,41 @@
-"""Merge the lead-order lane into the Arena weight vector (live mode only).
+"""Pay lead-order rewards through the collection epoch's signed weight state.
 
-Rules:
+Validators derive weights only from the accepted weight state
+(``leadpoet_canonical.arena_weights.derive_arena_weights``). In an epoch that
+pays lead orders, the state carries ``lead_orders``: the public payout
+document's hash and the micro-USD paid per miner. The validator code splits
+the epoch's miner emission: collection is guaranteed 80%, lead orders 20%,
+and each may use what the other leaves unused.
 
-* No lane payout (off, staff, shadow, or an epoch with nothing paid) returns
-  ``derive_arena_weights`` unchanged: the same object the Arena path returns.
-* A lane payout takes weight only from the burn residual, never from the
-  Arena champion or slot holders, and never more than the lane cap.
-* Every lane hotkey must be registered at the finalized metagraph; the caller
-  pays only registered hotkeys (``registered_entries``), so nothing recorded
-  as paid is silently burned.
-
-``leadpoet_canonical.arena_weights`` is attested and AST-pinned, so it is not
-edited. ``_allocations`` and ``_sparse`` restate its allocation and
-float32/u16 steps; a test pins that, with no lane, they reproduce
-``derive_arena_weights`` exactly for every state shape.
+``LeadOrderLane.settle`` is the gateway half. It caps the payout at the lead
+orders' allowance before recording it, so what the ledger marks paid is what
+validators weight. ``scripts/730`` makes the database refuse a state that
+disagrees with the recorded payout.
 """
 
 from __future__ import annotations
 
-import struct
-from fractions import Fraction
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+import logging
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
-from leadpoet_canonical import arena_weights
-from leadpoet_canonical.arena_weights import (
-    PARTS_PER_BILLION,
-    REWARD_BASIS_V2_SCHEMA_VERSION,
-    SLOT_ELIGIBILITY_UNTIL_REPLACED,
-    U16_MAX,
-    ArenaWeightError,
-    champion_values,
-    compare_weights_hash,
-    slot_allocations,
-)
+from leadpoet_canonical.arena_weights import LEAD_ORDER_EMISSION_SHARE
 from lab_arena.lead_orders.money import OwedEntry
 
-
-def _allocations(state: Mapping[str, Any], hotkeys: Sequence[str]) -> Tuple[Dict[str, Fraction], Fraction, Fraction]:
-    by_hotkey: Dict[str, Fraction] = {}
-    burn_hotkey = str(state["burn_hotkey"])
-    if state["reward_basis"]["schema_version"] == REWARD_BASIS_V2_SCHEMA_VERSION:
-        by_hotkey = dict(slot_allocations(
-            state["reward_basis"], int(state["epoch"]), list(hotkeys),
-            until_replaced=state.get("slot_eligibility") == SLOT_ELIGIBILITY_UNTIL_REPLACED,
-            weekly_slot_decay=state.get("weekly_slot_decay"),
-        ))
-        champion_share = sum(by_hotkey.values(), Fraction(0))
-    else:
-        champion = champion_values(state["reward_basis"], int(state["epoch"]), list(hotkeys))
-        champion_share = Fraction(str(champion["champion_share"]))
-        if champion["champion_uid"] is not None and champion_share:
-            winner = hotkeys[int(champion["champion_uid"])]
-            by_hotkey[winner] = by_hotkey.get(winner, Fraction(0)) + champion_share
-        else:
-            champion_share = Fraction(0)
-    unused = Fraction(1) - champion_share
-    if unused:
-        by_hotkey[burn_hotkey] = by_hotkey.get(burn_hotkey, Fraction(0)) + unused
-    return by_hotkey, champion_share, unused
+_VALUATION_FIELDS = (
+    "block", "block_hash", "miner_alpha_rao", "tao_rao_per_alpha", "tao_price_microusd",
+    "price_updated_at", "observed_at", "emission_microusd",
+)
+TAO_PRICE_SOURCE = "coingecko:bittensor/usd"
 
 
-def _sparse(state: Mapping[str, Any], hotkeys: Sequence[str], by_hotkey: Mapping[str, Fraction],
-            champion_share: Fraction, unused: Fraction) -> Dict[str, Any]:
-    registered = [(uid, by_hotkey[h]) for uid, h in enumerate(hotkeys) if by_hotkey.get(h, Fraction(0)) > 0]
-    if not registered:
-        raise ArenaWeightError("accepted state allocates no weight to finalized UIDs")
-    float32 = lambda item: struct.unpack("!f", struct.pack("!f", float(item)))[0]
-    float_weights = [(uid, float32(weight)) for uid, weight in registered]
-    maximum = float(max(weight for _, weight in float_weights))
-    sparse = [(uid, round((float(weight) / maximum) * U16_MAX)) for uid, weight in float_weights]
-    sparse = [(uid, weight) for uid, weight in sparse if weight > 0]
-    return {
-        "state_hash": state["state_hash"], "netuid": state["netuid"], "epoch": state["epoch"],
-        "sparse_uids": [uid for uid, _ in sparse], "sparse_weights_u16": [w for _, w in sparse],
-        "weights_hash": compare_weights_hash(int(state["netuid"]), int(state["epoch"]), sparse),
-        "champion_share_ppb": int(champion_share * PARTS_PER_BILLION),
-        "burned_residual_ppb": int(unused * PARTS_PER_BILLION),
-    }
+def lead_order_allowance_microusd(emission_microusd: int, collection_microusd: int) -> int:
+    """Most the lead orders may be paid: their share, plus what collection leaves."""
 
-
-def burn_residual(state: Mapping[str, Any], hotkeys: Sequence[str]) -> Fraction:
-    """Share of emission the Arena leaves to the burn hotkey this epoch."""
-
-    arena_weights.derive_arena_weights(state, hotkeys)  # full validation
-    return _allocations(state, hotkeys)[2]
+    emission, collection = int(emission_microusd), int(collection_microusd)
+    if emission < 0 or collection < 0:
+        raise ValueError("amounts must not be negative")
+    guaranteed = emission * LEAD_ORDER_EMISSION_SHARE.numerator // LEAD_ORDER_EMISSION_SHARE.denominator
+    return max(guaranteed, emission - collection)
 
 
 def registered_entries(entries: Iterable[OwedEntry], hotkeys: Sequence[str]) -> List[OwedEntry]:
@@ -93,34 +45,48 @@ def registered_entries(entries: Iterable[OwedEntry], hotkeys: Sequence[str]) -> 
     return [entry for entry in entries if entry.miner_hotkey in registered]
 
 
-def merge_lane_weights(
-    state: Any,
-    hotkeys: Sequence[str],
-    lane_fractions: Optional[Mapping[str, Fraction]] = None,
-    *,
-    lane_cap: Fraction = Fraction(0),
-) -> Dict[str, Any]:
-    base = arena_weights.derive_arena_weights(state, hotkeys)
-    lane = {k: Fraction(v) for k, v in (lane_fractions or {}).items() if Fraction(v) > 0}
-    if not lane:
-        return base
-    total = sum(lane.values(), Fraction(0))
-    if total > lane_cap:
-        raise ArenaWeightError("lead-order lane exceeds its emission cap")
-    by_hotkey, champion_share, unused = _allocations(state, hotkeys)
-    if total > unused:
-        raise ArenaWeightError("lead-order lane exceeds the burn residual")
-    registered = set(hotkeys)
-    for hotkey in lane:
-        if hotkey not in registered:
-            raise ArenaWeightError("lead-order lane pays an unregistered hotkey")
-    burn_hotkey = str(state["burn_hotkey"])
-    by_hotkey[burn_hotkey] = by_hotkey.get(burn_hotkey, Fraction(0)) - total
-    for hotkey, share in lane.items():
-        by_hotkey[hotkey] = by_hotkey.get(hotkey, Fraction(0)) + share
-    out = _sparse(state, hotkeys, by_hotkey, champion_share, unused - total)
-    out["lead_order_lane_ppb"] = int(total * PARTS_PER_BILLION)
-    return out
+class LeadOrderLane:
+    """One epoch's lead-order payout, for the collection weight state."""
+
+    def __init__(self, service: Any, *, registered_hotkeys: Callable[[], Sequence[str]]) -> None:
+        self._service = service
+        self._registered_hotkeys = registered_hotkeys
+
+    def settle(self, epoch: int, *, collection_microusd: int,
+               valuation: Callable[[], Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Return ``{"valuation", "lead_orders"}`` for a paying epoch, else ``None``.
+
+        A payout already recorded for the epoch is returned with the valuation
+        it was capped by, so a retry signs the same amounts. Shadow mode
+        records its what-if document and returns ``None``.
+        """
+
+        config = self._service.config
+        if not config.computes_rewards:
+            return None
+        if not config.weights_rewards:
+            try:
+                self._service.run_epoch(epoch)
+            except Exception:  # shadow pays nothing and must never hold up weights
+                logging.getLogger(__name__).warning("shadow lead order epoch %s failed", epoch, exc_info=True)
+            return None
+
+        def priced() -> Mapping[str, Any]:
+            return dict(valuation(), tao_price_source=TAO_PRICE_SOURCE)
+
+        document = self._service.run_epoch(
+            epoch, valuation=priced, registered_hotkeys=list(self._registered_hotkeys()),
+            payable_cap_microusd=lambda emission: lead_order_allowance_microusd(emission, collection_microusd),
+        )
+        if not document or document.get("mode") != "live" or not document.get("paid_microusd"):
+            return None
+        paid: Dict[str, int] = {}
+        for payment in document["payments"]:
+            paid[payment["miner_hotkey"]] = paid.get(payment["miner_hotkey"], 0) + int(payment["paid_microusd"])
+        return {
+            "valuation": {field: document["emission_valuation"][field] for field in _VALUATION_FIELDS},
+            "lead_orders": {"payout_hash": document["payout_hash"], "paid_microusd": paid},
+        }
 
 
-__all__ = ["burn_residual", "merge_lane_weights", "registered_entries"]
+__all__ = ["LeadOrderLane", "TAO_PRICE_SOURCE", "lead_order_allowance_microusd", "registered_entries"]

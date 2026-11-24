@@ -21,7 +21,7 @@ import time
 import uuid
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Union
 
 from lab_arena import signing
 from lab_arena.contracts import canonical_json
@@ -645,13 +645,19 @@ class LeadOrderService:
         self,
         epoch: int,
         *,
-        payable_cap_microusd: Optional[int] = None,
-        registered_hotkeys: Optional[List[str]] = None,
+        payable_cap_microusd: Union[None, int, Callable[[int], int]] = None,
+        registered_hotkeys: Union[None, List[str], Callable[[], List[str]]] = None,
+        valuation: Optional[Callable[[], Mapping[str, Any]]] = None,
+        collection_microusd: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """Compute and record one epoch's payout document (shadow and live).
 
-        In live mode the caller passes the finalized metagraph hotkeys and the
-        burn residual's USD value, so nothing is paid that cannot be weighted.
+        In live mode the caller passes the finalized metagraph hotkeys, so
+        nothing is paid that cannot be weighted. The collection weight state
+        (``weights.LeadOrderLane``) also passes ``valuation``, the price read
+        its state signs, and a cap worked out from that emission value. With
+        ``valuation`` an epoch that owes nothing records nothing and reads no
+        price.
         """
 
         if not self.config.computes_rewards:
@@ -661,26 +667,43 @@ class LeadOrderService:
             return existing
         self.reconcile()
         self.repay_uncertain()
-        try:
-            valuation = self._emission_price.valuation(epoch)
-        except rewards.EmissionPriceUnavailable as exc:
-            # Say why, so a lasting fault cannot stop payouts unnoticed.
-            logging.getLogger(__name__).warning(
-                "lead order epoch %s has no emission price: %s (%r)", epoch, exc, exc.__cause__)
-            if self.config.weights_rewards:
-                return None  # live: no payout, Arena weights unchanged
-            valuation = None
         entries = rewards.owed_entries(self._store.owed(through_epoch=epoch, mode=self.config.mode))
         if registered_hotkeys is not None:
+            if callable(registered_hotkeys):
+                registered_hotkeys = registered_hotkeys()
             entries = lane_weights.registered_entries(entries, registered_hotkeys)
         elif self.config.weights_rewards:
             raise LeadOrderServiceError(500, "registered_hotkeys_required")
+        if valuation is not None:
+            if not any(e.settled_epoch <= epoch and e.remaining_microusd > 0 for e in entries):
+                return None
+            price: Optional[Mapping[str, Any]] = valuation()
+        else:
+            try:
+                price = self._emission_price.valuation(epoch)
+            except rewards.EmissionPriceUnavailable as exc:
+                # Say why, so a lasting fault cannot stop payouts unnoticed.
+                logging.getLogger(__name__).warning(
+                    "lead order epoch %s has no emission price: %s (%r)", epoch, exc, exc.__cause__)
+                if self.config.weights_rewards:
+                    return None  # live: no payout, Arena weights unchanged
+                price = None
+        cap = payable_cap_microusd
+        if callable(cap):
+            cap = None if price is None else cap(int(price["emission_microusd"]))
         document = rewards.sign_payout(self._signer, rewards.epoch_payout_document(
             self.policy, epoch=epoch, mode=self.config.mode, entries=entries,
-            valuation=valuation, payable_cap_microusd=payable_cap_microusd,
+            valuation=price, payable_cap_microusd=cap, collection_microusd=collection_microusd,
         ))
-        self._store.record_payout(epoch=epoch, mode=self.config.mode, document=document,
-                                  payments=document["payments"])
+        try:
+            self._store.record_payout(epoch=epoch, mode=self.config.mode, document=document,
+                                      payments=document["payments"])
+        except Exception:
+            # Another process recorded this epoch first: its document stands.
+            recorded = self._store.reward_epoch(epoch)
+            if not recorded:
+                raise
+            return recorded
         return document
 
 

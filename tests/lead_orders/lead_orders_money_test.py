@@ -41,7 +41,7 @@ def test_default_policy_matches_contract_start_values():
     assert POLICY.min_leads_per_order == 10
     assert POLICY.min_charge_ratio_ppm == 400_000
     assert POLICY.spend_ceiling_per_lead_microusd == 500_000
-    assert POLICY.lane_emission_cap_ppm == 300_000
+    assert POLICY.lane_emission_cap_ppm == 1_000_000
     assert POLICY.ranking_window_epochs == 140
     assert POLICY.daily_leads_per_hotkey == 500
     assert POLICY.order_deadline_minutes == 60
@@ -255,8 +255,9 @@ def test_epoch_payout_refuses_bad_entries():
 
 def test_lane_cap_and_weight_fractions():
     emission = 100 * USD
-    cap = money.lane_cap_microusd(POLICY, emission)
-    assert cap == 30 * USD
+    assert money.lane_cap_microusd(POLICY, emission) == emission
+    capped = unsigned_policy(dict(DEFAULT_POLICY_BODY, lane_emission_cap="0.30"))
+    assert money.lane_cap_microusd(capped, emission) == 30 * USD
     fractions = money.lane_weight_fractions({MINER: 15 * USD, OTHER: 15 * USD}, emission)
     assert sum(fractions.values()) == Fraction(3, 10)
     assert money.lane_weight_fractions({}, 0) == {}

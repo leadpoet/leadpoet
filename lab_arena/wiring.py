@@ -457,6 +457,33 @@ def _shadow_replay_score_compat_round_id(
     return round_id
 
 
+class _LeadOrderLaneFromEnvironment:
+    """The lead-order payout hook for the weight state, built on first use.
+
+    Needs the lead-order settings (mode, policy file) on this host too. While
+    they are missing or wrong, ``settle`` raises, the collection state is
+    issued without lead orders, and their rewards stay owed.
+    """
+
+    def __init__(self, arena_chain) -> None:
+        self._chain = arena_chain
+        self._lane = None
+        self._lock = threading.Lock()
+
+    def settle(self, epoch, **kwargs):
+        from lab_arena.lead_orders import wiring as lead_wiring
+        from lab_arena.lead_orders.weights import LeadOrderLane
+
+        with self._lock:
+            if self._lane is None:
+                _config, lead_service, _broker = lead_wiring.build_from_environment()
+                if lead_service is None:
+                    return None
+                self._lane = LeadOrderLane(
+                    lead_service, registered_hotkeys=lambda: self._chain.metagraph().hotkeys)
+        return self._lane.settle(epoch, **kwargs)
+
+
 def build_service_from_environment(mode: str):
     """Construct the production service and its FastAPI app from the environment."""
 
@@ -704,6 +731,7 @@ def build_service_from_environment(mode: str):
         network_name=chain_config.network_name,
         netuid=chain_config.netuid,
         collection_emission_valuation=lambda block: collection_rewards.emission_valuation(arena_chain, block),
+        lead_order_lane=_LeadOrderLaneFromEnvironment(arena_chain),
         weekly_slot_decay_enabled=_weekly_slot_decay_enabled_from_environment(),
         scorer_image_access=image_access,
         reward_signer_factory=lambda: signing.KmsSigner(_required("LAB_ARENA_SIGNING_KEY_ID"), region_name=os.environ.get("AWS_REGION")),

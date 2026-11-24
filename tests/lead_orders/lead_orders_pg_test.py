@@ -1,6 +1,6 @@
 """Lead orders on a disposable PostgreSQL: SQL rules, service, broker, receipts.
 
-Runs scripts/707 on top of the Lab Arena base (179) through the same harness
+Runs scripts/707 and 730 on top of the Lab Arena default chain through the same harness
 the Arena tests use (Docker in CI, ``LAB_ARENA_PG_LOCAL=1`` locally). Every
 order a test places is claimed in the same test, because the claim queue is
 shared by the module's database.
@@ -31,16 +31,21 @@ from lab_arena.lead_orders.policy import DEFAULT_POLICY_BODY, sign_policy, load_
 from lab_arena.lead_orders.service import LeadOrderService, LeadOrderServiceError
 from lab_arena.lead_orders.store import LeadOrderStore
 from lab_arena.store import ArenaStoreError, PsycopgTransport
-from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_pg_harness import DEFAULT_MIGRATIONS, database_with_lab_arena_migration
 
-MIGRATIONS = ("179-lab-arena-v1.sql", "707-lead-orders.sql")
+# 730 guards the accepted weight states (202, in the default chain) and collection jobs (720, 721).
+MIGRATIONS = DEFAULT_MIGRATIONS + (
+    "720-locked-collection-intake.sql", "721-locked-collection-reward-epoch.sql",
+    "707-lead-orders.sql", "730-lead-order-weight-state.sql",
+)
 USD = 1_000_000
 B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 MODEL = "openai/gpt-test"
 DEAR = "openai/gpt-dear"  # 10,000 output tokens reserve $1.00: room for the costs the reward tests report
 SECRET = "x" * 40
 SIGNER = signing.LocalSigner.generate()
-POLICY_DOC = sign_policy(SIGNER, DEFAULT_POLICY_BODY)
+# A 30% lane cap, so the payout tests show a capped epoch and its carry-forward.
+POLICY_DOC = sign_policy(SIGNER, dict(DEFAULT_POLICY_BODY, lane_emission_cap="0.30"))
 POLICY = load_policy(POLICY_DOC, public_key_der=SIGNER.public_key_der, expected_public_key_hash=SIGNER.public_key_hash)
 PRICE_TABLE = price_table_from_models_response(
     {"data": [{"id": MODEL, "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
@@ -568,6 +573,86 @@ def test_live_epoch_pays_owed_rewards_from_a_published_price_and_owes_them_witho
     # The next epoch pays the rest at that epoch's own price.
     later = service(FixedPrice(10_000_000)).run_epoch(7002, registered_hotkeys=[miner])
     assert [p["paid_microusd"] for p in later["payments"]] == [200_000] and remaining() == [(500_000, 500_000)]
+
+
+def test_weight_state_and_live_payout_must_agree_or_the_database_refuses(store, owner):
+    """Paid in the ledger means signed in the epoch's weight state, and the reverse."""
+    from lab_arena.lead_orders.weights import LeadOrderLane
+
+    order, miner = live_order_with_miner_reward(store, owner, epoch_value=8000)
+    config, _, epoch = make(store, "live", gamma=FakeGamma(), epoch=Epoch(8000))
+    service = LeadOrderService(config=config, policy=POLICY, policy_document=POLICY_DOC, store=store, signer=SIGNER,
+                               current_epoch=epoch, gamma_reader=FakeGamma(), emission_price=FixedPrice(None))
+    burn, reads, metagraph_reads = hotkey(), [], []
+
+    def registered():
+        metagraph_reads.append(1)
+        return [miner, burn]
+
+    lane = LeadOrderLane(service, registered_hotkeys=registered)
+
+    def valuation():
+        reads.append(1)
+        return {"block": 50, "block_hash": "0x" + "c" * 64, "miner_alpha_rao": 10**9, "tao_rao_per_alpha": 10**9,
+                "tao_price_microusd": 1_000_000, "price_updated_at": 200, "observed_at": 201,
+                "emission_microusd": 1_000_000}
+
+    def settle(epoch_id, collection_microusd=0):
+        return lane.settle(epoch_id, collection_microusd=collection_microusd, burn_hotkey=burn, valuation=valuation)
+
+    def publish(epoch_id, lead_orders):
+        # The fields the table requires. These guards read only lead_orders; the signed
+        # collection state itself is covered in tests/lab_arena/collection_rewards_test.py.
+        doc = {"schema_version": "leadpoet.arena.accepted_weight_state.v1", "network": "finney",
+               "genesis_hash": "2f" * 32, "netuid": 71, "epoch": epoch_id, "valid_from_block": 50,
+               "valid_until_block": 409, "reward_basis": {}, "burn_hotkey": burn, "issued_at": "2026-11-23T00:01:00Z",
+               "state_hash": "sha256:" + hashlib.sha256(b"%d" % epoch_id).hexdigest(), "signature": {},
+               **({"lead_orders": lead_orders} if lead_orders else {})}
+        return sql(owner, "SELECT public.lab_arena_publish_weight_state_v1('finney',71,%s,%s,%s)",
+                   (epoch_id, doc["state_hash"], json.dumps(doc)))
+
+    def owed():
+        return [(r["owed_microusd"], r["paid_microusd"]) for r in store.owed(through_epoch=10**9, mode="live")
+                if r["order_id"] == order["order_id"]]
+
+    # The payout was capped against a collection total the database no longer agrees with: nothing is paid.
+    with pytest.raises(ArenaStoreError, match="collection total changed"):
+        settle(8001, collection_microusd=900_000)
+    assert store.reward_epoch(8001) is None and owed() == [(500_000, 0)]
+    # $1 of emission, no collection work: the policy's 30% lane cap pays $0.30 of the $0.50.
+    settled = settle(8001)
+    assert settled["lead_orders"]["paid_microusd"] == {miner: 300_000} and settled["valuation"] == valuation()
+    recorded = store.reward_epoch(8001)
+    assert recorded["collection_microusd"] == 0 and recorded["min_hotkey_microusd"] == 16
+    assert owed() == [(500_000, 300_000)]
+    # A retry returns the recorded payout and its valuation: no new price or metagraph read.
+    reads.clear(), metagraph_reads.clear()
+    assert settle(8001) == settled and reads == [] and metagraph_reads == []
+    # The epoch's state must carry exactly that payout.
+    for wrong in (None, {"payout_hash": "sha256:" + "0" * 64, "paid_microusd": {miner: 300_000}},
+                  dict(settled["lead_orders"], paid_microusd={miner: 300_001})):
+        with pytest.raises(Exception, match="lead order payout"):
+            publish(8001, wrong)
+    publish(8001, settled["lead_orders"])
+    # A state may not claim a payout that was never recorded.
+    with pytest.raises(Exception, match="lead order payout"):
+        publish(8002, settled["lead_orders"])
+    # Once an epoch's weights are signed, no payout is recorded for it: the rest stays owed.
+    publish(8002, None)
+    with pytest.raises(ArenaStoreError, match="already signed"):
+        settle(8002)
+    assert store.reward_epoch(8002) is None and owed() == [(500_000, 300_000)]
+    # The burn hotkey is never paid, even when it is owed: its reward waits.
+    burn_lane = LeadOrderLane(service, registered_hotkeys=lambda: [burn])
+    assert burn_lane.settle(8003, collection_microusd=0, burn_hotkey=miner, valuation=valuation) is None
+    assert store.reward_epoch(8003) is None
+    # The next epoch pays the rest.
+    later = settle(8003)
+    assert later["lead_orders"]["paid_microusd"] == {miner: 200_000} and owed() == [(500_000, 500_000)]
+    publish(8003, later["lead_orders"])
+    # Nothing owed: nothing recorded, no price read.
+    reads.clear()
+    assert settle(8004) is None and reads == [] and store.reward_epoch(8004) is None
 
 
 def sql(owner, query, params):

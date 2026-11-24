@@ -55,7 +55,7 @@ DEFAULT_POLICY_BODY: Dict[str, Any] = {
     "min_leads_per_order": 10,
     "min_charge_ratio": "0.40",
     "spend_ceiling_per_lead_usd": "0.50",
-    "lane_emission_cap": "0.30",
+    "lane_emission_cap": "1.00",
     "ranking_window_epochs": 140,
     "daily_leads_per_hotkey": 500,
     "order_deadline_minutes": 60,

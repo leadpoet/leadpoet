@@ -31,6 +31,7 @@ def build_accepted_weight_state(
     issued_at: str,
     slot_eligibility: Optional[str] = SLOT_ELIGIBILITY_UNTIL_REPLACED,
     weekly_slot_decay: Optional[Mapping[str, Any]] = None,
+    lead_orders: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build and sign the small immutable state consumed by normal validators."""
 
@@ -53,6 +54,8 @@ def build_accepted_weight_state(
             weekly_slot_decay, reward_basis,
             epoch_id=epoch,
         )
+    if lead_orders is not None:
+        body["lead_orders"] = dict(lead_orders)
     state_hash = sha256_json(body)
     signature = signer.sign((WEIGHT_STATE_SIGNATURE_PREFIX + state_hash).encode("utf-8"))
     import base64

@@ -9,7 +9,7 @@
 * Each epoch, ``epoch_payout_document`` pays owed USD oldest first under the
   lane cap and carries the rest forward. In shadow mode the document is
   published only and nothing is recorded as paid; in live mode the payments
-  are recorded and ``weights.merge_lane_weights`` turns them into weight.
+  are recorded and ``weights.LeadOrderLane`` puts them in the epoch's signed weight state.
 
 The lane cap is a share of the epoch's miner emission in USD.
 ``ChainEmissionPrice`` values it once, when the payout starts: the alpha
@@ -33,6 +33,7 @@ from lab_arena.lead_orders.policy import LeadOrderPolicy
 
 PAYOUT_SCHEMA_VERSION = "leadpoet.lead_orders.epoch_payout.v1"
 PAYOUT_HASH_FIELD = "payout_hash"
+WEIGHT_STEPS = 65_535  # leadpoet_canonical.arena_weights.U16_MAX
 
 
 class EmissionPriceUnavailable(RuntimeError):
@@ -136,6 +137,7 @@ def epoch_payout_document(
     entries: Sequence[money.OwedEntry],
     valuation: Optional[Mapping[str, Any]],
     payable_cap_microusd: Optional[int] = None,
+    collection_microusd: Optional[int] = None,
 ) -> Dict[str, Any]:
     """The published epoch document (unsigned body plus its hash).
 
@@ -163,14 +165,20 @@ def epoch_payout_document(
     cap = money.lane_cap_microusd(policy, miner_emission_microusd)
     if payable_cap_microusd is not None:
         cap = min(cap, max(0, int(payable_cap_microusd)))
-    payout = money.epoch_payout(epoch, entries, cap_microusd=cap)
+    # Validators emit u16 weights: a share under 1/65535 of the epoch rounds to
+    # nothing, so a live payout that small waits for a later epoch.
+    minimum = miner_emission_microusd // WEIGHT_STEPS + 1 if mode == "live" else 0
+    payout = money.epoch_payout(epoch, entries, cap_microusd=cap, min_hotkey_microusd=minimum)
     fractions = money.lane_weight_fractions(payout.paid_by_hotkey, miner_emission_microusd)
     body = {
         "schema_version": PAYOUT_SCHEMA_VERSION, "epoch": int(epoch), "mode": mode,
         "policy_version": policy.version, "emission_price_available": True,
         "miner_emission_microusd": miner_emission_microusd, "emission_valuation": dict(valuation),
-        "cap_microusd": cap, "paid_microusd": payout.paid_microusd, "owed_microusd": owed_total,
+        "cap_microusd": cap, "min_hotkey_microusd": minimum,
+        "paid_microusd": payout.paid_microusd, "owed_microusd": owed_total,
         "carry_forward_microusd": payout.carry_forward_microusd,
+        # The collection total the cap was worked out against (weight-state epochs only).
+        **({} if collection_microusd is None else {"collection_microusd": int(collection_microusd)}),
         "payments": [
             # call_id names a late repayment (one call), None an order's reward.
             {"order_id": order_id, "miner_hotkey": hotkey, "paid_microusd": amount, "call_id": call_id}

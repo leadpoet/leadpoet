@@ -462,8 +462,7 @@ def test_every_answer_closes_its_connection_and_slow_clients_are_cut(monkeypatch
     threading.Thread(target=server.serve_forever, daemon=True).start()
     port = server.server_address[1]
     try:
-        # A refusal before the body is read must not leave the body to be
-        # parsed as a next request.
+        # A refusal reads the body first and still closes the connection.
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
         connection.request("POST", "/v1/call", body=json.dumps(_call()).encode())
         refused = connection.getresponse()

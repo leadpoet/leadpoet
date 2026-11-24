@@ -12,7 +12,7 @@ import re
 from lab_arena import collection_judge as judge, collection_judge_review as review
 from lab_arena.collection_calibration import compile_pilot
 from lab_arena.collection_intake import MODELS, live_finney_arena
-from lab_arena.collection_workflow import CHAMPION_REV, POET_REV
+from lab_arena.collection_workflow import comparison_revisions
 from lab_arena.service import S3ObjectStore
 from lab_arena.store import PostgrestTransport
 from scripts.collection_review import read_file, write_new
@@ -21,6 +21,7 @@ from scripts.run_locked_collection import load_batch, assignment
 
 def source_bundle(raw, prompt, transport, objects):
     policy = load_batch(raw, prompt)
+    agent, builder = comparison_revisions(raw)
     jobs = transport.rpc("collection_batch_jobs_v1", {"p_batch": policy.batch_id})
     expected_count = len(raw["scenario_ids"]) * len(MODELS)
     if (
@@ -46,7 +47,7 @@ def source_bundle(raw, prompt, transport, objects):
             or job["status"] not in {"accepted", "rejected", "failed"}
             or job["scenario_id"] != raw["scenario_ids"][index // len(MODELS)]
             or job["model"] != MODELS[index % len(MODELS)]
-            or job["harness_commit"] != CHAMPION_REV
+            or job["harness_commit"] != agent
             or (
                 not job.get("artifact_sha256")
                 and not (policy.pilot and job["status"] == "failed")
@@ -70,7 +71,8 @@ def source_bundle(raw, prompt, transport, objects):
         jobs=jobs,
         failed_attempts=failures,
         objects=objects,
-        expected_builder=POET_REV,
+        expected_builder=builder,
+        capture_version=raw.get("capture_version"),
         planted=keyed_by_run("control_slots"),
         drift=keyed_by_run("drift_slots"),
     )

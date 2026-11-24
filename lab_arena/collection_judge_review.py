@@ -26,6 +26,13 @@ RECEIPT_SCHEMA = "collection.human-review.v1"
 
 def _read_bundle(bundle, *, require_split=True):
     fields = {"schema", "policy", "assignments", "runs", "planted", "drift"}
+    if "capture_version" in bundle:
+        from lab_arena.collection_workflow import comparison_revisions
+
+        comparison_revisions(bundle)
+        fields.add("capture_version")
+        if bundle.get("failed_attempts"):
+            fields.add("failed_journals")
     if "claim_protocol" in bundle:
         from lab_arena.collection_claims import protocol_of
         protocol_of(bundle)
@@ -518,6 +525,7 @@ def registered_bundle(
     objects,
     expected_builder=None,
     failed_attempts=(),
+    capture_version=None,
 ):
     """Reconstruct from server-owned *complete* batch records at release/sign-off.
 
@@ -526,6 +534,15 @@ def registered_bundle(
     """
     import hashlib
     import json
+    from lab_arena.collection_journal import WorkflowJournal
+    from lab_arena.collection_workflow import comparison_revisions
+
+    capture = (
+        {"capture_version": capture_version} if capture_version is not None else {}
+    )
+    agent, builder = comparison_revisions(capture)
+    if capture and expected_builder != builder:
+        raise ValueError("comparison capture builder differs from the frozen policy")
 
     def ident(value):
         return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value)
@@ -583,6 +600,8 @@ def registered_bundle(
             manifest["job_id"] == rid
             and manifest["batch_id"] == record["batch_id"]
             and manifest["judge_policy"] == asdict(policy)
+            and manifest.get("capture_version") == capture_version
+            and (not capture or manifest["harness_commit"] == agent)
             and manifest["model"] == record["model"]
             and manifest["harness_commit"] == record["harness_commit"]
             and (
@@ -718,6 +737,13 @@ def registered_bundle(
                 isinstance(manifest.get("generator"), dict), "missing generator upload"
             )
             row = verified(rid, "generator", manifest["generator"], 128 * 1024 * 1024)
+            if capture:
+                WorkflowJournal(objects, policy.batch_id, rid).comparison_index(
+                    complete=True,
+                    model=record["model"],
+                    manifest_events=manifest.get("events"),
+                    generator=row,
+                )
             judge._require(
                 row.get("run") == rid and row.get("teacher") == record["model"],
                 "generator identity differs from registered job",
@@ -738,7 +764,15 @@ def registered_bundle(
         "planted": planted,
         "drift": drift,
     }
+    result.update(capture)
     if failed_attempts:
         result["failed_attempts"] = failed_attempts
+        if capture:
+            result["failed_journals"] = {
+                failed["run_id"]: WorkflowJournal(
+                    objects, policy.batch_id, failed["run_id"]
+                ).comparison_index(complete=False, model=failed["generator"])
+                for failed in failed_attempts
+            }
     _read_bundle(result, require_split=False)
     return result

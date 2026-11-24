@@ -7,8 +7,7 @@ from dataclasses import asdict
 from lab_arena import collection_judge as judge
 from lab_arena.collection_intake import MODELS
 from lab_arena.collection_workflow import (
-    CHAMPION_REV,
-    POET_REV,
+    comparison_revisions,
     play_workflow,
     store_artifact,
 )
@@ -32,13 +31,21 @@ def process_job(
     prepare_launch=False,
     split=None,
     claim_protocol="collection.fresh-claims.v1",
+    capture_version=None,
 ):
     """The journal stores judge bytes separately. Only scores and tags reach the public statement."""
+    from lab_arena.collection_journal import WorkflowJournal
+
     run_id, batch = job["job_id"], job["batch_id"]
+    capture = (
+        {"capture_version": capture_version} if capture_version is not None else {}
+    )
+    agent, builder = comparison_revisions(capture)
+    journal = None
     if job.get("deepline_key_id") is None and job["scenario_id"].startswith("research-"):
         raise ValueError("live research is outside synthetic funding scope")
     if (
-        job["harness_commit"] != CHAMPION_REV
+        job["harness_commit"] != agent
         or job["model"] not in MODELS
         or job["mode"] != ("pilot" if policy.pilot else "live")
         or batch != policy.batch_id
@@ -65,6 +72,21 @@ def process_job(
             if research is None:
                 raise ValueError("missing trusted research runner")
             row, packet = research(job, broker)
+        elif capture:
+            if (
+                getattr(sources[0], "source_revision", None),
+                getattr(sources[1], "source_revision", None),
+            ) != (agent, builder):
+                raise ValueError("comparison worker loaded the wrong pinned sources")
+            journal = WorkflowJournal(objects, batch, run_id)
+            try:
+                row, packet = play_workflow(
+                    *sources, job, broker, record=journal.append
+                )
+            except Exception:
+                journal.finish("interrupted")
+                raise
+            journal.finish("completed")
         else:
             row, packet = play_workflow(*sources, job, broker)
         if (
@@ -102,8 +124,10 @@ def process_job(
         "batch_id": batch,
         "model": job["model"],
         "scenario_id": job["scenario_id"],
-        "harness_commit": CHAMPION_REV,
-        "builder_commit": POET_REV,
+        "harness_commit": agent,
+        "builder_commit": builder,
+        **capture,
+        **({"events": journal.hashes} if journal is not None else {}),
         "judge_policy": asdict(policy),
         "generator": row_ref,
         "packet": packet_ref,

@@ -37,7 +37,7 @@ def digest(value):
 
 def correction_scenario(builders, source):
     spec = json.loads(source["original"]["trace.json"])
-    if not re.fullmatch(r"C\d{2}|K\d{2}|B[1-8]|E[1-7]|P[1-6]", spec["task"]):
+    if not re.fullmatch(r"C\d{2}|K\d{2}|B[1-8]|E[1-7]|P[1-7]", spec["task"]):
         raise ValueError("unsupported student task")
     if type(spec["seed"]) is not int or not 0 < spec["seed"] <= 99999999:
         raise ValueError("invalid student seed")
@@ -51,6 +51,11 @@ def correction_scenario(builders, source):
 
 
 def scenario_split(builders, task, shape=None):
+    native = getattr(builders, "training_identity", None)
+    if native is not None:
+        identity = native(task, shape=shape)
+        if identity is not None:
+            return identity
     plain = builders.plain(task)
     kind = builders.kind_of(plain["id"])
     rule_pool = None
@@ -221,7 +226,6 @@ def _student_history(builders, task, hist, scratch):
 def _derive(builders, original, model, scratch, provenance=None):
     # The CLI reads the producer's original files. Downstream users rebuild from
     # these same bytes; the stored student checkpoint itself is never trusted.
-    from lab_arena.collection_workflow import CORRECTION_POET_REV
 
     br = builders.branch
     if set(original) != set(FILES) or not all(
@@ -314,7 +318,7 @@ def _derive(builders, original, model, scratch, provenance=None):
     return {
         "student_history": history,
         "schema": SCHEMA,
-        "poet_revision": CORRECTION_POET_REV,
+        "poet_revision": builders.source_revision,
         "original": original,
         "source_sha256": digest(original),
         "student_model": model,

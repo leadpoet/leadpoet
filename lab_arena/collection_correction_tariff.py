@@ -59,7 +59,7 @@ def class_definition(spec, inputs):
         "rule_pool": pool,
         "tools": variant,
         "split": partition,
-        "harness": source_revisions(),
+        "harness": source_revisions(spec.raw),
         "prompt": spec.policy.prompt_sha256,
         "reader_protocol": protocol_of(spec.raw),
         "reader_rubric": judge.digest(

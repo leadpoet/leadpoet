@@ -19,6 +19,7 @@ from lab_arena.collection_intake import (
     MAX_MICROUSD,
 )
 from lab_arena.collection_workflow import store_artifact
+from lab_arena.collection_journal import WorkflowJournal
 
 SCHEMA = "collection.experiment.v1"
 SHA = re.compile(r"sha256:[0-9a-f]{64}")
@@ -48,20 +49,16 @@ class Experiment:
         return self.raw["mode"] == "pilot"
 
 
-def source_revisions():
-    from lab_arena.collection_workflow import (
-        CORRECTION_CHAMPION_REV,
-        CORRECTION_POET_REV,
-    )
+def source_revisions(raw=None):
+    from lab_arena.collection_workflow import experiment_revisions
 
-    return CORRECTION_CHAMPION_REV, CORRECTION_POET_REV
+    return experiment_revisions(c["scenario_id"] for c in (raw or {}).get("cases", []))
 
 
 def load_experiment(raw, prompt):
     from lab_arena.collection_claims import protocol_of
 
     protocol_of(raw)
-    agent_revision, builder_revision = source_revisions()
 
     if (
         set(raw) - {"claim_protocol", "min_pricing_runs", "pricing_pilot"}
@@ -174,6 +171,7 @@ def load_experiment(raw, prompt):
         raise ValueError("a pilot cannot spend an approved live tariff")
     routes = {m: r.tag for m, r in GENERATOR_ROUTES.items()}
     routes.update({m: r.route for m, r in judge.QUALIFICATION_JUDGES.items()})
+    agent_revision, builder_revision = source_revisions(raw)
     identity = judge.digest(
         {
             "manifest": raw,
@@ -261,9 +259,8 @@ def read_inputs(spec, directory, sources, *, objects=None):
     from lab_arena.collection_workflow import (
         validate_student_source,
         correction_scenario,
-        scenario_split,
     )
-    from lab_arena.collection_quality import admit_split
+    from lab_arena.collection_quality import admit_built_split
 
     def read(digest):
         if directory is None or not SHA.fullmatch(digest):
@@ -273,6 +270,10 @@ def read_inputs(spec, directory, sources, *, objects=None):
             raise ValueError("private experiment input digest changed")
         return value
 
+    if (sources[0].source_revision, sources[1].source_revision) != source_revisions(
+        spec.raw
+    ):
+        raise ValueError("experiment loaded the wrong pinned sources")
     split = read(spec.raw["split_sha256"])
     resolved = {}
     for case in spec.raw["cases"]:
@@ -287,12 +288,10 @@ def read_inputs(spec, directory, sources, *, objects=None):
             raise ValueError("a correction needs a distinct approved expert")
         task = correction_scenario(sources[1], source)
         # These identities are re-derived from the pinned builder, never miner labels.
-        stamp = admit_split(
-            scenario_split(
-                sources[1],
-                task,
-                json.loads(source["original"]["trace.json"]).get("shape"),
-            ),
+        stamp = admit_built_split(
+            sources[1],
+            task,
+            json.loads(source["original"]["trace.json"]).get("shape"),
             split,
         )
         resolved[case["source_sha256"]] = (source, stamp)
@@ -368,12 +367,11 @@ def run_experiment(
 ):
     from lab_arena.collection_broker import CollectionBroker
     from lab_arena.collection_workflow import (
-        CORRECTION_CHAMPION_REV,
-        CORRECTION_POET_REV,
         play_workflow,
     )
     from lab_arena.collection_claims import read_fresh
 
+    agent, builder = source_revisions(spec.raw)
     stored, split, provenance = inputs
     live = spec.raw["mode"] == "live"
     tariff = None
@@ -388,9 +386,7 @@ def run_experiment(
     for _ in range(max_jobs):
         if before_claim is not None:
             before_claim()
-        job = intake.claim_experiment(
-            spec, CORRECTION_CHAMPION_REV, fixed_quote=fixed_quote
-        )
+        job = intake.claim_experiment(spec, agent, fixed_quote=fixed_quote)
         if not job:
             break
         run_id = job["job_id"]
@@ -407,7 +403,7 @@ def run_experiment(
         }
         meter = None
         generator_finished = False
-        event_hashes = []
+        journal = WorkflowJournal(objects, batch, run_id)
         archived = {}
         vote_refs = []
 
@@ -426,24 +422,13 @@ def run_experiment(
             ref = save("claim-vote-" + vote["request_id"], vote)
             vote_refs.append(ref)
 
-        def record(event):
-            # Known sequence paths permit recovery after a hard stop before the manifest.
-            if event["index"] != len(event_hashes):
-                raise ValueError("nonsequential experiment event")
-            data = judge._json(event).encode()
-            ref = f"collection/{batch}/{run_id}/events/{event['index']:05d}.json"
-            objects.put(ref, data)
-            if objects.get_bounded(ref, len(data)) != data:
-                raise ValueError("stored experiment event failed readback")
-            event_hashes.append(_hash(event))
-
         try:
             if (
                 job["model"] != arm["model"]
                 or job["scenario_id"] != case["scenario_id"]
                 or job["mode"] != spec.raw["mode"]
                 or job["price_microusd"] != fixed_quote
-                or job["harness_commit"] != CORRECTION_CHAMPION_REV
+                or job["harness_commit"] != agent
                 or job["batch_id"] != batch
                 or owner_lookup(job["miner_hotkey"]).coldkey != job["owner_coldkey"]
             ):
@@ -474,7 +459,7 @@ def run_experiment(
                 meter,
                 max_steps=arm["max_steps"],
                 max_tokens=arm["max_tokens"],
-                record=record,
+                record=journal.append,
                 **{role_option: source},
             )
             if (
@@ -508,8 +493,8 @@ def run_experiment(
                 "job_id": run_id,
                 "model": job["model"],
                 "scenario_id": job["scenario_id"],
-                "harness_commit": CORRECTION_CHAMPION_REV,
-                "builder_commit": CORRECTION_POET_REV,
+                "harness_commit": agent,
+                "builder_commit": builder,
                 "experiment": meta,
                 "generator": row_ref,
                 "packet": packet_ref,
@@ -520,7 +505,7 @@ def run_experiment(
                 "settings": settings,
                 "calls": calls_ref,
                 "claim_verdict": claim,
-                "events": event_hashes,
+                "events": journal.hashes,
                 "claim_votes": vote_refs,
             }
             if live:
@@ -561,7 +546,7 @@ def run_experiment(
                     "cause": type(exc).__name__,
                     "generator_finished": generator_finished,
                     "calls": meter.calls if meter else [],
-                    "events": event_hashes,
+                    "events": journal.hashes,
                 },
             )
             objects.put(

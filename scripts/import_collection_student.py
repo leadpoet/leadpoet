@@ -4,7 +4,11 @@ import argparse
 import json
 from pathlib import Path
 
-from lab_arena.collection_workflow import prepare_student_source, workflow_sources
+from lab_arena.collection_workflow import (
+    experiment_revisions,
+    prepare_student_source,
+    workflow_sources,
+)
 from scripts.collection_review import read_file, write_new
 
 
@@ -21,8 +25,12 @@ def main(argv=None):
         help="Private receipt pack for an approved owner-funded student",
     )
     args = parser.parse_args(argv)
+    spec = json.loads(
+        read_file(args.run / "trace.json", maximum=1024 * 1024, private=False)
+    )
+    _, builder = experiment_revisions([f"{spec['task']}-s{spec['seed']}"])
     with workflow_sources(
-        args.champion_repo, args.poet_repo, corrections=True
+        args.champion_repo, args.poet_repo, corrections=True, builder_revision=builder
     ) as sources:
         provenance = (
             json.loads(read_file(args.provenance, maximum=32 * 1024 * 1024))

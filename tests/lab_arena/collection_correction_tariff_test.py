@@ -22,7 +22,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
 @pytest.fixture
 def database():
     files = []
-    for n in (720, 721, 722, 723, 724, 725, 726, 727, 728, 729, 732, 733, 738):
+    for n in (720, 721, 722, 723, 724, 725, 726, 727, 728, 729, 732, 733, 738, 740):
         (path,) = Path("scripts").glob(str(n) + "-*.sql")
         files.append(path.name)
     yield from database_with_lab_arena_migration((*DEFAULT_MIGRATIONS, *files))
@@ -54,7 +54,8 @@ def test_new_terms_and_class_require_separate_authority(monkeypatch):
         )
 
 
-def test_native_priced_job_reuses_pro_rata_quotes_once(database):
+@pytest.mark.parametrize("template", ["C06", "P7"])
+def test_native_priced_job_reuses_pro_rata_quotes_once(database, template):
     pg, dsn = database
     pid = "xp-" + "3" * 64
     live = "xp-" + "4" * 64
@@ -105,7 +106,7 @@ def test_native_priced_job_reuses_pro_rata_quotes_once(database):
                 batch,
                 mode,
                 "b" * 40,
-                Json(["C06-s3013"]),
+                Json([f"{template}-s3013"]),
                 Json([model]),
                 Json({model: price}),
                 Json({model: budget}),
@@ -156,7 +157,7 @@ def test_native_priced_job_reuses_pro_rata_quotes_once(database):
             "measurement": m,
             "minimum_runs": 1,
             "class_sha256": "4" * 64,
-            "cases": ["C06-s3013"],
+            "cases": [f"{template}-s3013"],
             "panel_sha256": panel,
             "terms_sha256": lh,
             "evidence_sha256": "sha256:" + "1" * 64,

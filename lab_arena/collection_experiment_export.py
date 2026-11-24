@@ -26,8 +26,9 @@ from lab_arena.collection_experiment import (
     load_experiment,
     source_revisions,
 )
-from lab_arena.collection_quality import verify_split
+from lab_arena.collection_quality import require_release_partition, verify_split
 from lab_arena.collection_workflow import store_artifact
+from lab_arena.collection_journal import WorkflowJournal
 
 CORRECTIONS = "collection.correction-pairs.v1"
 AUDIT = "collection.experiment-private-audit.v1"
@@ -133,6 +134,7 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
     if trained:
         if spec.raw["terms_sha256"] != correction_terms_hash(spec.raw["mode"]):
             raise ValueError("release requires active approved correction consent")
+        require_release_partition(spec.raw)
         # Qualification documents are reconstructed from authenticated DB + original immutable evidence.
         receipt = verified_panel(database, objects, spec, **qualification)
     costs_rpc = (
@@ -169,7 +171,7 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
                     job["batch_id"] != batch
                     or job["model"] != arm["model"]
                     or job["scenario_id"] != case["scenario_id"]
-                    or job["harness_commit"] != source_revisions()[0]
+                    or job["harness_commit"] != source_revisions(spec.raw)[0]
                 ):
                     raise ValueError("job differs from frozen experiment")
                 stats["attempts"] += 1
@@ -209,22 +211,10 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
                             z.writestr(f"{rid}/interruption.json", judge._json(failure))
                 # A hard stop may leave a verified prefix, but no terminal event index.
                 incomplete = not job.get("artifact_sha256") and not event_hashes
-                limit = 4096 if incomplete else len(event_hashes)
-                for idx in range(limit):
-                    key = f"collection/{batch}/{rid}/events/{idx:05d}.json"
-                    event = objects.get_optional_bounded(key, LIMIT)
-                    if incomplete and event is None:
-                        break
-                    if (
-                        event is None
-                        or json.loads(event)["index"] != idx
-                        or (
-                            not incomplete
-                            and "sha256:" + sha256(event).hexdigest()
-                            != event_hashes[idx]
-                        )
-                    ):
-                        raise ValueError("run journal is missing or changed")
+                journal = WorkflowJournal(objects, batch, rid)
+                for idx, (event, _) in enumerate(
+                    journal.read(None if incomplete else event_hashes)
+                ):
                     if not trained:
                         z.writestr(f"{rid}/events/{idx:05d}.json", event)
                 if job["status"] == "failed" or not job.get("artifact_sha256"):
@@ -260,7 +250,7 @@ def write_dataset(spec, database, objects, dest, *, qualification=None):
                     or manifest["model"] != job["model"]
                     or manifest["scenario_id"] != job["scenario_id"]
                     or (manifest["harness_commit"], manifest["builder_commit"])
-                    != source_revisions()
+                    != source_revisions(spec.raw)
                     or manifest["experiment"]
                     != {
                         "id": spec.raw["id"],

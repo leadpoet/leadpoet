@@ -52,3 +52,29 @@ def verify_split(stamp, split_manifest):
     if not isinstance(stamp, dict) or stamp != admit_split(stamp, split_manifest):
         raise ValueError("training split binding differs")
     return stamp
+
+
+def admit_built_split(builders, task, shape, split):
+    from lab_arena.collection_checkpoint import scenario_split
+
+    identity = scenario_split(builders, task, shape)
+    if identity["template_id"] in builders.evaluation_templates:
+        raise ValueError("scenario uses a frozen evaluation template")
+    if identity["template_id"] == "P7":
+        if not hasattr(
+            builders, "training_partition"
+        ) or split != builders.training_partition("P7"):
+            raise ValueError("split differs from the producer-approved P7 partition")
+    return admit_split(identity, split)
+
+
+def require_release_partition(settings):
+    """Historical C/K/B/E/P1–P6 are known evaluation templates at their original pins."""
+    from lab_arena.collection_workflow import TRAIN_ONLY_PARTITION_SHA256
+
+    if settings["split_sha256"] != "sha256:" + TRAIN_ONLY_PARTITION_SHA256 or any(
+        not c["scenario_id"].startswith("P7-s") for c in settings["cases"]
+    ):
+        raise ValueError(
+            "historical or unverified evaluation partition is private audit only"
+        )

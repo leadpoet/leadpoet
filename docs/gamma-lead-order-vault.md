@@ -26,7 +26,7 @@ Each update is a new build plus one public approval on Base.
 - Each vault public key carries a KMS signature chain. `cli verify` and
   `cli seal` check it against the app id and KMS root key in
   `lead_order_vault/deployment.json`, which anyone can compare with Base.
-- The code is `lead_order_vault/envelope.py` and `vault.py`, about 700 lines,
+- The code is `lead_order_vault/envelope.py` and `vault.py`, about 800 lines,
   with `cryptography` as the only dependency.
 
 ## Rules in the vault
@@ -41,6 +41,11 @@ Each update is a new build plus one public approval on Base.
   miner owns the runtime key. It never makes a call.
 - Only Leadpoet's broker, with the caller token, may use `check` and `call`.
 - No database, no files, no request logs.
+- TLS ends inside the vault, with a key made at each boot and held only in
+  memory. The identity carries that key, signed by the receipts key. Phala's
+  gateway runs in TLS passthrough (a `-8080s` URL in `deployment.json`), so
+  it sees only ciphertext. `cli` and the gateway refuse any session the vault
+  does not end itself.
 
 ## Receipts
 

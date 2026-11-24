@@ -588,7 +588,12 @@ def test_signed_successor_export_keeps_genuine_absolute_slots_and_matching_route
     }
     target = load_batch(raw, PROMPT)
     key = next(r for r in reference.rows if r["slot"] == 1)
-    real = dict(key, batch_id=target.batch_id, job_id="new-successor-only")
+    real = dict(
+        key,
+        batch_id=target.batch_id,
+        job_id="new-successor-only",
+        budget_microusd=raw["budgets_microusd"][REFERENCE_MODEL],
+    )
     original = next(x for x in bundle["runs"] if x["packet"]["run_id"] == key["job_id"])
     rid = real["job_id"]
     reader = release.read_artifact
@@ -608,8 +613,13 @@ def test_signed_successor_export_keeps_genuine_absolute_slots_and_matching_route
         previous["generator"],
         128 << 20,
     )
-    generator.update(run=rid)
+    generator.update(
+        run=rid, evidence={"events": [{"kind": "reply"} for _ in range(5)]}
+    )
     pkt = dict(original["packet"], run_id=rid)
+    pkt["checks"] = dict(
+        pkt["checks"], answered=True, shape=True, code_grade=True, no_hard_failure=True
+    )
     a = judge.assign_judges(target, [assignment(real)])[rid]
     assessment = judge.judge_run(target, a, pkt, Caller(), prompt=PROMPT)
     manifest = dict(
@@ -681,3 +691,61 @@ def test_signed_successor_export_keeps_genuine_absolute_slots_and_matching_route
         witness.verify_matching_panel(raw, target, alt, PROMPT, db, successor=True)
     with pytest.raises(ValueError, match="independent reviewer"):
         release.write_exports(raw, PROMPT, db, objects, tmp_path / "no-review.zip")
+
+    from scripts import collection_reference_followup as progression
+    from scripts.collection_review import write_new
+
+    monkeypatch.setattr(progression, "verified_witness", witness.verified_witness)
+    independently_frozen = deepcopy(qualraw)
+    independently_frozen.update(
+        name="full-reference",
+        scenario_ids=qualraw["scenario_ids"][:10],
+        control_slots={},
+        drift_slots={},
+        control_artifacts={},
+    )
+    future = load_batch(independently_frozen, PROMPT)
+    setting = {
+        "schema": "collection.one-reference-followup.v1",
+        "after_batch_id": target.batch_id,
+        "next_batch_id": future.batch_id,
+        "next_batch_file": "complete-reference.json",
+        "contribution_cap_microusd": sum(
+            independently_frozen["budgets_microusd"].values()
+        )
+        * 10,
+    }
+    cfg = tmp_path / "handoff.json"
+    write_new(cfg, setting)
+    write_new(tmp_path / "complete-reference.json", independently_frozen)
+    assert progression.reference_for_poll(raw, PROMPT, cfg, db, objects) == raw
+    # Settled failed attempts whose entire original budget was consumed cannot be retried.
+    # The independent passing, reviewed authentic slot above still supplies the quality evidence.
+    for i in range(2, 6):
+        budget = raw["budgets_microusd"][MODELS[i]]
+        item = dict(
+            real,
+            model=MODELS[i],
+            slot=i,
+            status="failed",
+            artifact_sha256=None,
+            job_id=f"terminal-{i}",
+            budget_microusd=budget,
+            miner_cost_microusd=budget,
+        )
+        target_data.rows.append(item)
+        target_data.grants.append(
+            dict(
+                target_data.grants[0], job_id=item["job_id"], miner_cost_microusd=budget
+            )
+        )
+    assert (
+        progression.reference_for_poll(raw, PROMPT, cfg, db, objects)
+        == independently_frozen
+    )
+    target_data.rows[-1]["unresolved"] = 1
+    assert progression.reference_for_poll(raw, PROMPT, cfg, db, objects) == raw
+    wrong = tmp_path / "wrong.json"
+    write_new(wrong, dict(setting, contribution_cap_microusd=1))
+    with pytest.raises(ValueError, match="settings differ"):
+        progression.reference_for_poll(raw, PROMPT, wrong, db, objects)

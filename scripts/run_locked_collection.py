@@ -608,6 +608,11 @@ def main(argv=None):
     p.add_argument("--experiment-inputs", type=Path, help="Protected hash-addressed student sources and split policy")
     p.add_argument("--next-correction", type=Path,
                    help="Optional staged correction pilot to try before the qualification pack")
+    p.add_argument(
+        "--next-reference",
+        type=Path,
+        help="Optional private binding from a settled pilot successor to one frozen complete reference",
+    )
     args = p.parse_args(argv)
     if args.environment_file:
         from scripts.run_lab_arena_service import load_scoped_environment
@@ -616,6 +621,16 @@ def main(argv=None):
     if not 1 <= args.max_jobs <= 6:
         p.error("select 1 to 6 jobs per invocation")
     baseline = json.loads(args.batch.read_text())
+    if args.next_reference and (
+        args.max_jobs != 1
+        or not args.pilot_only
+        or args.preflight
+        or args.rejudge_ready
+        or args.research_stdio
+        or baseline.get("mode") != "pilot"
+        or args.next_reference == args.batch
+    ):
+        p.error("reference progression requires the bounded one-job pilot worker")
     if args.next_correction:
         if (args.max_jobs != 1 or args.preflight or args.rejudge_ready
                 or args.research_stdio or not args.experiment_inputs or args.next_correction == args.batch):
@@ -654,6 +669,28 @@ def main(argv=None):
                         raise
                     print(json.dumps({"status": "correction_held", "reason": type(exc).__name__}),
                           file=sys.stderr, flush=True)
+    if args.next_reference and args.next_reference.exists():
+        from scripts.collection_reference_followup import reference_for_poll
+        from lab_arena.store import ArenaStoreError
+        from scripts.collection_review import read_file
+
+        try:
+            database, objects = evidence_stores()
+            baseline = reference_for_poll(
+                baseline,
+                json.loads(read_file(args.prompt)),
+                args.next_reference,
+                database,
+                objects,
+            )
+        except (ValueError, OSError, KeyError, TypeError, ArenaStoreError) as exc:
+            print(
+                json.dumps(
+                    {"status": "reference_followup_held", "reason": type(exc).__name__}
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
     _run_options(args, p, baseline)
     return 0
 

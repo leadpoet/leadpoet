@@ -13,7 +13,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 from lab_arena import broker as arena_broker
 from lab_arena.lead_orders.vault_client import VaultClient, VaultUnavailable

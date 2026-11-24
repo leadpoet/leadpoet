@@ -381,9 +381,11 @@ def test_staged_correction_input_failure_does_not_starve_baseline(
         runner.main(argv)
 
 
-@pytest.mark.parametrize("keyed", [False, True])
+@pytest.mark.parametrize(
+    ("keyed", "source_free"), [(False, False), (True, False), (True, True)]
+)
 def test_real_harness_checkpoint_and_archive_under_funded_job_contract(
-    database, tmp_path, monkeypatch, keyed
+    database, tmp_path, monkeypatch, keyed, source_free
 ):
     """Native PG worker path; only network, payer and training producer are controlled fixtures."""
     import os
@@ -488,14 +490,25 @@ def test_real_harness_checkpoint_and_archive_under_funded_job_contract(
             },
         )
         raw["provenance_sha256"] = stage(att)
+        if source_free:
+            raw.pop("provenance_sha256")
+            raw["cases"] = [{"scenario_id": "P7-s3013"}]
+            raw["arms"][0]["role"] = "expert"
         spec = xp.load_experiment(raw, PROMPT)
         inputs = xp.read_inputs(spec, tmp_path, src)
         good = builders.perfect(case)
         todo = br.still_to_do(
             br.reference_plan(case, good, tmp_path / "reference"),
-            student["checkpoint"]["log"],
+            [] if source_free else student["checkpoint"]["log"],
         )
-        ask = br.scripted_expert(todo, good.get("answer") or "Done.")
+        ask = br.scripted_expert(
+            todo,
+            (
+                "incorrect final receipt"
+                if source_free
+                else (good.get("answer") or "Done.")
+            ),
+        )
         from lab_arena.collection_broker import batch_versions
 
         versions = batch_versions(spec.routes)
@@ -591,6 +604,39 @@ def test_real_harness_checkpoint_and_archive_under_funded_job_contract(
     )
     assert j["miner_cost_microusd"] == 10 * j["generator_calls"]
     rid = j["job_id"]
+    if source_free:
+        # The qualification cryptography is exercised by the signed six-model test.
+        monkeypatch.setattr(
+            exports, "verified_panel", lambda *a, **kw: {"test_panel": "verified"}
+        )
+        path = tmp_path / "full-negative.zip"
+        metadata = exports.write_dataset(
+            spec,
+            db,
+            objects,
+            path,
+            qualification={"test": True},
+            full_trajectories=True,
+        )
+        assert (
+            metadata["trajectory_rows"] == metadata["verified_failures"] == 1
+            and metadata.get("correction_pairs", 0) == 0
+        )
+        with ZipFile(path) as z:
+            row = json.loads(z.read(f"trajectories/{rid}.jsonl"))
+            assert (
+                row["verified_task_pass"] is False and row["final_turn_present"] is True
+            )
+            assert row["native_grade"]["score"] < 1 and row["first_failed_check"]
+            assert (
+                row["experiment"]["role"] == "expert"
+                and "student_source_sha256" not in row
+            )
+            assert row["messages"][-1]["content"] == "incorrect final receipt"
+            assert row["miner_cost_microusd"] == j["miner_cost_microusd"]
+            assert not any(n.startswith("pairs/") for n in z.namelist())
+        db.close()
+        return
     # The private wire reply is bound to the original billing receipt. Its bytes
     # are retained before reasoning alias normalization, grading, or claim review.
     wire_ids = []

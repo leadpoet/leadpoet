@@ -38,10 +38,9 @@ through commits or PRs. Never force-push or rewrite shared history.
 GitHub uses the GitHub App and git credential helper. Use git for pushes; do not
 gate work on `gh auth status`.
 
-Keep user-visible tasks isolated. Report overlaps and conflicts in this chat.
-Do not send or relay cross-chat messages without a direct user request naming
-the message and recipient. Internal subagents report only to their owning task.
-Here, “coordinator” means that task's coordinator, not another chat.
+Keep user-visible tasks isolated. Report overlap in the owning task. Internal
+subagents report to their owning task. Earlier task-specific authorization
+remains valid within its agreed scope.
 
 ## Verification
 

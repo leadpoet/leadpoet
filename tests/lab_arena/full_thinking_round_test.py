@@ -94,6 +94,17 @@ def test_historical_source_fixture_restores_current_judge_builder(unready):
     assert scoring.build_scorer_policy() == prospective
 
 
+@pytest.mark.parametrize("rewarded", [True, False])
+def test_dispatch_policy_is_advertised_at_live_round_creation(rewarded):
+    service = opted_in()
+    service._config.defaults.rewards_enabled = rewarded
+    service._config.defaults.execution_sequence_from = "2000-01-01T00:00:00Z"
+    config = service.create_round(OPEN)
+    expected = "late_predecessor_v1" if rewarded else None
+    assert config.get("dispatch_window_policy") == expected
+    assert ArenaService._public_round_output_policy(config).get("dispatch_window_policy") == expected
+
+
 def test_future_round_freezes_approved_routes_and_six_dollar_limits():
     registry = approved_registry()
     service = opted_in(registry)

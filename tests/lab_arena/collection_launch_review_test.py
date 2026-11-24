@@ -104,8 +104,8 @@ def verify_recovery_contract(q, pg, job, source, budget):
         (job, other),
     )
     assert q.fetchone() == ("ready", out, source, out)
-    q.execute("SELECT public.collection_reward_start_v1()")
-    assert q.fetchone()[0] == {"first_epoch": None}
+    q.execute("SELECT count(*) FROM public.collection_reward_cutover")
+    assert q.fetchone()[0] == 0
 
 
 def test_recovery_broker_never_uses_a_miner_key_or_normal_lease():

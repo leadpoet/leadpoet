@@ -53,6 +53,17 @@ def test_independent_retirement_and_empty_signed_epoch(db):
         with pytest.raises(pg.Error, match="quote mismatch"):
             insert_legacy_state(q, epoch)
         q.execute("ROLLBACK TO retired")
+        q.execute("SELECT public.collection_reward_quotes_v1(%s)", (epoch,))
+        basis = dict(q.fetchone()[0], valuation=None)
+        wrong_burn = weight_state.build_accepted_weight_state(
+            SIGNER, network="finney", genesis_hash=GENESIS, netuid=71, epoch=epoch,
+            valid_from_block=50, valid_until_block=409, reward_basis=basis, burn_hotkey=MINER,
+            issued_at="2026-11-23T00:00:00Z",
+        )
+        with pytest.raises(pg.Error, match="original burn hotkey"):
+            q.execute("SELECT public.lab_arena_publish_weight_state_v1('finney',71,%s,%s,%s)",
+                      (epoch, wrong_burn["state_hash"], Json(wrong_burn)))
+        q.execute("ROLLBACK TO retired")
         q.execute("SELECT count(*) FROM public.collection_reward_cutover")
         assert q.fetchone()[0] == 0
     from types import SimpleNamespace
@@ -91,3 +102,31 @@ def test_qualified_paid_launch_follows_burn_without_reviving_champions(db):
         return state
 
     exercise_ordinary_cutover(db, retired_anchor=retired_anchor)
+
+
+def test_pricing_tool_accepts_signed_unpaid_epoch_and_rejects_active_paid_epoch(monkeypatch):
+    from types import SimpleNamespace
+    from lab_arena import chain, signing
+    from scripts.collection_batch import cutover_anchor
+    from tests.lab_arena.collection_rewards_test import EPOCH, state
+
+    empty = state({})
+    monkeypatch.setenv("LAB_ARENA_CHAIN_ENDPOINT", "wss://example.invalid")
+    monkeypatch.setenv("LAB_ARENA_SIGNING_KEY_ID", "test")
+    monkeypatch.setattr(signing, "KmsSigner", lambda *a, **kw: SIGNER)
+    monkeypatch.setattr(chain, "connect_substrate", lambda cfg: None)
+    monkeypatch.setattr(chain, "ArenaChain", lambda *a: SimpleNamespace(
+        client=SimpleNamespace(query=lambda *a, **kw: 1000000), close=lambda: None))
+    monkeypatch.setattr(chain, "load_arena_cutover", lambda: None)
+    monkeypatch.setattr(chain, "finalized_epoch_snapshot", lambda client: SimpleNamespace(
+        settlement_epoch_id=lambda _: EPOCH, network_genesis_hash=GENESIS,
+        current_block=60, block_hash="0x"+"b"*64))
+    monkeypatch.setattr(ArenaStore, "get_weight_state", lambda *a: {"state_doc": empty})
+    schedule = {}
+    transport = SimpleNamespace(rpc=lambda *a: schedule)
+    assert cutover_anchor(transport)["state_hash"] == empty["state_hash"]
+    schedule.update(first_epoch=EPOCH+1, staged=True)
+    assert cutover_anchor(transport)["epoch"] == EPOCH
+    del schedule["staged"]
+    with pytest.raises(ValueError, match="expected an unpaid"):
+        cutover_anchor(transport)

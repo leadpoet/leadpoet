@@ -763,19 +763,19 @@ def test_vault_transport_returns_the_answer_and_its_receipt(served_vault):
 def test_vault_transport_says_whether_the_provider_was_reached(served_vault):
     from lab_arena.lead_orders.vault_client import VaultClient, VaultTransport, VaultTransportError
 
-    url, provider = served_vault
+    deployment, provider = served_vault
     with pytest.raises(VaultTransportError) as refused:
-        _send(VaultTransport(VaultClient(url, TOKEN)), url="https://openrouter.ai/api/v1/keys")
+        _send(VaultTransport(VaultClient(deployment, TOKEN)), url="https://openrouter.ai/api/v1/keys")
     assert refused.value.forwarded is False and refused.value.vault_receipt is None and not provider.requests
     with pytest.raises(VaultTransportError) as unauthorized:
-        _send(VaultTransport(VaultClient(url, "x" * 40)))
+        _send(VaultTransport(VaultClient(deployment, "x" * 40)))
     assert unauthorized.value.forwarded is False
     with pytest.raises(VaultTransportError) as lost:
-        _send(VaultTransport(VaultClient(url, TOKEN)), url="https://code.deepline.com/api/v2/integrations/boom/execute",
+        _send(VaultTransport(VaultClient(deployment, TOKEN)), url="https://code.deepline.com/api/v2/integrations/boom/execute",
               sealed=_seal(DEEPLINE_KEY, "deepline"))
     assert lost.value.forwarded is True and _check_receipt(lost.value.vault_receipt)["outcome"] == "transport_error"
     with pytest.raises(VaultTransportError) as down:
-        _send(VaultTransport(VaultClient(dict(url, url="https://127.0.0.1:9"), TOKEN)))
+        _send(VaultTransport(VaultClient(dict(deployment, url="https://127.0.0.1:9"), TOKEN)))
     assert down.value.forwarded is False
 
 
@@ -786,16 +786,6 @@ def test_vault_client_checks_a_sealed_key(served_vault):
     checked = VaultClient(url, TOKEN).check(provider="deepline", envelope=_seal(DEEPLINE_KEY, "deepline"),
                                             management_envelope=None)
     assert checked["status"] == "valid" and checked["key_fingerprint"] == env.fingerprint("deepline", DEEPLINE_KEY)
-
-
-def test_vault_client_sends_nothing_through_a_gateway_that_ends_tls():
-    from lab_arena.lead_orders.vault_client import VaultClient, VaultTransport, VaultTransportError
-
-    vault, _ = _tls_vault()
-    with _tls_server(vault.identity) as (deployment, _):
-        with pytest.raises(VaultTransportError) as refused:
-            _send(VaultTransport(VaultClient(deployment, TOKEN)))
-        assert refused.value.forwarded is False and str(refused.value) == "vault_unverified"
 
 
 def test_re_verifying_leaves_requests_in_flight_alone(served_vault, monkeypatch):
@@ -948,11 +938,17 @@ def test_the_cli_trusts_only_a_tls_session_the_vault_ends_itself():
 
 
 def test_a_gateway_that_ends_tls_itself_is_refused():
+    from lab_arena.lead_orders.vault_client import VaultClient, VaultTransport, VaultTransportError
+
     vault, _ = _tls_vault()
     # The gateway relays the vault's real, KMS-signed identity over its own TLS key.
     with _tls_server(vault.identity) as (deployment, _):
         with pytest.raises(trust.TrustError, match="does not end in the vault"):
             trust.connect(deployment)
+        # Leadpoet's broker sends nothing through it either.
+        with pytest.raises(VaultTransportError) as refused:
+            _send(VaultTransport(VaultClient(deployment, TOKEN)))
+        assert refused.value.forwarded is False and str(refused.value) == "vault_unverified"
 
 
 def test_a_gateway_cannot_rebind_the_tls_key_without_the_receipts_key():

@@ -462,5 +462,7 @@ def test_every_request_the_broker_sends_fits_the_vault():
     assert _route_allowed("openrouter", "POST", "/" + broker.OPENROUTER_CHAT_PATH, "")
     assert _route_allowed("openrouter", "POST", "/" + broker.OPENROUTER_DECISIONS_PATH, "")
     assert _route_allowed("openrouter", "GET", "/api/v1/generation", "id=gen-1")
+    from urllib.parse import quote
+    assert _route_allowed("openrouter", "GET", "/api/v1/generation", "id=" + quote("gen-1.a:b", safe=""))
     for tool in broker.DEEPLINE_OPERATIONS:
         assert _route_allowed("deepline", "POST", "/api/v2/integrations/%s/execute" % tool, "")

@@ -62,7 +62,8 @@ OPENROUTER_ROUTES = frozenset({
     ("GET", "/api/v1/generation"),  # free cost read-back by generation id
 })
 _DEEPLINE_TOOL = re.compile(r"[a-z0-9_]{1,64}")
-_GENERATION_QUERY = re.compile(r"id=[A-Za-z0-9_-]{1,128}")
+# The broker URL-encodes the id, which may hold "." and ":" (as %3A).
+_GENERATION_QUERY = re.compile(r"id=[A-Za-z0-9._~%-]{1,600}")
 _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}")
 METHODS = ("GET", "POST")
 DROPPED_HEADERS = frozenset({

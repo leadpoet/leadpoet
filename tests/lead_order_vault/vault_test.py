@@ -390,10 +390,10 @@ def _tls_vault(provider=None):
 
 
 @contextlib.contextmanager
-def _serving(handler, tls, server_class=BoundedServer):
+def _serving(handler, tls, server_class=BoundedServer, port=0):
     """``handler`` behind the vault's own HTTPS server on a loopback port."""
 
-    server = server_class(("127.0.0.1", 0), handler, tls[0])
+    server = server_class(("127.0.0.1", port), handler, tls[0])
     thread = threading.Thread(target=server.serve_forever, args=(0.05,))
     thread.start()
     try:
@@ -646,22 +646,10 @@ def test_every_request_the_broker_sends_fits_the_vault():
 def served_vault():
     """The real vault server, ending TLS itself, with a KMS-issued identity."""
 
-    import threading
-
-    from lead_order_vault.vault import BoundedServer, make_handler, tls_server_context
-
     provider = FakeProvider({"/api/v2/integrations/boom/execute": UpstreamError("reset", observed_status=None)})
-    context, spki = tls_server_context()
-    vault = Vault(encryption_key=ENCRYPTION, receipts_key=RECEIPTS, identity=_identity(), caller_token=TOKEN,
-                  upstream=provider, tls_spki_sha256=spki)
-    server = BoundedServer(("127.0.0.1", 0), make_handler(vault))
-    server.ssl_context = context
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
-        yield dict(DEPLOYMENT, url="https://127.0.0.1:%d" % server.server_address[1]), provider
-    finally:
-        server.shutdown()
-        server.server_close()
+    vault, tls = _tls_vault(provider)
+    with _serving(make_handler(vault), tls) as (_, url):
+        yield dict(DEPLOYMENT, url=url), provider
 
 
 def _send(transport, url="https://openrouter.ai/api/v1/chat/completions", sealed=None):
@@ -712,14 +700,10 @@ def test_vault_client_sends_nothing_through_a_gateway_that_ends_tls():
     from lab_arena.lead_orders.vault_client import VaultClient, VaultTransport, VaultTransportError
 
     vault, _ = _tls_vault()
-    gateway, _, deployment = _tls_server(vault.identity)
-    try:
+    with _tls_server(vault.identity) as (deployment, _):
         with pytest.raises(VaultTransportError) as refused:
             _send(VaultTransport(VaultClient(deployment, TOKEN)))
         assert refused.value.forwarded is False and str(refused.value) == "vault_unverified"
-    finally:
-        gateway.shutdown()
-        gateway.server_close()
 
 
 def test_re_verifying_leaves_requests_in_flight_alone(served_vault, monkeypatch):
@@ -740,41 +724,17 @@ def test_re_verifying_leaves_requests_in_flight_alone(served_vault, monkeypatch)
 
 
 def test_vault_client_follows_a_restarted_vault_to_its_new_tls_key():
-    import threading
-
     from lab_arena.lead_orders.vault_client import VaultClient, VaultTransport
-    from lead_order_vault.vault import BoundedServer, make_handler
 
-    def serve(port=0):
-        vault, (context, _) = _tls_vault()
-
-        # One request per connection: a stopped test server's threads would
-        # otherwise keep serving a kept-alive connection, which a real
-        # restart (a new process) cannot.
-        class Handler(make_handler(vault)):
-            protocol_version = "HTTP/1.0"
-
-        server = BoundedServer(("127.0.0.1", port), Handler)
-        server.ssl_context = context
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        return server, vault
-
-    first, _ = serve()
-    port = first.server_address[1]
-    client = VaultClient(dict(DEPLOYMENT, url="https://127.0.0.1:%d" % port), TOKEN)
-    transport = VaultTransport(client)
-    try:
+    first, tls = _tls_vault()
+    with _serving(make_handler(first), tls) as (server, url):
+        port = server.server_address[1]
+        transport = VaultTransport(VaultClient(dict(DEPLOYMENT, url=url), TOKEN))
         assert _check_receipt(_send(transport).vault_receipt)["key_sequence"] == 1
-    finally:
-        first.shutdown()
-        first.server_close()
     # Same address, new boot: a new TLS key and a new boot id.
-    second, restarted = serve(port)
-    try:
+    restarted, tls = _tls_vault()
+    with _serving(make_handler(restarted), tls, port=port):
         assert _check_receipt(_send(transport).vault_receipt)["boot_id"] == restarted.boot_id
-    finally:
-        second.shutdown()
-        second.server_close()
 
 
 # -- the miner's receipts check ---------------------------------------------------

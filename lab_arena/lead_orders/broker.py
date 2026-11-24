@@ -38,7 +38,7 @@ from urllib.parse import urlencode
 
 from lab_arena import broker as arena_broker
 from lab_arena import operations, provider_costs
-from lab_arena.broker import BrokerError, ProviderResponse, ProviderTransport, ProviderTransportError
+from lab_arena.broker import ProviderResponse, ProviderTransport, ProviderTransportError
 from lab_arena.lead_orders import keys as lead_keys
 from lab_arena.lead_orders.auth import order_token_hash
 from lab_arena.lead_orders.policy import LeadOrderPolicy
@@ -612,7 +612,9 @@ class LeadOrderBroker:
         )
         for key in ranked:
             try:
-                secret = self._leadpoet_secrets[provider] if key.is_leadpoet else self._registrar.credential(key)
+                # The key itself for Leadpoet's keys; the sealed envelope, which
+                # only the vault opens, for a miner's.
+                credential = self._leadpoet_secrets[provider] if key.is_leadpoet else self._registrar.credential(key)
             except lead_keys.LeadOrderKeyError as exc:
                 if exc.retryable:
                     raise LeadOrderBrokerError(503, exc.code) from None
@@ -635,7 +637,7 @@ class LeadOrderBroker:
             response: Optional[ProviderResponse] = None
             error: Optional[ProviderTransportError] = None
             try:
-                url, headers = arena_broker.inject_credential(outbound, secret)
+                url, headers = arena_broker.inject_credential(outbound, credential)
                 transport = self._transport if key.is_leadpoet else self._miner_transport
                 response = transport.send(
                     method=outbound.target.method, url=url, headers=headers, body=outbound.body,
@@ -654,7 +656,7 @@ class LeadOrderBroker:
                 not_sent = response is None and getattr(error, "forwarded", None) is False
                 cost = 0 if not_sent else (None if response is None else self._cost(provider, response))
                 request_id = self._request_id(provider, response, error)
-                if request_id and secret in request_id:
+                if request_id and credential in request_id:
                     request_id = None
                 try:
                     self._store.settle_call(
@@ -665,7 +667,7 @@ class LeadOrderBroker:
                 finally:
                     self._keep_receipt(call_id, "call", getattr(response if response is not None else error,
                                                                 "vault_receipt", None))
-            if response is None or arena_broker._response_contains_credential(response, secret):
+            if response is None or arena_broker._response_contains_credential(response, credential):
                 return _json_response(502, "provider_unreachable")
             reason = lead_keys.failover_reason(provider, response)
             if reason is not None:

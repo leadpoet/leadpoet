@@ -312,7 +312,7 @@ def test_worker_resumes_completed_launch_before_claiming_another_job(monkeypatch
     db = SimpleNamespace(rpc=lambda name, args: {"first_epoch": 101, "staged": True, "pending": pending, "pilot_evidence": {}})
     resumed = []
     monkeypatch.setattr(worker, "finish_launch", lambda database, job, *args: resumed.append(job))
-    assert worker.run_cohort(raw={"budgets_microusd": {}}, policy=SimpleNamespace(pilot=False), prompt={},
+    assert worker.run_cohort(raw={"budgets_microusd": {}}, policy=SimpleNamespace(pilot=False, qualification=False), prompt={},
                              intake=None, database=db, objects=None, transport=None, pricing=None, epoch=lambda: 100,
                              sources=None, owner_lookup=None, judge_key="fixture", max_jobs=1) == 0
     assert resumed == [pending]

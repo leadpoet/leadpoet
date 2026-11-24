@@ -11,6 +11,7 @@ from scripts import collection_review as cli
 from tests.lab_arena.collection_judge_test import (
     POLICY,
     PROMPT,
+    SPLIT,
     Caller,
     fail_truth,
     packet,
@@ -39,6 +40,7 @@ def batch():
         )
     return {
         "schema": review.BUNDLE_SCHEMA,
+        "split_manifest_sha256": j.digest(SPLIT),
         "policy": asdict(policy),
         "assignments": assignments,
         "runs": runs,
@@ -230,7 +232,7 @@ def test_registered_manifest_refuses_relabeling_input_and_omitted_runs():
         review.registered_bundle(POLICY, assignments, **kw)
 
 
-def test_bound_claim_adjudication_is_the_only_override_for_missing_reader(batch):
+def test_human_mark_cannot_replace_missing_claim_reader(batch):
     b = deepcopy(batch)
     item = b["runs"][0]
     p = item["packet"]
@@ -250,17 +252,9 @@ def test_bound_claim_adjudication_is_the_only_override_for_missing_reader(batch)
         pol, sched[p["run_id"]], p, Caller(), prompt=PROMPT
     )
     aliases, jobs = review.claim_review_jobs(b)
-    (alias,) = aliases
-    assert aliases[alias] == p["run_id"] and "private-payer" not in json.dumps(jobs)
-    private, public = keys()
-    form = {
-        **complete_marks(b),
-        "claim_sample_sha256": j.digest(jobs),
-        "claim_decisions": {alias: True},
-    }
-    rec = review.sign_review(b, form, "fixture reviewer", private)
-    report = review.verify_review(b, rec, public)
-    assert not j.training_selection(item["assessment"])
-    assert j.training_selection(
-        item["assessment"], approved_claim_runs=report["approved_claim_runs"]
-    )
+    assert aliases == {} and jobs == {}
+    assert not j.training_selection(item["assessment"], approved_claim_runs=[p["run_id"]])
+    private, _ = keys()
+    forged = dict(complete_marks(b), claim_sample_sha256=j.digest(jobs), claim_decisions={"forged": True})
+    with pytest.raises(ValueError, match="claim sample changed"):
+        review.sign_review(b, forged, "fixture", private)

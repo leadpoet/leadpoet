@@ -100,7 +100,9 @@ class StandIn:
         model = body["model"]
         if model in ("openai/gpt-6.2-astra", "anthropic/claude-fable-5.2"):
             env = json.loads(body["messages"][-1]["content"])
-            if "runs" in env:
+            if "sentences" in env:
+                result = {"labels": ["supported"] * len(env["sentences"])}
+            elif "runs" in env:
                 labels = sorted(env["runs"])
                 result = dict(
                     env["identity"],

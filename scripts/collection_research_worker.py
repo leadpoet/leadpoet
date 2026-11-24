@@ -22,7 +22,10 @@ from lab_arena.collection_intake import MODELS
 from lab_arena.cache_retention import workspace_cache_lock
 from lab_arena.collection_research import PipeAPI, encode, receive, send
 from lab_arena.collection_workflow import CHAMPION_REV
-from lab_arena.web_egress import WebEgressServer
+from lab_arena.collection_research_capture import (
+    ResearchObservations,
+    ResearchWebEgress,
+)
 
 
 def validated_completion(result, company_count):
@@ -65,6 +68,8 @@ def run_assignment(config, job, api, sandbox):
             "model",
             "harness_commit",
             "evaluation_date",
+            "allowed_hosts",
+            "expires_at",
             "icp",
             "deepline_catalog",
             "scorer_image_digest",
@@ -154,6 +159,10 @@ def run_assignment(config, job, api, sandbox):
                 ),
                 "codex_module_path": ("lab_arena_codex.py", "lab_arena_codex.py"),
                 "web_bridge_path": ("web_egress_bridge.py", "web-egress-bridge.py"),
+                "automatic_capture_path": (
+                    "automatic_capture.py",
+                    "automatic_capture.py",
+                ),
             }.items()
         }
         path = sockets / runtime.SANDBOX_SOCKET_NAME
@@ -165,6 +174,7 @@ def run_assignment(config, job, api, sandbox):
                 "reasoning_capture_policy": "full_generated_thinking_v1",
             },
             lease_token="local",
+            worker_observations=ResearchObservations(api.observation),
         )
         spec = runtime.SandboxSpec(
             sandbox_id="collection-" + identity,
@@ -182,14 +192,31 @@ def run_assignment(config, job, api, sandbox):
             **mounts,
         )
         server = runner.WorkerSocketServer(path, api, state)
-        with WebEgressServer(
-            sockets / runtime.SANDBOX_WEB_SOCKET_NAME, proxy_url=config.web_proxy
-        ):
+        with ResearchWebEgress(
+            sockets / runtime.SANDBOX_WEB_SOCKET_NAME,
+            proxy_url=config.web_proxy,
+            allowed_hosts=job["allowed_hosts"],
+            expires_at=job["expires_at"],
+        ) as egress:
             server.start()
             try:
                 result = sandbox.run_icp(spec)
             finally:
                 server.stop()
+        for raw in result.automatic_capture_handoff:
+            if not server._allow_training_frame(len(raw)) or not json.loads(
+                server._handle_training_control(raw, replayed=True) or b"{}"
+            ).get("recorded"):
+                state.worker_observations.failures.add("capture_incomplete")
+        capture = {
+            "recorder_complete": (result.automatic_capture_summary or {}).get(
+                "complete"
+            )
+            is True
+            and not result.automatic_capture_handoff_invalid
+            and not state.worker_observations.failures,
+            "direct_connections": egress.summary["accepted_connection_count"],
+        }
         if (
             result.timed_out
             or result.exit_code != 0
@@ -205,6 +232,7 @@ def run_assignment(config, job, api, sandbox):
         )
         return {
             "type": "research_result",
+            "http_capture": capture,
             "execution_completed": validated_completion(
                 result, len(parsed["companies"])
             ),

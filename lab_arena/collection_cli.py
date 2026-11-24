@@ -11,7 +11,7 @@ import time
 import requests
 
 from lab_arena import contracts
-from lab_arena.collection_intake import SCOPE, TASK_SCOPE, TERMS_HASH, scope_id
+from lab_arena.collection_intake import CORRECTION_SCOPE, CORRECTION_TERMS, SCOPE, TASK_SCOPE, TERMS_HASH, scope_id
 from lab_arena.credentials import OPENROUTER_FUNDING_FIELDS
 from lab_arena.miner_submit import (
     MinerSubmissionError,
@@ -30,6 +30,8 @@ def add_commands(commands, common_options):
         parser.add_argument(
             "--mode", choices=("pilot", "live"), required=action != "terms"
         )
+        if action in ("terms", "register"):
+            parser.add_argument("--task-scope", choices=(TASK_SCOPE, CORRECTION_SCOPE), default=TASK_SCOPE)
         if action == "register":
             parser.add_argument(
                 "--daily-cap-usd",
@@ -64,12 +66,24 @@ def run(args, wallet, *, session=requests):
     action = args.command.removeprefix("collection-")
     try:
         base = _api_base_url(args.api_base_url) + "/arena/v1/collection/"
-        if action == "terms":
-            response = session.get(base + "terms", timeout=30, allow_redirects=False)
-        else:
+        task_scope = getattr(args, "task_scope", TASK_SCOPE)
+        expected = TERMS_HASH
+        if task_scope == CORRECTION_SCOPE:
+            expected = contracts.hash_bytes(CORRECTION_TERMS.encode())
+        if action == "terms" or (action == "register" and task_scope == CORRECTION_SCOPE):
+            url = base + "terms" + ("?task_scope=" + CORRECTION_SCOPE if task_scope == CORRECTION_SCOPE else "")
+            response = session.get(url, timeout=30, allow_redirects=False)
+            if action == "register":
+                if response.status_code != 200:
+                    raise MinerSubmissionError("collection_correction_terms_unavailable")
+                published = response.json()
+                if (published.get("mode") != args.mode or published.get("task_scope") != task_scope
+                        or published.get("terms_sha256") != expected or published.get("terms") != CORRECTION_TERMS):
+                    raise MinerSubmissionError("collection_terms_changed")
+        if action != "terms":
             creds, body = None, {}
             if action == "register":
-                if args.accept_terms != TERMS_HASH:
+                if args.accept_terms != expected:
                     raise MinerSubmissionError("collection_terms_changed")
                 creds = {
                     field: os.environ.get(
@@ -89,8 +103,8 @@ def run(args, wallet, *, session=requests):
                     )
                 body = {
                     "daily_cap_microusd": daily_cap(args.daily_cap_usd),
-                    "terms_sha256": TERMS_HASH,
-                    "task_scope": TASK_SCOPE,
+                    "terms_sha256": expected,
+                    "task_scope": task_scope,
                     "credentials_sha256": contracts.document_hash(creds),
                 }
             if action == "revoke":

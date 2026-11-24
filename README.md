@@ -20,7 +20,7 @@ Subnet 71 is a Bittensor subnet where miners improve an open sales-research agen
 
 Miners can opt in to fund simulated sales workflows with an OpenRouter key. The subnet runs the agent and records its decisions to help train an open sales model. You set a daily spending limit and can revoke access.
 
-Pilot runs use paid API credits and earn no emissions. Champion rewards continue during testing. Run `leadpoet collection-terms` to check availability. See the [collection guide](docs/locked-collection.md) for setup and reward rules.
+The correction pilot lets an expert resume a task where a smaller model made a mistake. It requires a separate opt-in when enrollment opens. Pilot runs use paid API credits and earn no emissions. Champion rewards continue during testing. Run `leadpoet collection-terms` to check availability. See the [collection guide](docs/locked-collection.md) for setup and reward rules.
 
 ## Daily schedule
 

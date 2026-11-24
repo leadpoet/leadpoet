@@ -30,6 +30,7 @@ def process_job(
     claim_pack=None,
     persist=store_artifact,
     prepare_launch=False,
+    split=None,
 ):
     """The journal stores judge bytes separately. Only scores and tags reach the public statement."""
     run_id, batch = job["job_id"], job["batch_id"]
@@ -78,10 +79,18 @@ def process_job(
         ):
             raise ValueError("incorrect research segment identity")
         row_ref = persist(objects, batch, run_id, "generator", row)
+    if split is not None:
+        if control_ref and packet.get("split") != split:
+            raise ValueError("control source does not belong to the approved split")
+        packet = {**packet, "split": split}
     if not control_ref and claim_pack is not None:
         from lab_arena.collection_claims import apply_pack
 
         packet = apply_pack(packet, batch_id=batch, pack=claim_pack)
+    if not control_ref and not job["scenario_id"].startswith("research-"):
+        from lab_arena.collection_claims import read_fresh
+        packet = read_fresh(packet, policy=policy, generator=job["model"], broker=broker,
+                            record_vote=lambda vote: persist(objects, batch, run_id, "claim-vote", vote))
     packet_ref = persist(objects, batch, run_id, "judge-input", packet)
     assessment = judge.judge_run(
         policy, assignment, packet, broker.judge, prompt=prompt

@@ -10,7 +10,16 @@ from lab_arena.collection_intake import MODELS
 from lab_arena.collection_workflow import CHAMPION_REV, POET_REV
 
 
-def compile_pilot(transport, bundle, receipt, pinned_public_key_pem, objects):
+def compile_pilot(
+    transport,
+    bundle,
+    receipt,
+    pinned_public_key_pem,
+    objects,
+    *,
+    approval=None,
+    approver_key=None,
+):
     """The human receipt is trusted only against a deployment-pinned reviewer key.
 
     The returned document is suitable for the operator-only cutover INSERT. No
@@ -33,12 +42,20 @@ def compile_pilot(transport, bundle, receipt, pinned_public_key_pem, objects):
         objects=objects,
         expected_builder=POET_REV,
     )
+    verified["split_manifest_sha256"] = bundle.get("split_manifest_sha256")
     if judge.digest(verified) != judge.digest(bundle):
         raise ValueError("submitted pilot review differs from stored artifacts")
-    report = review.verify_review(verified, receipt, pinned_public_key_pem)
-    if not report["quality_ready"] or set(
-        a["generator"] for a in bundle["assignments"]
-    ) != set(MODELS):
+    panel = {}
+    if policy.qualification and approval is not None:
+        approved = review.verify_qualification(
+            verified, receipt, pinned_public_key_pem, approval, approver_key
+        )
+        if approved["allow_live"] is not True:
+            raise ValueError("panel approval excludes compensated collection")
+        panel["panel_qualification_sha256"] = judge.digest(approval)
+    else:
+        review.verify_review(verified, receipt, pinned_public_key_pem)
+    if set(a["generator"] for a in bundle["assignments"]) != set(MODELS):
         raise ValueError("pilot release checks failed")
     for row in rows:
         if row["harness_commit"] != CHAMPION_REV:
@@ -57,5 +74,7 @@ def compile_pilot(transport, bundle, receipt, pinned_public_key_pem, objects):
         "harness_commit": CHAMPION_REV,
         "builder_commit": POET_REV,
         "control_ids": controls,
+        "split_manifest_sha256": verified["split_manifest_sha256"],
+        **panel,
         **calibration,
     }

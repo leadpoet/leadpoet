@@ -673,16 +673,14 @@ compile quotes and produce the private training release.
 
 ```sh
 python3.11 -m scripts.collection_batch prices --batch batch.json --prompt prompt.json --receipt signed-review.json --output approved-prices.json
-python3.11 -m scripts.collection_batch export --batch batch.json --prompt prompt.json --receipt signed-review.json --output released-rows.zip
 ```
 
 Each command reconstructs the complete registered job set and sealed
 controls. Price compilation checks registered pilot measurements, and the
 cutover transaction verifies the same fee table directly against settled
-provider receipts. The export ZIP contains JSONL for decisions-only,
-reasoning and hard-step reasoning views, plus row counts and file hashes.
-It omits planted/drift controls and all judge response text. An incomplete
-or modified batch cannot publish a partial output file.
+provider receipts. Comparison enrollment authorizes private evaluation and pricing. It does not
+grant training release rights. Only separately consented correction experiments
+can produce training exports under the current mechanism.
 
 Before scheduling the switch, stop opening new competition rounds and let
 all issued paid rounds, pending Git promotions and the latest award finish.

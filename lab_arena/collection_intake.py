@@ -62,6 +62,27 @@ TERMS = (
     "the quote. If total quotes exceed available epoch emissions, payouts scale proportionally. Unpaid amounts do not carry forward."
 )
 TERMS_HASH = contracts.hash_bytes(TERMS.encode())
+CORRECTION_SCOPE = "synthetic_corrections"
+# This candidate text is available to miners only when the operator publishes
+# its exact digest after counsel review. An unset or stale digest closes intake.
+CORRECTION_TERMS = (
+    "I authorize Leadpoet to charge my dedicated OpenRouter key up to my signed rolling 24-hour limit "
+    "for operator-assigned experiments on synthetic sales tasks. Experiments may repeat tasks or continue "
+    "an earlier model's run from a saved state. Failed or partial attempts can incur charges. "
+    "The pilot pays no emissions. Leadpoet pays for private verification. "
+    "Leadpoet may record the original reasoning that the provider exposes, messages, tool calls and results, "
+    "task states, scores, labels, costs and outcomes, including mistakes and corrections. "
+    "I assign to Leadpoet any rights I hold in those outputs. To the extent assignment is unavailable, "
+    "I grant Leadpoet a perpetual, worldwide, royalty-free, transferable and sublicensable license "
+    "to store, evaluate, train on, publish and license them. This covers only rights I can grant. "
+    "Other rights holders' licenses and privacy protections still apply. "
+    "I will keep private run data confidential, keep no copies beyond my funding statements, and disable "
+    "input/output logging, sharing and external trace broadcast on the enrolled key. "
+    "The management key is used only to verify the runtime key. I may revoke access at any time. "
+    "Revocation blocks new calls; already dispatched calls may still be billed. "
+    "This authorization covers only synthetic tasks on OpenRouter. Live research, hosted search, "
+    "Deepline charges and compensated work require separate signed authorization."
+)
 LABEL = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 SHA = re.compile(r"sha256:[0-9a-f]{64}")
 MAX_MICROUSD = 10_000_000_000
@@ -128,12 +149,25 @@ def mode_from_environment():
     return mode
 
 
-def terms(mode):
+def correction_terms_hash():
+    digest = contracts.hash_bytes(CORRECTION_TERMS.encode())
+    if os.getenv("LAB_ARENA_CORRECTION_TERMS_SHA256") != digest:
+        raise IntakeError("collection_correction_terms_unavailable", 503)
+    return digest
+
+
+def terms(mode, task_scope=TASK_SCOPE):
+    if task_scope == TASK_SCOPE:
+        text, digest = TERMS, TERMS_HASH
+    elif task_scope == CORRECTION_SCOPE and mode == "pilot":
+        text, digest = CORRECTION_TERMS, correction_terms_hash()
+    else:
+        raise IntakeError("collection_scope_unavailable", 422)
     return {
         "mode": mode,
-        "task_scope": TASK_SCOPE,
-        "terms": TERMS,
-        "terms_sha256": TERMS_HASH,
+        "task_scope": task_scope,
+        "terms": text,
+        "terms_sha256": digest,
         "network": "finney",
         "netuid": 71,
     }
@@ -196,8 +230,7 @@ class CollectionIntake:
         body, hk = signed["body"], signed["hotkey"]
         if (
             set(body) != {"credentials_sha256", "terms_sha256", "daily_cap_microusd", "task_scope"}
-            or body["task_scope"] != TASK_SCOPE
-            or body["terms_sha256"] != TERMS_HASH
+            or body["terms_sha256"] != terms(self.mode, body["task_scope"])["terms_sha256"]
             or signed["round_id"] != scope_id(self.mode)
             or not isinstance(credentials, dict)
             or set(credentials) != set(OPENROUTER_FUNDING_FIELDS)
@@ -298,6 +331,27 @@ class CollectionIntake:
         )
         return dict(job, lease_token=token) if job else None
 
+    def claim_experiment(self, experiment, harness_commit):
+        """Claim an unpaid, explicitly scheduled correction with fresh consent."""
+        if self.mode != "pilot" or not re.fullmatch(r"xp-[0-9a-f]{64}", experiment.batch_id):
+            raise IntakeError("collection_correction_pilot_required")
+        terms_hash = correction_terms_hash()
+        if experiment.raw["terms_sha256"] != terms_hash:
+            raise IntakeError("collection_correction_terms_changed")
+        if not re.fullmatch("[0-9a-f]{40}", harness_commit):
+            raise IntakeError("collection_harness_unpinned")
+        token = store.new_lease_token()
+        models = [arm["model"] for _, arm, _ in experiment.slots]
+        job = self._rpc(
+            "claim", job=str(uuid.uuid4()), token_hash=store.hash_lease_token(token),
+            batch=experiment.batch_id, mode=self.mode, commit=harness_commit,
+            scenarios=[case["scenario_id"] for case, _, _ in experiment.slots], models=models,
+            prices=dict.fromkeys(models, 0),
+            budgets={arm["model"]:arm["budget_microusd"] for _, arm, _ in experiment.slots},
+            terms_hash=terms_hash,
+        )
+        return dict(job, lease_token=token) if job else None
+
     def credential(self, job_id, lease_token, provider):
         if provider not in PROVIDERS:
             raise IntakeError("collection_provider_invalid")
@@ -350,6 +404,7 @@ def _validate_quality(summary):
         raise IntakeError("collection_quality_invalid")
     if "training_status" in summary and summary["training_status"] not in {
         "code_rejected",
+        "claim_rejected",
         "rejected",
         "salvaged",
         "needs_review",

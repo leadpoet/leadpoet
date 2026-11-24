@@ -2739,12 +2739,15 @@ class ArenaService:
         except collection_intake.IntakeError as exc:
             raise ServiceError(exc.code, exc.status) from None
 
-    def collection_terms(self) -> Dict[str, Any]:
+    def collection_terms(self, task_scope: str = "synthetic_workflows") -> Dict[str, Any]:
         from lab_arena import collection_intake
         mode = self.collection_mode()
         if mode == "off":
             raise ServiceError("collection_inactive", 404)
-        return collection_intake.terms(mode)
+        try:
+            return collection_intake.terms(mode, task_scope)
+        except collection_intake.IntakeError as exc:
+            raise ServiceError(exc.code, exc.status) from None
 
     def handle_collection_request(self, operation: str, request: Any) -> Dict[str, Any]:
         from lab_arena import collection_intake as collection

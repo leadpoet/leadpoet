@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 from decimal import Decimal
 
 from lab_arena import broker, contracts, operations, provider_costs, store
-from lab_arena.collection_judge import QUALIFICATION_JUDGES, JudgeUnavailable
+from lab_arena.collection_judge import QUALIFICATION_JUDGES, JudgeUnavailable, model_family
 from lab_arena.collection_intake import GENERATOR_ROUTES
 from lab_arena.lead_orders.broker import deepline_cost_microusd
 
@@ -87,6 +87,7 @@ class CollectionBroker:
         self.versions = batch_versions(routes)
         self.catalog = catalog
         self.judge_key = judge_key
+        self.panel_qualification = None
 
     def _rpc(self, name, request_id, **params):
         return self.database.rpc(
@@ -254,11 +255,17 @@ class CollectionBroker:
             "openai/gpt-6.2-astra",
         }:
             raise CollectionCallError("unknown collection judge")
-        if candidate and (
-            self.job.get("mode") != "pilot" or self.routes.get(model) != candidate.route
-            or model == self.job["model"]
-        ):
+        if judge and model_family(model) == model_family(self.job["model"]):
+            raise CollectionCallError("unapproved qualification judge assignment: same generator family")
+        if candidate and self.routes.get(model) != candidate.route:
             raise CollectionCallError("unapproved qualification judge assignment")
+        if candidate and self.job.get("mode") != "pilot":
+            if self.job.get("mode") != "live" or not self.panel_qualification:
+                raise CollectionCallError("unapproved qualification judge assignment")
+            schedule = self.database.rpc("collection_reward_schedule_v1", {}) or {}
+            if schedule.get("pilot_evidence", {}).get("panel_qualification_sha256") != self.panel_qualification:
+                raise CollectionCallError("unapproved qualification judge assignment")
+
         if parameters.get("model") != model or api not in {"chat", "responses"}:
             raise CollectionCallError("wrong collection assignment")
         token_field = "max_tokens" if api == "chat" else "max_output_tokens"

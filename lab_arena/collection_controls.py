@@ -19,6 +19,7 @@ PACKET_FIELDS = (
     "final_output",
     "checks",
     "claim_reader",
+    "split",
 )
 
 
@@ -31,7 +32,9 @@ def template(packet):
     return projected
 
 
-def planted_case(packet, *, expected, reviewer, rationale, source_sha256):
+def planted_case(
+    packet, *, expected, reviewer, rationale, source_sha256, source_generator=None
+):
     """Record a previously reviewed private known-good/bad example. No label is inferred."""
     case = {
         "schema": CASE_SCHEMA,
@@ -42,6 +45,7 @@ def planted_case(packet, *, expected, reviewer, rationale, source_sha256):
             "reviewer": reviewer,
             "rationale": rationale,
             "source_sha256": source_sha256,
+            **({"source_generator": source_generator} if source_generator else {}),
         },
     }
     validate_case(case)
@@ -89,6 +93,9 @@ def drift_case(packet, assessment, manifest, *, source_manifest_sha256):
         "expected": {v["judge"]: dict(v["scores"]) for v in records},
         "provenance": {
             "source_manifest_sha256": source_manifest_sha256,
+            **(
+                {"source_generator": manifest["model"]} if manifest.get("model") else {}
+            ),
             "source_batch_id": source_policy.batch_id,
             "source_run_id": packet["run_id"],
             "judge_versions": {
@@ -109,6 +116,10 @@ def validate_case(case):
         "control case content",
     )
     expected, provenance = case["expected"], case["provenance"]
+    provenance = dict(provenance)
+    if "source_generator" in provenance:
+        source = provenance.pop("source_generator")
+        judge._require(judge._text(source, 256), "control generator identity")
     if case["kind"] == "planted":
         judge._fields(provenance, ("reviewer", "rationale", "source_sha256"))
         judge._require(
@@ -155,6 +166,15 @@ def validate_case(case):
     return judge.digest(case)
 
 
+def verify_control_family(case, judge_models):
+    source = case["provenance"].get("source_generator")
+    if not source or any(
+        judge.model_family(source) == judge.model_family(model)
+        for model in judge_models
+    ):
+        raise ValueError("calibration controls require an independent source family")
+
+
 class ControlPack:
     def __init__(self, manifest, private_pack):
         judge._fields(private_pack, ("schema", "cases"))
@@ -184,6 +204,17 @@ class ControlPack:
                 slot in planted
             ):
                 raise ValueError("control artifact differs")
+            if "split_manifest" in manifest:
+                from lab_arena.collection_quality import verify_split
+
+                verify_split(case["packet"].get("split"), manifest["split_manifest"])
+                panel = [
+                    key
+                    for key in manifest.get("routes", {})
+                    if key in judge.QUALIFICATION_JUDGES
+                    or key in ("openai/gpt-6.2-astra", "anthropic/claude-fable-5.2")
+                ]
+                verify_control_family(case, panel)
             expected = (planted if slot in planted else drift)[slot]
             if (
                 judge.digest(expected) != judge.digest(case["expected"])

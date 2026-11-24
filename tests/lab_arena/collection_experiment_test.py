@@ -113,6 +113,7 @@ def database():
         733,
         738,
         740,
+        744,
     ):
         (script,) = Path("scripts").glob(str(prefix) + "-*.sql")
         migrated.append(script.name)

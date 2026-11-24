@@ -22,28 +22,26 @@ from tests.lab_arena.lab_arena_pg_harness import (
 @pytest.fixture
 def database():
     files = []
-    for n in (720, 721, 722, 723, 724, 725, 726, 727, 728, 729, 732, 733, 738, 740):
+    for n in (720, 721, 722, 723, 724, 725, 726, 727, 728, 729, 732, 733, 738, 740, 744):
         (path,) = Path("scripts").glob(str(n) + "-*.sql")
         files.append(path.name)
     yield from database_with_lab_arena_migration((*DEFAULT_MIGRATIONS, *files))
 
 
 def test_new_terms_and_class_require_separate_authority(monkeypatch):
-    pilot = contracts.hash_bytes(funding.CORRECTION_TERMS.encode())
-    live = contracts.hash_bytes(funding.LIVE_CORRECTION_TERMS.encode())
-    assert pilot != live
-    monkeypatch.setenv("LAB_ARENA_CORRECTION_TERMS_SHA256", pilot)
-    monkeypatch.setenv("LAB_ARENA_LIVE_CORRECTION_TERMS_SHA256", pilot)
+    pilot = funding.SYNTHETIC_TRAINING_TERMS_HASH
+    assert contracts.hash_bytes(funding.SYNTHETIC_TRAINING_TERMS.encode()) == pilot
+    monkeypatch.setenv("LAB_ARENA_LIVE_CORRECTION_TERMS_SHA256", "off")
     with pytest.raises(funding.IntakeError):
         funding.terms("live", funding.CORRECTION_SCOPE)
-    monkeypatch.setenv("LAB_ARENA_LIVE_CORRECTION_TERMS_SHA256", live)
-    assert funding.terms("live", funding.CORRECTION_SCOPE)["terms_sha256"] == live
+    monkeypatch.setenv("LAB_ARENA_LIVE_CORRECTION_TERMS_SHA256", pilot)
+    assert funding.terms("live", funding.CORRECTION_SCOPE)["terms_sha256"] == pilot
     raw = settings()
     priced = dict(raw, min_pricing_runs=2)
     basem = load_experiment(priced, {})
     assert basem.batch_id != load_experiment(raw, {}).batch_id
     prospective = dict(
-        raw, mode="live", pricing_pilot=basem.batch_id, terms_sha256=live
+        raw, mode="live", pricing_pilot=basem.batch_id, terms_sha256=pilot
     )
     assert load_experiment(prospective, {}).policy.pilot is False
     with pytest.raises(ValueError):
@@ -67,7 +65,7 @@ def test_native_priced_job_reuses_pro_rata_quotes_once(database, template):
     lh = contracts.hash_bytes(funding.LIVE_CORRECTION_TERMS.encode())
     hk = "5" + "T" * 47
 
-    def reg(q, mode, digest):
+    def reg(q, mode, digest, *, signed_mode=None):
         rid, key = map(str, (uuid4(), uuid4()))
         q.execute(
             "SELECT public.collection_register_v1(%s,%s,%s,%s,%s,10000,%s,NULL)",
@@ -78,7 +76,11 @@ def test_native_priced_job_reuses_pro_rata_quotes_once(database, template):
                 mode,
                 Json(
                     {
+                        "round_id": funding.scope_id(signed_mode or mode),
+                        "scope": funding.SCOPE["register"],
+                        "hotkey": hk,
                         "body": {
+                            "daily_cap_microusd": 10000,
                             "task_scope": "synthetic_corrections",
                             "terms_sha256": digest,
                         }
@@ -196,7 +198,7 @@ def test_native_priced_job_reuses_pro_rata_quotes_once(database, template):
         q.execute("ROLLBACK TO no_pay_grant")
         q.execute("RESET ROLE")
         insert(d)
-        assert reg(q, "live", ph)["error"] == "collection_consent_invalid"
+        assert reg(q, "live", ph, signed_mode="pilot")["error"] == "collection_consent_invalid"
         assert reg(q, "live", lh)["status"] == "enrolled"
         assert (
             claim(q, live, "live", 131, lh)["error"] == "unapproved_correction_tariff"

@@ -26,7 +26,7 @@ from lab_arena.collection_experiment_export import write_dataset
 from lab_arena.collection_intake import (
     GENERATOR_ROUTES,
     LIVE_CORRECTION_TERMS,
-    correction_terms_hash,
+    require_correction_grant,
 )
 from lab_arena.collection_workflow import store_artifact
 
@@ -190,11 +190,11 @@ def load_approved(live, inputs, prompt, database, objects, epoch):
     if epoch() < first:
         raise ValueError("ordinary cutover epoch has not started")
     pilot = live.raw["pricing_pilot"]
+    require_correction_grant("live", body["terms_sha256"])
     if (
         body["schema"] != SCHEMA
         or body["live_batch"] != live.batch_id
         or body["pilot_batch"] != pilot
-        or body["terms_sha256"] != correction_terms_hash("live")
         or body["terms_sha256"] != live.raw["terms_sha256"]
         or body["class_sha256"] != judge.digest(class_definition(live, inputs))
         or body["cases"] != [c["scenario_id"] for c, _, _ in live.slots]

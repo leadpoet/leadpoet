@@ -7,12 +7,12 @@ from lab_arena import collection_intake as intake, contracts
 from tests.lab_arena.collection_intake_test import manager, registration
 
 
-def test_published_pilot_terms_require_separate_consent(monkeypatch):
+def test_both_scopes_publish_the_same_pilot_terms(monkeypatch):
     monkeypatch.delenv("LAB_ARENA_CORRECTION_TERMS_SHA256", raising=False)
     assert intake.terms("pilot")["terms_sha256"] == intake.TERMS_HASH
     published = intake.terms("pilot", "synthetic_corrections")
     assert published["terms_sha256"] == contracts.hash_bytes(intake.CORRECTION_TERMS.encode())
-    assert published["terms_sha256"] != intake.TERMS_HASH
+    assert published["terms_sha256"] == intake.TERMS_HASH
 
 
 def test_correction_registration_requires_exact_published_pilot_text(monkeypatch):
@@ -21,9 +21,10 @@ def test_correction_registration_requires_exact_published_pilot_text(monkeypatch
     digest = contracts.hash_bytes(CORRECTION_TERMS.encode())
     monkeypatch.setenv("LAB_ARENA_CORRECTION_TERMS_SHA256", digest)
     assert intake.terms("pilot", CORRECTION_SCOPE)["terms_sha256"] == digest
-    assert intake.terms("live", CORRECTION_SCOPE)["terms_sha256"] != digest
+    assert intake.terms("live", CORRECTION_SCOPE)["terms_sha256"] == digest
     signed, creds = registration("A", "pilot")
     signed["body"]["task_scope"] = CORRECTION_SCOPE
+    signed["body"]["terms_sha256"] = intake.LEGACY_COMPARISON_TERMS_HASH
     calls = []
     transport = SimpleNamespace(rpc=lambda n, p: calls.append((n, p)) or {"status": "enrolled"})
     client = intake.CollectionIntake(transport, manager(), "pilot")
@@ -34,7 +35,7 @@ def test_correction_registration_requires_exact_published_pilot_text(monkeypatch
     client.register(signed, "5" + "Y" * 47, creds)
     assert len(calls) == 1
     assert calls[0][1]["p_consent"]["body"]["terms_sha256"] == digest
-    monkeypatch.setenv("LAB_ARENA_CORRECTION_TERMS_SHA256", intake.TERMS_HASH)
+    monkeypatch.setenv("LAB_ARENA_CORRECTION_TERMS_SHA256", intake.LEGACY_COMPARISON_TERMS_HASH)
     with pytest.raises(intake.IntakeError, match="terms_unavailable"):
         client.register(signed, "5" + "Y" * 47, creds)
 
@@ -70,4 +71,4 @@ def test_cli_sends_no_key_to_a_gateway_that_has_different_experiment_terms(monke
 
 def test_correction_terms_configuration_cannot_activate_a_different_text():
     from scripts import configure_lab_arena_production as config
-    assert config.main(["--check", "--allowed-account", "493765492819", "--correction-terms", intake.TERMS_HASH]) == 2
+    assert config.main(["--check", "--allowed-account", "493765492819", "--correction-terms", intake.LEGACY_COMPARISON_TERMS_HASH]) == 2

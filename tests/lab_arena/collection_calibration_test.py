@@ -366,4 +366,20 @@ def test_train_only_p7_quote_through_paid_job():
             cursor.execute("SELECT public.collection_fee_class_v1(id) FROM unnest(%s::text[]) AS s(id)",
                            (["P7-s40401", "P6-s40401", "P8-s40401", "P7-s0", "C04-s3012"],))
             assert [r[0] for r in cursor.fetchall()] == ["P", "P", None, None, "C"]
-        exercise_ordinary_cutover((pg, dsn), template="P7")
+        def check_public_rate(cursor):
+            from types import SimpleNamespace
+            from lab_arena.collection_intake import approved_comparison_quotes
+
+            def read_schedule(name, args):
+                assert (name, args) == ("collection_reward_schedule_v1", {})
+                cursor.execute("SELECT public.collection_reward_schedule_v1()")
+                return cursor.fetchone()[0]
+
+            prices = approved_comparison_quotes(SimpleNamespace(rpc=read_schedule))
+            cursor.execute("SELECT model,price_microusd,budget_microusd FROM public.collection_jobs "
+                           "WHERE mode='live' AND status='accepted'")
+            model, fee, cap = cursor.fetchone()
+            assert len(prices) == 6
+            assert {"task_class": "P", "model": model, "quote_microusd": fee, "cap_microusd": cap} in prices
+
+        exercise_ordinary_cutover((pg, dsn), template="P7", after_cutover=check_public_rate)

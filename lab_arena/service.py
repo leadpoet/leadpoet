@@ -2750,6 +2750,8 @@ class ArenaService:
             document = collection_intake.terms(mode, task_scope)
             if mode == "live" and task_scope == collection_intake.CORRECTION_SCOPE:
                 document["fixed_quotes"] = collection_intake.open_correction_quotes(self._store._transport)
+            elif mode == "live":
+                document["fixed_quotes"] = collection_intake.approved_comparison_quotes(self._store._transport)
             return document
         except collection_intake.IntakeError as exc:
             raise ServiceError(exc.code, exc.status) from None

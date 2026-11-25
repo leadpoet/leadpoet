@@ -52,7 +52,9 @@ def reviewed_plants(cases, decisions, bindings):
             or not isinstance(mark["rationale"], str)
             or not mark["rationale"].strip()
         ):
-            raise ValueError("one or more genuine review decisions are incomplete")
+            raise ValueError(
+                "one or more independently reviewed control decisions are incomplete"
+            )
         complete.append(
             controls.planted_case(
                 packet,
@@ -65,7 +67,7 @@ def reviewed_plants(cases, decisions, bindings):
         )
     if {c["expected"] for c in complete} != {True, False}:
         raise ValueError(
-            "both answers remain valid human feedback; this pair does not furnish both required control classes"
+            "the reviewed controls do not furnish both required ground-truth classes"
         )
     return complete
 
@@ -88,7 +90,9 @@ def seal(pending, prompt, ref, plants, db, objects):
         or {c["expected"] for c in plants} != {True, False}
         or any(c["kind"] != "planted" for c in plants)
     ):
-        raise ValueError("both separately reviewed known-answer cases are required")
+        raise ValueError(
+            "both independently established known-answer cases are required"
+        )
     panel = [policy.version(role) for role in policy.roles]
     available = {
         s: [
@@ -305,7 +309,36 @@ def qualification_for_poll(raw, prompt, directory, db, objects):
     bindings = pinned_json(
         directory / "planted-source-bindings.json", cfg["bindings_sha256"]
     )
-    plants = reviewed_plants(cases, json.loads(read_file(returns)), bindings)
+    decision_bytes = read_file(returns)
+    provenance = json.loads(read_file(directory / "returned-plant-provenance.json"))
+    if (
+        provenance.get("decisions_sha256") != sha256(decision_bytes).hexdigest()
+        or provenance.get("ordinary_human_marks") != 0
+        or provenance.get("planted_labels") != 2
+        or provenance.get("reviewer_type")
+        not in {"human", "model_with_independent_ledger_replay"}
+    ):
+        raise ValueError("missing planted ground-truth provenance")
+    decision_doc = json.loads(decision_bytes)
+    if provenance["reviewer_type"] == "model_with_independent_ledger_replay":
+        replay = pinned_json(
+            directory / "independent-ledger-verification.json",
+            provenance["original_ledger_evidence_sha256"],
+        )
+        if (
+            replay.get("source_sha256") != provenance["source_packet_sha256"]
+            or replay.get("ordinary_human_marks") != 0
+            or replay.get("operator_key_used") is not False
+            or set(replay["cases"]) != set(cases)
+            or any(
+                item["accept"] is not replay["cases"][key]["step2_claim_matches_ledger"]
+                for key, item in decision_doc["reviews"].items()
+            )
+        ):
+            raise ValueError(
+                "planted labels disagree with their independent ledger replay"
+            )
+    plants = reviewed_plants(cases, decision_doc, bindings)
     cohort, pack, bid = seal(pending, prompt, ref, plants, db, objects)
     if len(cohort["control_slots"]) != 2 or len(cohort["drift_slots"]) != 30:
         raise ValueError("incomplete independent review controls")

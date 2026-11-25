@@ -79,7 +79,7 @@ def test_independent_planted_labels_and_blind_sample_safety(tmp_path):
     assert len(labels) == 2 and {p["expected"] for p in labels} == {True, False}
     blank = deepcopy(decisions)
     blank["reviews"]["private-0"]["accept"] = None
-    with pytest.raises(ValueError, match="genuine"):
+    with pytest.raises(ValueError, match="independently reviewed"):
         reviewed_plants(cases, blank, bindings)
     wrong = deepcopy(bindings)
     wrong["private-1"]["source_sha256"] = "sha256:" + "0" * 64
@@ -181,7 +181,16 @@ def test_full_materialized_handoff_at_the_business_boundary(tmp_path, monkeypatc
         ref,
         None,
     )
-    private("returned-plant-decisions.json", {"original": True})
+    decisions_sha = private("returned-plant-decisions.json", {"original": True})
+    private(
+        "returned-plant-provenance.json",
+        {
+            "decisions_sha256": decisions_sha,
+            "reviewer_type": "human",
+            "planted_labels": 2,
+            "ordinary_human_marks": 0,
+        },
+    )
     monkeypatch.setattr(
         handoff,
         "reviewed_plants",

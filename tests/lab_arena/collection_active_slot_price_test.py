@@ -126,3 +126,54 @@ def test_selective_endpoint_pricer_excludes_unrelated_and_unavailable_reference(
     assert collection_prices.prices_for_assignment(pinned, policy)(
         "mistral-generator"
     ) == {"authorized": True}
+
+
+def test_genuine_idle_comparison_checks_existing_owner_reviews_once_without_catalog(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+    from scripts import run_locked_collection as runner
+    from lab_arena.collection_generation import CAPTURE_V2
+
+    raw = {
+        "scenario_ids": ["P7-s40401"],
+        "budgets_microusd": {},
+        "capture_version": CAPTURE_V2,
+        "split_manifest": {"pinned": True},
+    }
+    sources = tuple(
+        SimpleNamespace(source_revision=r) for r in runner.comparison_revisions(raw)
+    )
+    monkeypatch.setattr(runner, "pack_split", lambda *args: {"pinned": True})
+    requested = []
+
+    def idle(*args, expected_model, **kwargs):
+        requested.append(expected_model)
+        assert expected_model is None
+        return None
+
+    def audit(method, params):
+        assert params == {"p_batch": "pilot"}
+        requested.append(method)
+        return []
+
+    assert (
+        runner.run_cohort(
+            raw=raw,
+            policy=SimpleNamespace(pilot=True, batch_id="pilot"),
+            prompt={},
+            intake=SimpleNamespace(claim=idle),
+            database=SimpleNamespace(rpc=audit),
+            objects=None,
+            transport=None,
+            pricing=lambda model: pytest.fail("empty batch queried provider pricing"),
+            epoch=None,
+            sources=sources,
+            owner_lookup=None,
+            judge_key="owner-test",
+            max_jobs=1,
+            recover_idle_pilot=True,
+        )
+        == 0
+    )
+    assert requested == [None, "collection_interrupted_pilot_judges_v1"]

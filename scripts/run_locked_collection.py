@@ -8,13 +8,14 @@ import json
 import os
 import re
 import sys
+from functools import partial
 from contextlib import closing, contextmanager, redirect_stdout, ExitStack
 from pathlib import Path
 from uuid import UUID
 
 from lab_arena import chain, collection_judge as judge
 from lab_arena.broker import HttpxProviderTransport
-from lab_arena.collection_prices import endpoint_prices
+from lab_arena.collection_prices import claim_at_current_price, endpoint_prices, prices_for_assignment
 from lab_arena.collection_broker import (
     CollectionBroker,
     REFERENCE_MODEL,
@@ -552,10 +553,11 @@ def run_cohort(
                 return report_split_hold(policy, exc)
     completed = 0
     for _ in range(max_jobs):
-        job = intake.claim(
-            policy.batch_id, raw["scenario_ids"], agent, fees, ceiling,
+        claim = partial(
+            intake.claim, policy.batch_id, raw["scenario_ids"], agent, fees, ceiling,
             terms_hash=raw.get("terms_sha256", LEGACY_COMPARISON_TERMS_HASH),
         )
+        job, job_prices = claim_at_current_price(claim, pricing)
         if not job:
             break
         try:
@@ -566,7 +568,7 @@ def run_cohort(
                 database,
                 transport,
                 job,
-                pricing,
+                job_prices,
                 routes=raw["routes"],
                 judge_key=judge_key,
             )
@@ -913,11 +915,10 @@ def _run_options(args, p, raw, *, before_claim=None):
             if experiment:
                 if not judge_key:
                     raise ValueError("private claim-reader credential unavailable")
-                active_models = {arm["model"] for arm in raw["arms"]} | set(judge.QUALIFICATION_JUDGES)
                 completed = experiments.run_experiment(
                     spec=experiment, sources=sources, inputs=experiment_inputs,
                     intake=CollectionIntake(db, cm, mode), database=db, objects=objects,
-                    transport=transport, pricing=endpoint_prices(experiment.routes, models=sorted(active_models)),
+                    transport=transport, pricing=prices_for_assignment(experiment.routes, policy),
                     owner_lookup=lambda hk: resolve_finalized_owner(client, hk), judge_key=judge_key,
                     max_jobs=args.max_jobs, epoch=lambda: chain.current_settlement_epoch(client, cutover),
                     before_claim=before_claim, prompt=prompt,
@@ -931,7 +932,7 @@ def _run_options(args, p, raw, *, before_claim=None):
                     database=db,
                     objects=objects,
                     transport=transport,
-                    pricing=endpoint_prices(raw["routes"]),
+                    pricing=prices_for_assignment(raw["routes"], policy),
                     epoch=lambda: chain.current_settlement_epoch(client, cutover),
                     sources=sources,
                     owner_lookup=lambda hk: resolve_finalized_owner(client, hk),

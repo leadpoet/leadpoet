@@ -77,3 +77,26 @@ def endpoint_prices(routes, *, open_url=None, models=None):
     )
     table["endpoint_providers"] = providers
     return table
+
+
+def prices_for_assignment(routes, policy):
+    """Fetch the exact generator and the panel that may grade its claims or rank the pack."""
+    judges = {policy.version(role) for role in policy.roles}
+    return lambda model: endpoint_prices(routes, models=sorted(judges | {model}))
+
+
+def claim_at_current_price(claim, pricing, *, before_claim=None):
+    """Read eligibility before contacting providers, then bind any actual lease to its priced model."""
+    if callable(pricing):
+        preview = claim(expected_model=None)
+        if not preview:
+            return None, None
+        model = preview["model"]
+        prices = pricing(model)
+        if before_claim:
+            before_claim()
+        return claim(expected_model=model), prices
+    # Injected callers and older tools can supply an already validated full price table.
+    if before_claim:
+        before_claim()
+    return claim(), pricing

@@ -65,9 +65,14 @@ def pilot(tmp_path, request):
     db = Database()
     objects = LocalObjectStore(tmp_path / "objects")
     variant = getattr(request, "param", 22)
-    witnessed = variant == "witnessed-complete"
+    witnessed = variant in {"witnessed-complete", "reference-60"}
     exportable = variant == "training-pack" or witnessed
-    candidate = variant in {"open-panel", "training-pack", "witnessed-complete"}
+    candidate = variant in {
+        "open-panel",
+        "training-pack",
+        "witnessed-complete",
+        "reference-60",
+    }
     checkpointed = variant == "checkpointed" or exportable
     split = SPLIT
     if exportable:
@@ -135,12 +140,17 @@ def pilot(tmp_path, request):
     }
     if exportable:
         raw["terms_sha256"] = intake.SYNTHETIC_TRAINING_TERMS_HASH
+    if variant == "reference-60":
+        raw["scenario_ids"] = [f"P7-s{n+2000}" for n in range(10)]
+        raw["control_slots"] = {}
+        raw["drift_slots"] = {}
+        drift_slots = []
     private_cases = {}
     source_policy = judge.BatchPolicy(
         "prior-drift-baseline", "earlier-seed", judge.digest(PROMPT), pilot=True,
         fable_version=tuple(models)[0], astra_version=tuple(models)[1],
     )
-    for i in [*drift_slots, 130, 131]:
+    for i in ([] if variant == "reference-60" else [*drift_slots, 130, 131]):
         src = f"reference-{i}"
         sid = raw["scenario_ids"][i // 6]
         original = dict(
@@ -227,6 +237,8 @@ def pilot(tmp_path, request):
 
             job.update(attempt=1, miner_hotkey=wallet.ss58_address)
             p["split"] = stamp
+            if variant == "reference-60":
+                p["final_output"] = f"Original model output for slot {i}"
             billing = {
                 "unresolved": 0,
                 "generator_calls": 0 if i in private_cases else 5,
@@ -301,6 +313,8 @@ def pilot(tmp_path, request):
         )["sha256"]
         db.rows.append(job)
     bundle = release.source_bundle(raw, PROMPT, db, objects)
+    if variant == "reference-60":
+        return raw, db, objects, bundle, None, None
     private, public = keys()
     receipt = review.sign_review(bundle, complete_marks(bundle), "test-human", private)
     return raw, db, objects, bundle, receipt, public
@@ -749,3 +763,54 @@ def test_signed_successor_export_keeps_genuine_absolute_slots_and_matching_route
     write_new(wrong, dict(setting, contribution_cap_microusd=1))
     with pytest.raises(ValueError, match="settings differ"):
         progression.reference_for_poll(raw, PROMPT, wrong, db, objects)
+
+
+@pytest.mark.parametrize("pilot", ["reference-60"], indirect=True)
+def test_original_sealer_uses_30_actual_distinct_paired_packets(pilot, monkeypatch):
+    from scripts import collection_qualification_followup as h
+
+    ref, db, objects, bundle, _, _ = pilot
+    # The CoreWeave owner artifact is exercised against real S3 and in a dedicated test.
+    monkeypatch.setattr(h, "verified_witness", lambda *a: {"checked": True})
+    raw = dict(
+        deepcopy(ref),
+        name="independent-24",
+        scenario_ids=[f"P7-s{2000+i}" for i in range(24)],
+        seed="freeze-before",
+    )
+    pending = {"schema": "sn71.p7.qualification-draft.v1", "manifest": raw}
+    case = bundle["runs"][0]["packet"]
+    plants = []
+    for i, v in enumerate((False, True)):
+        public = dict(case, task=f"Reviewed planted statement {i}")
+        plants.append(
+            controls.planted_case(
+                public,
+                expected=v,
+                reviewer="fixture",
+                rationale="Compared to original ledger",
+                source_sha256="sha256:" + judge.digest(public),
+                source_generator="human",
+            )
+        )
+    cohort, pack, bid = h.seal(pending, PROMPT, ref, plants, db, objects)
+    assert (
+        len(cohort["control_slots"]) == 2
+        and len(cohort["drift_slots"]) == 30
+        and len(pack["cases"]) == 32
+    )
+    measured = [c["provenance"] for c in pack["cases"].values() if c["kind"] == "drift"]
+    assert len({m["source_run_id"] for m in measured}) == 30
+    assert all(
+        m["source_batch_id"] == bundle["policy"]["batch_id"]
+        and m["source_manifest_sha256"]
+        for m in measured
+    )
+    assert (
+        bid == load_batch(cohort, PROMPT).batch_id
+        and bid != bundle["policy"]["batch_id"]
+    )
+    for i in range(40):
+        db.rows[i]["generator_calls"] = db.grants[i]["generator_calls"] = 0
+    with pytest.raises(ValueError, match="30 distinct measured"):
+        h.seal(pending, PROMPT, ref, plants, db, objects)

@@ -178,6 +178,7 @@ def terms(mode, task_scope=TASK_SCOPE):
     return {
         "mode": mode,
         "task_scope": task_scope,
+        "max_selectable_slots_per_utc_day": MAX_DAILY_SLOTS,
         "terms": SYNTHETIC_TRAINING_TERMS,
         "terms_sha256": SYNTHETIC_TRAINING_TERMS_HASH,
         "network": "finney",
@@ -195,6 +196,21 @@ def open_correction_quotes(transport):
 
 def scope_id(mode):
     return f"finney:71:locked-collection:{mode}"
+
+
+MAX_DAILY_SLOTS = 6
+REGISTRATION_FIELDS = {"credentials_sha256", "terms_sha256", "daily_cap_microusd", "task_scope"}
+
+
+def signed_daily_slots(body):
+    if set(body) - {"max_slots_per_utc_day"} != REGISTRATION_FIELDS:
+        raise IntakeError("collection_consent_invalid")
+    slots = body.get("max_slots_per_utc_day", 1)
+    if type(slots) is not int or not 1 <= slots <= MAX_DAILY_SLOTS:
+        raise IntakeError("collection_consent_invalid")
+    if "max_slots_per_utc_day" in body and body["terms_sha256"] != SYNTHETIC_TRAINING_TERMS_HASH:
+        raise IntakeError("collection_consent_invalid")
+    return slots
 
 
 def _micros(value, minimum):
@@ -253,9 +269,9 @@ class CollectionIntake:
     def register(self, signed, owner, credentials):
         """Caller authenticates the scoped signed envelope. Only that envelope is retained."""
         body, hk = signed["body"], signed["hotkey"]
+        signed_daily_slots(body)
         if (
-            set(body) != {"credentials_sha256", "terms_sha256", "daily_cap_microusd", "task_scope"}
-            or body["terms_sha256"] != terms(self.mode, body["task_scope"])["terms_sha256"]
+            body["terms_sha256"] != terms(self.mode, body["task_scope"])["terms_sha256"]
             or signed["round_id"] != scope_id(self.mode)
             or not isinstance(credentials, dict)
             or set(credentials) != set(OPENROUTER_FUNDING_FIELDS)

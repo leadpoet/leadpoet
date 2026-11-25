@@ -250,6 +250,7 @@ def stack(tmp_path_factory):
                     "749-pilot-owner-judge-recovery.sql",
                     "750-pending-collection-billing.sql",
                     "751-p7-collection-fee-class.sql",
+                    "752-signed-collection-daily-slots.sql",
                 ):
                     cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / migration).read_text())
             # Install additive current readers before PostgREST takes its

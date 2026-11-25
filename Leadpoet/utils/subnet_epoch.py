@@ -21,9 +21,11 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import threading
 import time
 from typing import Any, Mapping, Optional
 from urllib.parse import urlparse
+from weakref import WeakKeyDictionary
 
 
 EPOCH_SCHEME = "bittensor.subnet_epoch_index.v1"
@@ -60,6 +62,31 @@ _STORAGE_FIELDS = {
     "blocks_since_last_step": "BlocksSinceLastStep",
 }
 SUBTENSOR_MAX_TEMPO = 50_400
+
+# The genesis hash is fixed for the life of a chain, so reading block 0 on
+# every snapshot spends a network round trip on a constant. Keyed weakly on
+# the substrate client: one client is one endpoint, and a reconnect builds a
+# new client that reads it again.
+_GENESIS_HASH_LOCK = threading.Lock()
+_GENESIS_HASH_BY_SUBSTRATE: "WeakKeyDictionary[Any, str]" = WeakKeyDictionary()
+
+
+def _genesis_block_hash(substrate: Any) -> Any:
+    """Block 0's hash for this client, read once per connection."""
+
+    try:
+        cached = _GENESIS_HASH_BY_SUBSTRATE.get(substrate)
+    except TypeError:
+        # A client that cannot be weakly referenced keeps the old behaviour.
+        return substrate.get_block_hash(0)
+    if cached is not None:
+        return cached
+    value = substrate.get_block_hash(0)
+    if isinstance(value, str) and value:
+        with _GENESIS_HASH_LOCK:
+            _GENESIS_HASH_BY_SUBSTRATE[substrate] = value
+    return value
+
 
 
 class SubnetEpochError(RuntimeError):
@@ -575,7 +602,7 @@ def read_subnet_epoch_snapshot(
             head_kind = "best"
         reference_hash = _hash(reference_hash, "block_hash")
         current_block = substrate.get_block_number(reference_hash)
-        genesis_hash = substrate.get_block_hash(0)
+        genesis_hash = _genesis_block_hash(substrate)
     except Exception as exc:
         raise SubnetEpochError("failed to resolve the epoch reference block") from exc
     if current_block is None:

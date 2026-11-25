@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import re
 
 from lab_arena import collection_judge as judge
 from lab_arena import collection_judge_review as review
@@ -19,6 +20,7 @@ def compile_pilot(
     *,
     approval=None,
     approver_key=None,
+    witnessed_batch=None,
 ):
     """The human receipt is trusted only against a deployment-pinned reviewer key.
 
@@ -32,7 +34,8 @@ def compile_pilot(
     rows = transport.rpc("collection_pilot_costs_v1", {"p_batch": policy.batch_id})
     if not isinstance(rows, list) or not rows or len(rows) > 2 * 24576:
         raise ValueError("invalid pilot job evidence")
-    rows, failures = review.terminal_pilot_attempts(rows)
+    attempts = rows
+    rows, failures = review.terminal_pilot_attempts(attempts)
     verified = review.registered_bundle(
         policy,
         bundle["assignments"],
@@ -59,6 +62,20 @@ def compile_pilot(
         panel["panel_qualification_sha256"] = judge.digest(approval)
     else:
         review.verify_review(verified, receipt, pinned_public_key_pem)
+    if re.fullmatch(r"rq-[0-9a-f]{64}", policy.batch_id):
+        from scripts.run_locked_collection import load_batch
+        from lab_arena.collection_route_witness import verified_witness
+        from lab_arena.collection_trajectories import verified_grants
+        from lab_arena.collection_intake import TASK_SCOPE
+
+        if not witnessed_batch or "panel_qualification_sha256" not in panel:
+            raise ValueError("qualified witnessed pricing pilot required")
+        raw, prompt = witnessed_batch
+        if not raw.get("route_witness_sha256") or load_batch(raw, prompt).batch_id != policy.batch_id:
+            raise ValueError("route witness differs from the reviewed pricing pilot")
+        verified_witness(raw, objects)
+        verified_grants(transport, policy.batch_id, attempts, mode="pilot", scope=TASK_SCOPE, digest=raw["terms_sha256"])
+        panel["route_witness_sha256"] = raw["route_witness_sha256"]
     if set(a["generator"] for a in bundle["assignments"]) != set(MODELS):
         raise ValueError("pilot release checks failed")
     for row in rows:

@@ -8,9 +8,10 @@ import json
 import os
 import re
 import sys
+import time
 from contextlib import closing, contextmanager, redirect_stdout, ExitStack
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from lab_arena import chain, collection_judge as judge
 from lab_arena.broker import HttpxProviderTransport
@@ -290,10 +291,15 @@ def finish_launch(database, pending, objects, policy, approved):
         raise ValueError("collection launch acceptance unavailable")
 
 
+class IncompleteOwnerReview(ValueError):
+    """The bounded owner attempt returned no complete verified verdict."""
+
+
 def rejudge_ready(
-    database, objects, transport, raw, policy, prompt, judge_key, job_id, attempt_id
+    database, objects, transport, raw, policy, prompt, judge_key, job_id, attempt_id,
+    *, interrupted_request=None,
 ):
-    """Retry only an unavailable owner verdict against the exact stored live execution."""
+    """Retry only an unavailable owner verdict against the exact stored execution."""
     from lab_arena.collection_launch_review import LaunchReviewBroker, finish_review
     from lab_arena.collection_workflow import store_artifact
     from scripts.collection_batch import read_artifact
@@ -335,6 +341,8 @@ def rejudge_ready(
             "passed",
             "not_applicable",
         ):
+            if interrupted_request is not None:
+                return False
             raise ValueError("pilot lacks complete native, privacy or factual checks")
         if pending.get("pilot_review_sha256"):
             return  # Already verified the only registered recovery above.
@@ -351,6 +359,11 @@ def rejudge_ready(
         verify_live_panel(raw, policy, approved)
         evidence = ready_launch_evidence(pending, objects, policy, approved)
     previous = evidence["assessment"]
+    if interrupted_request is not None:
+        missing = previous.get("verifier_unavailable") or {}
+        if (missing.get("reason") != "http_error" or missing.get("request_id") != interrupted_request
+                or any(v["cannot_judge"] for v in previous["records"])):
+            return False
     if not previous.get("verifier_unavailable") or any(
         v["cannot_judge"] for v in previous["records"]
     ):
@@ -384,7 +397,7 @@ def rejudge_ready(
         previous=previous,
     )
     if not complete_launch_verdict(replacement):
-        raise ValueError(
+        raise IncompleteOwnerReview(
             "owner adjudication did not produce a complete verified record"
         )
     batch = policy.batch_id
@@ -418,7 +431,7 @@ def rejudge_ready(
         channel.completed_requests,
     )
     if policy.pilot:
-        return
+        return True
     current = database.rpc("collection_reward_schedule_v1", {}).get("pending") or {}
     if (
         current.get("job_id") != job_id
@@ -426,6 +439,29 @@ def rejudge_ready(
     ):
         raise ValueError("revised launch evidence is not current")
     finish_launch(database, current, objects, policy, approved)
+
+
+def recover_idle_judge(database, objects, transport, raw, policy, prompt, judge_key):
+    """Use at most one owner retry on an idle pilot tick. Existing reservations fence restarts."""
+    candidates = database.rpc("collection_interrupted_pilot_judges_v1", {"p_batch": policy.batch_id})
+    if not candidates:
+        return
+    # Rotate so one unready packet or an exhausted budget cannot hold up other jobs.
+    candidate = candidates[int(time.time() // 300) % len(candidates)]
+    job, request = candidate["job"], candidate["request"]
+    attempt = str(uuid5(UUID(job), "owner-pilot-outage:" + request))
+    try:
+        recovered = rejudge_ready(
+            database, objects, transport, raw, policy, prompt, judge_key,
+            job, attempt, interrupted_request=request,
+        )
+    except IncompleteOwnerReview:
+        status = "pilot_judge_held"
+    else:
+        if not recovered:
+            return
+        status = "pilot_judge_recovered"
+    print(json.dumps({"batch": policy.batch_id, "job": job, "status": status}), flush=True)
 
 
 class ComparisonSplitHold(ValueError):
@@ -499,6 +535,7 @@ def run_cohort(
     research=None,
     controls=None,
     claim_pack=None,
+    recover_idle_pilot=False,
 ):
     if raw.get("route_witness_sha256"):
         from lab_arena.collection_route_witness import verified_witness
@@ -557,6 +594,8 @@ def run_cohort(
             terms_hash=raw.get("terms_sha256", LEGACY_COMPARISON_TERMS_HASH),
         )
         if not job:
+            if recover_idle_pilot and policy.pilot and raw.get("capture_version") and raw.get("split_manifest"):
+                recover_idle_judge(database, objects, transport, raw, policy, prompt, judge_key)
             break
         try:
             if owner_lookup(job["miner_hotkey"]).coldkey != job["owner_coldkey"]:
@@ -940,6 +979,7 @@ def _run_options(args, p, raw, *, before_claim=None):
                     research=research,
                     controls=controls,
                     claim_pack=claim_pack,
+                    recover_idle_pilot=args.pilot_only and args.max_jobs == 1,
                 )
             if completed == 0 and not args.research_stdio:
                 print(json.dumps({"batch": policy.batch_id, "status": "idle"}), flush=True)

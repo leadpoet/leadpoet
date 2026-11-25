@@ -230,6 +230,7 @@ def _uuid(value):
 
 
 def register_signatures():
+    store.FUNCTION_SIGNATURES.setdefault("collection_interrupted_pilot_judges_v1", (("p_batch", "text"),))
     store.FUNCTION_SIGNATURES.setdefault("collection_training_consents_v1", (("p_batch", "text"),))
     store.FUNCTION_SIGNATURES.setdefault("collection_open_correction_quotes_v1", ())
     store.FUNCTION_SIGNATURES.setdefault("collection_correction_tariff_v1", (("p_batch", "text"),))

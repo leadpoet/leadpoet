@@ -5,6 +5,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+from contextlib import closing
 from tempfile import NamedTemporaryFile
 
 from Leadpoet.utils.subnet_epoch import OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT, read_subnet_epoch_snapshot
@@ -43,7 +44,7 @@ def validator_vectors(rpc, block_hash, hotkeys, epoch, expected, validators):
     return matches
 
 
-def miner_events(events, width):
+def miner_events(events, registry_lengths):
     distributions = {}
     for index, record in enumerate(events):
         event = record["event"]
@@ -57,7 +58,7 @@ def miner_events(events, width):
         mechanism = storage_netuid // 4096
         values = event["attributes"]["emissions"]
         if (record.get("phase") != "Initialization" or mechanism in distributions or not isinstance(values, list)
-                or len(values) != width or any(type(v) is not int or not 0 <= v < 2**64 for v in values)):
+                or len(values) not in registry_lengths or any(type(v) is not int or not 0 <= v < 2**64 for v in values)):
             raise ValueError("ambiguous or invalid SN71 miner emission event")
         distributions[mechanism] = index, values
     if 0 not in distributions:
@@ -97,20 +98,25 @@ def receipt_at(graph, rpc, db, signer, cutover, boundary, epoch, validators):
         raise ValueError("closed signed quotes differ from accepted jobs")
     parent_keys = registry_at(rpc, boundary - 1, parent_hash)
     keys = registry_at(rpc, boundary, block_hash)
-    if keys != parent_keys:
-        raise ValueError("UID registry changed at the distribution boundary")
-    expected = derive_arena_weights(state, keys)
-    checks = {where: validator_vectors(rpc, h, keys, epoch, expected["weights_hash"], validators)
-              for where, h in (("parent", parent_hash), ("boundary", block_hash))}
-    events = miner_events(graph.client.get_events(block_hash), len(keys))
+    expected = derive_arena_weights(state, parent_keys)
+    checks = {where: validator_vectors(rpc, h, registry, epoch, expected["weights_hash"], validators)
+              for where, h, registry in (("parent", parent_hash, parent_keys), ("boundary", block_hash, keys))}
+    events = miner_events(graph.client.get_events(block_hash), {len(parent_keys), len(keys)})
     event_index, amounts = events[0]
-    actual = {keys[i]: amount for i, amount in enumerate(amounts) if amount}
-    target = {keys[i]: w for i, w in zip(expected["sparse_uids"], expected["sparse_weights_u16"])}
+    # Registrations at the boundary must not misattribute an emission. Keep
+    # ambiguous UIDs and both identities for review, then continue next epoch.
+    common = min(len(parent_keys), len(keys))
+    actual = {keys[i]: amount for i, amount in enumerate(amounts)
+              if amount and i < common and keys[i] == parent_keys[i]}
+    ambiguous = [{"uid": i, "parent_hotkey": parent_keys[i] if i < len(parent_keys) else None,
+                  "boundary_hotkey": keys[i] if i < len(keys) else None, "rao": amount}
+                 for i, amount in enumerate(amounts) if amount and (i >= common or keys[i] != parent_keys[i])]
+    target = {parent_keys[i]: w for i, w in zip(expected["sparse_uids"], expected["sparse_weights_u16"])}
     quotes = basis["quotes_microusd"]
     burn = state["burn_hotkey"]
     other_mechanisms = {str(m): sum(values) for m, (_, values) in events.items() if m}
     every_vector_matches = all(v == "matches" for side in checks.values() for v in side.values())
-    recipients_match = (bool(actual) and set(actual) == set(target) and set(quotes) <= set(actual)
+    recipients_match = (bool(actual) and not ambiguous and set(actual) == set(target) and set(quotes) <= set(actual)
                         and not any(other_mechanisms.values()) and expected["champion_share_ppb"] == 0)
     if not quotes:
         recipients_match = (recipients_match and actual.keys() == {burn} and target == {burn: 65535}
@@ -118,7 +124,9 @@ def receipt_at(graph, rpc, db, signer, cutover, boundary, epoch, validators):
     result = "inspect"
     if every_vector_matches and recipients_match:
         result = "collection_recipients_observed" if quotes else "burn_only"
+    # Include the raw totals even if a UID cannot be attributed to a hotkey.
     return {"epoch": epoch, "boundary": boundary, "parent_hash": parent_hash, "block_hash": block_hash,
+            "total_miner_rao": sum(amounts), "ambiguous_recipient_uids": ambiguous,
             "state_hash": state["state_hash"], "closed_at": closed.observed_at, "event_index": event_index,
             "job_count": basis["job_count"], "job_set_sha256": basis["job_set_sha256"], "quotes_microusd": quotes,
             "burn_hotkey": burn, "expected_weights_u16": target, "validators": checks,
@@ -194,8 +202,8 @@ def observe(env, db, directory, previous, weights, validators):
                 raise ValueError("missing following signed epoch during catch-up")
             boundary = following["state_doc"]["valid_from_block"]
         signer = signing.KmsSigner(env["LAB_ARENA_SIGNING_KEY_ID"], region_name="us-east-1")
-        rpc = HttpsJsonRpcTransport(OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT, timeout_seconds=18)
-        receipt = receipt_at(archive_chain(), rpc, db, signer, cutover, boundary, epoch, validators)
+        with closing(HttpsJsonRpcTransport(OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT, timeout_seconds=18)) as rpc:
+            receipt = receipt_at(archive_chain(), rpc, db, signer, cutover, boundary, epoch, validators)
         digest = persist_receipt(receipt_dir, epoch, receipt)
         return {"epoch": epoch, "boundary": boundary, "result": receipt["result"], "receipt_sha256": digest,
                 "epochs_to_catch_up": latest - epoch}

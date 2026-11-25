@@ -16,12 +16,12 @@ def test_closed_epoch_event_is_distinct_from_the_current_signed_target():
                 "event_id":"IncentiveAlphaEmittedToMiners",
                 "attributes":{"netuid":netuid,"emissions":amounts}}}
     events = [event(70,[7,4]), event(71,[90,10]), event(4167,[0,3])]
-    actual = sampler.miner_events(events, 2)
+    actual = sampler.miner_events(events, {2})
     assert actual == {0:(1,[90,10]), 1:(2,[0,3])}
     for bad in (events[:1], [events[1],events[1]], [event(71,[True,1])],
                 [event(71,[24])], [dict(events[1],phase="ApplyExtrinsic")]):
         with pytest.raises(ValueError):
-            sampler.miner_events(bad,2)
+            sampler.miner_events(bad,{2})
 
 
 @pytest.fixture
@@ -34,10 +34,10 @@ def evidence(monkeypatch):
                                           settlement_epoch_id=lambda _:101)}
     graph = SimpleNamespace(finalized_block_hash=lambda n: {1359:"parent",1360:"close"}[n], epoch_subtensor=lambda:None)
     monkeypatch.setattr(sampler, "read_subnet_epoch_snapshot", lambda _client, netuid, block_hash: snapshots[block_hash])
-    monkeypatch.setattr(sampler, "registry_at", lambda _rpc, n, _h: keys)
     matches = dict.fromkeys(watch.VALIDATORS, "matches")
     monkeypatch.setattr(sampler, "validator_vectors", lambda *args: dict(matches))
     config = {"actual": [2000,0,0], "ledger_mismatch": False}
+    monkeypatch.setattr(sampler, "registry_at", lambda _rpc, n, h: config.get("new_registry", keys) if h == "close" else keys)
     def signed(epoch):
         basis = {"schema_version": COLLECTION_BASIS_SCHEMA, "source_epoch": epoch-1, "job_count":0,
                  "job_set_sha256":sha256(b"").hexdigest(), "quotes_microusd":{}, "valuation":None}
@@ -81,6 +81,12 @@ def test_actual_burn_and_paid_recipients_require_ledger_both_vector_checks_and_e
     config["paid"] = False
     matches["yuma"] = "differs"
     assert receipt()["result"] == "inspect"
+    matches["yuma"] = "matches"
+    config["new_registry"] = [keys[2],keys[1],keys[0]]
+    ambiguous = receipt()
+    assert ambiguous["result"] == "inspect" and ambiguous["miner_emissions_rao"] == {}
+    assert ambiguous["ambiguous_recipient_uids"] == [
+        {"uid":0,"parent_hotkey":keys[0],"boundary_hotkey":keys[2],"rao":2000}]
     config["ledger_mismatch"] = True
     with pytest.raises(ValueError, match="accepted jobs"):
         receipt()
@@ -96,7 +102,7 @@ def test_epoch_files_are_idempotent_and_missing_epochs_are_processed_in_order(mo
     monkeypatch.setattr(sampler.chain, "connect_substrate", lambda _:None)
     monkeypatch.setattr(sampler.chain, "ArenaChain", lambda *a:SimpleNamespace(close=lambda:None))
     monkeypatch.setattr(sampler.signing, "KmsSigner", lambda *a, **kw:signer)
-    monkeypatch.setattr(sampler, "HttpsJsonRpcTransport", lambda *a, **kw:None)
+    monkeypatch.setattr(sampler, "HttpsJsonRpcTransport", lambda *a, **kw:SimpleNamespace(close=lambda:None))
     def collect(graph, rpc, db, key, cutover, boundary, epoch, validators):
         fetches.append(epoch)
         return {"epoch":epoch,"boundary":boundary,"result":"burn_only","miner_emissions_rao":{"burn":3}}

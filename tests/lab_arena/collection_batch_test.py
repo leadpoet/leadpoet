@@ -749,3 +749,46 @@ def test_signed_successor_export_keeps_genuine_absolute_slots_and_matching_route
     write_new(wrong, dict(setting, contribution_cap_microusd=1))
     with pytest.raises(ValueError, match="settings differ"):
         progression.reference_for_poll(raw, PROMPT, wrong, db, objects)
+
+
+@pytest.mark.parametrize("pilot", ["witnessed-complete"], indirect=True)
+def test_witnessed_price_binds_original_routes_to_paid_dispatch(pilot, monkeypatch):
+    from copy import deepcopy
+    from lab_arena import collection_route_witness as witness
+    from lab_arena.collection_broker import CollectionBroker, REFERENCE_MODEL, REFERENCE_ROUTE
+    from scripts.run_locked_collection import verify_live_panel
+
+    raw, db, objects, bundle, receipt, public = pilot
+    owner, trusted = keys()
+    approval = review.approve_qualification(bundle, receipt, public, "test-operator", owner, allow_live=True)
+    args = dict(approval=approval, approver_key=trusted)
+    with pytest.raises(ValueError, match="witnessed pricing pilot required"):
+        compile_pilot(db, bundle, receipt, public, objects, **args)
+    with pytest.raises(ValueError, match="differs from the reviewed pricing pilot"):
+        compile_pilot(db, bundle, receipt, public, objects, witnessed_batch=(dict(raw, seed="altered"), PROMPT), **args)
+    # The witness verifier has a separate provider-object test. Enrollment signatures,
+    # the human review contract, the cohort approvals and stored job artifacts here are real test-key bindings.
+    witness_reads = []
+    monkeypatch.setattr(witness, "verified_witness", lambda raw, obj: witness_reads.append((raw, obj)))
+    proof = compile_pilot(db, bundle, receipt, public, objects, witnessed_batch=(raw, PROMPT), **args)
+    assert witness_reads == [(raw, objects)]
+    live = dict(deepcopy(raw), mode="live", pricing_pilot=proof["batch_id"], control_slots={}, drift_slots={},
+                control_artifacts={}, panel_qualification_sha256=judge.digest(approval))
+    policy = load_batch(live, PROMPT)
+    verify_live_panel(live, policy, proof)
+    class Schedule:
+        def rpc(self, name, params):
+            assert name == "collection_reward_schedule_v1" and params == {}
+            return {"pilot_evidence": proof}
+    meter = CollectionBroker(None, Schedule(), None, {"mode":"live", "batch_id":policy.batch_id}, {},
+                             routes=live["routes"])
+    assert not meter._approved_generator_route(REFERENCE_MODEL, REFERENCE_ROUTE)
+    meter.panel_qualification = live["panel_qualification_sha256"]
+    meter.pricing_pilot = live["pricing_pilot"]
+    assert meter._approved_generator_route(REFERENCE_MODEL, REFERENCE_ROUTE)
+    assert not meter._approved_generator_route(REFERENCE_MODEL, "deepinfra/fp8")
+    meter.pricing_pilot = "rq-" + "0"*64
+    assert not meter._approved_generator_route(REFERENCE_MODEL, REFERENCE_ROUTE)
+    proof["route_witness_sha256"] = None
+    with pytest.raises(ValueError, match="generator route"):
+        verify_live_panel(live, policy, proof)

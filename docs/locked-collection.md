@@ -82,6 +82,12 @@ Apply collection migrations 720–729, 732 and 733 in numeric order through the 
 
 Run `python -m scripts.collection_batch prices` on the verified, signed pilot evidence. Champion retirement closes legacy submissions and routes unallocated emissions to the designated burn hotkey. Collection qualification continues during this period. After the pilot qualifies, stage the approved prices under the [validator weights procedure](arena_normal_validator_weights.md). The first accepted, miner-funded live job activates collection rewards for the next epoch. The worker can recover its completed result after a restart. The subnet then quotes each verified completed job 125% of measured pilot cost for that class and model. Payout weights are proportional to those fixed quotes. An epoch with insufficient emissions scales every quote by the same factor. Surplus goes to burn. Each job contributes once, with no carry-forward.
 
+For the witnessed CoreWeave route, price the complete six-model qualification batch with its frozen manifest.
+The resulting approval records the route witness. When preparing live work, retain that witness, the measured
+routes and the per-model caps. Set `pricing_pilot` to the approved full pilot’s `batch_id`, use the approved
+panel digest, and omit the pilot’s control and drift cases. The worker verifies the installed price schedule and
+the original route evidence before a lease. A partially collected reference successor cannot supply live prices.
+
 ## Route check on November 23, 2026
 
 These generator routes passed owner-funded, synthetic tool calls and continuations on both Chat Completions and stateless Responses. Each request pinned the endpoint, disabled fallbacks and required author-approved text distillation, zero retention and denied data collection. Every selected endpoint reported no safety retention. The table shows actual cost across the four successful calls and the number of assistant turns with readable reasoning.

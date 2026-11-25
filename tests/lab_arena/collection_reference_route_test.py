@@ -285,3 +285,26 @@ def test_complete_measured_route_is_frozen_before_slot_zero_and_rechecks_immutab
     with pytest.raises(ValueError, match="approved private route"):
         w.verified_witness(raw, objects)
     assert load_batch(raw, PROMPT).batch_id != complete.batch_id
+
+
+def test_witnessed_paid_batch_requires_prices_from_its_qualified_full_cohort():
+    from lab_arena.collection_route_witness import WITNESS
+    from scripts.run_locked_collection import verify_live_panel
+
+    reference = settings()
+    reference["routes"][REFERENCE_MODEL] = REFERENCE_ROUTE
+    reference["route_witness_sha256"] = WITNESS
+    priced = load_batch(reference, PROMPT)
+    live = dict(reference, mode="live", pricing_pilot=priced.batch_id,
+                panel_qualification_sha256="a" * 64)
+    policy = load_batch(live, PROMPT)
+    assert policy.batch_id.startswith("lq-") and policy.batch_id != priced.batch_id
+    approved = dict(capture_version=reference["capture_version"], batch_id=priced.batch_id,
+                    panel_qualification_sha256="a" * 64, route_witness_sha256=WITNESS,
+                    split_manifest_sha256=judge.digest(reference["split_manifest"]))
+    assert verify_live_panel(live, policy, approved) == "a" * 64
+    for changed in (dict(approved, batch_id="rq-" + "0" * 64),
+                    dict(approved, route_witness_sha256=None),
+                    dict(approved, panel_qualification_sha256="b" * 64)):
+        with pytest.raises(ValueError):
+            verify_live_panel(live, policy, changed)

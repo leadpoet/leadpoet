@@ -37,13 +37,14 @@ def test_freeze_reviewed_fees_uses_each_actual_miner_charge_once(db):
     exercise_ordinary_cutover(db)
 
 
-def exercise_ordinary_cutover(db, *, paid_panel=None, after_cutover=None, retired_anchor=None):
+def exercise_ordinary_cutover(db, *, paid_panel=None, after_cutover=None, retired_anchor=None, template="C01"):
     pg, dsn = db
     miner = Keypair.create_from_uri("//Calibration").ss58_address
     batch = "test-pilot"
     reg, orr, dee = map(str, (uuid4(), uuid4(), uuid4()))
     commit = "1" * 40
-    scenarios = [f"C01-s{2001+i}" for i in range(17)]
+    family = template[0]
+    scenarios = [f"{template}-s{2001+i}" for i in range(17)]
     with pg.connect(**dsn) as conn, conn.cursor() as q:
         q.execute(
             "INSERT INTO public.collection_batches VALUES (%s,'pilot',%s,%s,%s,%s,%s)",
@@ -105,9 +106,9 @@ def exercise_ordinary_cutover(db, *, paid_panel=None, after_cutover=None, retire
                 )
         q.execute("SELECT public.collection_pilot_fees_v1(%s,'[]')", (batch,))
         result = q.fetchone()[0]
-        assert result["prices"] == {"C": dict.fromkeys(MODELS, 150)}
+        assert result["prices"] == {family: dict.fromkeys(MODELS, 150)}
         assert (
-            result["budgets"] == {"C": dict.fromkeys(MODELS, 3000000)}
+            result["budgets"] == {family: dict.fromkeys(MODELS, 3000000)}
             and result["job_count"] == 102
         )
         # Retry liability comes from the original budget. Neither the failed miner charge
@@ -125,7 +126,7 @@ def exercise_ordinary_cutover(db, *, paid_panel=None, after_cutover=None, retire
         q.execute("INSERT INTO public.collection_call_receipts VALUES (%s,'retry',%s,%s,50,200)",(retry,"c"*64,retry))
         q.execute("SELECT public.collection_pilot_fees_v1(%s,'[]')",(batch,))
         counted = q.fetchone()[0]
-        assert counted["prices"]["C"][model] == 145  # ceil(1.25 * (16 * 120 + 50) / 17)
+        assert counted["prices"][family][model] == 145  # ceil(1.25 * (16 * 120 + 50) / 17)
         assert counted["job_count"] == 102 and counted["budgets"] == result["budgets"]
         q.execute("INSERT INTO public.collection_calls(job_id,request_id,provider,key_id,request_hash,reserved_microusd) VALUES (%s,'unknown','openrouter',%s,%s,20)",(job,orr,"f"*64))
         with pytest.raises(pg.Error, match="incomplete"):
@@ -183,7 +184,7 @@ def exercise_ordinary_cutover(db, *, paid_panel=None, after_cutover=None, retire
         with pytest.raises(pg.Error, match="prices or budget differs"):
             q.execute(
                 "INSERT INTO public.collection_reward_cutover VALUES ('finney',71,101,%s)",
-                (Json(dict(proof, prices={"C": dict.fromkeys(MODELS, 10000)})),),
+                (Json(dict(proof, prices={family: dict.fromkeys(MODELS, 10000)})),),
             )
         q.execute("ROLLBACK TO altered")
         # Even an approved pilot cannot activate payments without an earned live quote.
@@ -220,10 +221,10 @@ def exercise_ordinary_cutover(db, *, paid_panel=None, after_cutover=None, retire
                   (live_reg, miner, miner, Json(consent),
                    Json({"key_id": live_orr, "fingerprint": "sha256:" + "3"*64, "ciphertext_b64": "fixture"})))
         assert q.fetchone()[0]["status"] == "enrolled"
-        fee = result["prices"]["C"][MODELS[0]]
+        fee = result["prices"][family][MODELS[0]]
         q.execute("SELECT public.collection_claim_v1(%s,%s,%s,'live',%s,%s,%s,%s,%s,%s)",
-                  (live_job, token, live_batch, commit, Json(["C01-s2001"]), Json(MODELS),
-                   Json(result["prices"]["C"]), Json(result["budgets"]["C"]), TERMS_HASH))
+                  (live_job, token, live_batch, commit, Json([scenarios[0]]), Json(MODELS),
+                   Json(result["prices"][family]), Json(result["budgets"][family]), TERMS_HASH))
         claimed = q.fetchone()[0]
         assert claimed["job_id"] == live_job and claimed["deepline_key_id"] is None
         assert claimed["price_microusd"] == fee and claimed["openrouter_key_id"] == live_orr
@@ -252,7 +253,7 @@ def exercise_ordinary_cutover(db, *, paid_panel=None, after_cutover=None, retire
         pending, champion = q.fetchone()
         assert pending["pending"] == {
             "job_id": live_job, "miner_hotkey": miner, "owner_coldkey": miner, "status": "ready",
-            "batch_id": live_batch, "model": MODELS[0], "scenario_id": "C01-s2001",
+            "batch_id": live_batch, "model": MODELS[0], "scenario_id": scenarios[0],
             "harness_commit": commit, "artifact_sha256": args[-1],
         }
         assert champion == before_launch
@@ -352,3 +353,17 @@ def test_burn_target_cannot_enroll_even_with_a_different_baseline(monkeypatch):
     monkeypatch.setattr(contracts, "validate_signed_request", lambda *a, **kw: signed)
     with pytest.raises(ServiceError, match="collection_ineligible_hotkey"):
         service.handle_collection_request("register", {"authorization": signed, "credentials": creds})
+
+
+def test_train_only_p7_quote_through_paid_job():
+    from pathlib import Path
+
+    scripts = Path(__file__).resolve().parents[2] / "scripts"
+    history = (720, 721, 722, 723, 724, 725, 726, 727, 728, 729, 732, 733, 738, 740, 741, 742, 743, 744, 745, 746, 747, 748, 749, 750, 751)
+    steps = tuple(next(scripts.glob(f"{n}-*.sql")).name for n in history)
+    for pg, dsn in database_with_lab_arena_migration((*DEFAULT_MIGRATIONS, *steps)):
+        with pg.connect(**dsn) as conn, conn.cursor() as cursor:
+            cursor.execute("SELECT public.collection_fee_class_v1(id) FROM unnest(%s::text[]) AS s(id)",
+                           (["P7-s40401", "P6-s40401", "P8-s40401", "P7-s0", "C04-s3012"],))
+            assert [r[0] for r in cursor.fetchall()] == ["P", "P", None, None, "C"]
+        exercise_ordinary_cutover((pg, dsn), template="P7")

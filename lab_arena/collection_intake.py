@@ -178,6 +178,7 @@ def terms(mode, task_scope=TASK_SCOPE):
     return {
         "mode": mode,
         "task_scope": task_scope,
+        "max_selectable_slots_per_utc_day": MAX_DAILY_SLOTS,
         "terms": SYNTHETIC_TRAINING_TERMS,
         "terms_sha256": SYNTHETIC_TRAINING_TERMS_HASH,
         "network": "finney",
@@ -197,6 +198,21 @@ def scope_id(mode):
     return f"finney:71:locked-collection:{mode}"
 
 
+MAX_DAILY_SLOTS = 6
+REGISTRATION_FIELDS = {"credentials_sha256", "terms_sha256", "daily_cap_microusd", "task_scope"}
+
+
+def signed_daily_slots(body):
+    if set(body) - {"max_slots_per_utc_day"} != REGISTRATION_FIELDS:
+        raise IntakeError("collection_consent_invalid")
+    slots = body.get("max_slots_per_utc_day", 1)
+    if type(slots) is not int or not 1 <= slots <= MAX_DAILY_SLOTS:
+        raise IntakeError("collection_consent_invalid")
+    if "max_slots_per_utc_day" in body and body["terms_sha256"] != SYNTHETIC_TRAINING_TERMS_HASH:
+        raise IntakeError("collection_consent_invalid")
+    return slots
+
+
 def _micros(value, minimum):
     if type(value) is not int or not minimum <= value <= MAX_MICROUSD:
         raise IntakeError("collection_money_invalid")
@@ -214,6 +230,11 @@ def _uuid(value):
 
 
 def register_signatures():
+    store.FUNCTION_SIGNATURES.setdefault(
+        "collection_priced_claim_v1",
+        tuple(("p_" + name, kind) for name, kind in _SIGNATURES["claim"]) + (("p_expected_model", "text"),),
+    )
+    store.FUNCTION_SIGNATURES.setdefault("collection_interrupted_pilot_judges_v1", (("p_batch", "text"),))
     store.FUNCTION_SIGNATURES.setdefault("collection_training_consents_v1", (("p_batch", "text"),))
     store.FUNCTION_SIGNATURES.setdefault("collection_open_correction_quotes_v1", ())
     store.FUNCTION_SIGNATURES.setdefault("collection_correction_tariff_v1", (("p_batch", "text"),))
@@ -253,9 +274,9 @@ class CollectionIntake:
     def register(self, signed, owner, credentials):
         """Caller authenticates the scoped signed envelope. Only that envelope is retained."""
         body, hk = signed["body"], signed["hotkey"]
+        signed_daily_slots(body)
         if (
-            set(body) != {"credentials_sha256", "terms_sha256", "daily_cap_microusd", "task_scope"}
-            or body["terms_sha256"] != terms(self.mode, body["task_scope"])["terms_sha256"]
+            body["terms_sha256"] != terms(self.mode, body["task_scope"])["terms_sha256"]
             or signed["round_id"] != scope_id(self.mode)
             or not isinstance(credentials, dict)
             or set(credentials) != set(OPENROUTER_FUNDING_FIELDS)
@@ -310,6 +331,7 @@ class CollectionIntake:
         budgets_microusd,
         *,
         terms_hash=TERMS_HASH,
+        expected_model="*",
         job_id=None,
         lease_token=None,
     ):
@@ -346,8 +368,7 @@ class CollectionIntake:
         token = lease_token if lease_token is not None else store.new_lease_token()
         if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{64}", token):
             raise IntakeError("collection_lease_invalid")
-        job = self._rpc(
-            "claim",
+        return self._lease(token, expected_model,
             job=_uuid(job_id) if job_id else str(uuid.uuid4()),
             token_hash=store.hash_lease_token(token),
             batch=batch_id,
@@ -359,9 +380,17 @@ class CollectionIntake:
             budgets=dict(budgets_microusd),
             terms_hash=terms_hash,
         )
+
+    def _lease(self, token, expected_model, **arguments):
+        if expected_model == "*":
+            job = self._rpc("claim", **arguments)
+        else:
+            job = self._rpc("priced_claim", expected_model=expected_model, **arguments)
+            if expected_model is None:
+                return job
         return dict(job, lease_token=token) if job else None
 
-    def claim_experiment(self, experiment, harness_commit, *, fixed_quote=0):
+    def claim_experiment(self, experiment, harness_commit, *, fixed_quote=0, expected_model="*"):
         """Claim exactly one frozen slot under its own mode and signed consent."""
         if self.mode != experiment.raw["mode"] or not re.fullmatch(r"xp-[0-9a-f]{64}", experiment.batch_id):
             raise IntakeError("collection_correction_pilot_required")
@@ -373,15 +402,14 @@ class CollectionIntake:
             raise IntakeError("collection_harness_unpinned")
         token = store.new_lease_token()
         models = [arm["model"] for _, arm, _ in experiment.slots]
-        job = self._rpc(
-            "claim", job=str(uuid.uuid4()), token_hash=store.hash_lease_token(token),
+        return self._lease(token, expected_model,
+            job=str(uuid.uuid4()), token_hash=store.hash_lease_token(token),
             batch=experiment.batch_id, mode=self.mode, commit=harness_commit,
             scenarios=[case["scenario_id"] for case, _, _ in experiment.slots], models=models,
             prices=dict.fromkeys(models, fixed_quote),
             budgets={arm["model"]:arm["budget_microusd"] for _, arm, _ in experiment.slots},
             terms_hash=terms_hash,
         )
-        return dict(job, lease_token=token) if job else None
 
     def credential(self, job_id, lease_token, provider):
         if provider not in PROVIDERS:

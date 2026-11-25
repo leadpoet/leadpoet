@@ -631,9 +631,21 @@ def registered_bundle(
                 record["artifact_sha256"] is None, "conflicting failed manifest"
             )
             continue
-        manifest = verified(
-            rid, "manifest", {"sha256": record["artifact_sha256"]}, 1024 * 1024
-        )
+        effective = record.get("pilot_review_sha256", record["artifact_sha256"])
+        if "pilot_review_sha256" in record:
+            judge._require(
+                policy.pilot
+                and record["status"] == "accepted"
+                and effective != record["artifact_sha256"],
+                "invalid pilot review overlay",
+            )
+        manifest = verified(rid, "manifest", {"sha256": effective}, 1024 * 1024)
+        if "pilot_review_sha256" in record:
+            judge._require(
+                manifest.get("judge_recovery", {}).get("prior_manifest_sha256")
+                == record["artifact_sha256"],
+                "pilot review is not linked to its original manifest",
+            )
         judge._require(
             manifest["job_id"] == rid
             and manifest["batch_id"] == record["batch_id"]
@@ -661,7 +673,7 @@ def registered_bundle(
                 1024 * 1024,
             )
             judge._require(
-                not policy.pilot
+                (not policy.pilot or "pilot_review_sha256" in record)
                 and "judge_recovery" not in prior
                 and not prior.get("control")
                 and re.fullmatch(
@@ -790,7 +802,7 @@ def registered_bundle(
             {
                 "packet": packet,
                 "assessment": assessment,
-                "manifest_sha256": record["artifact_sha256"],
+                "manifest_sha256": effective,
                 **({"control_sha256": control["sha256"][7:]} if control else {}),
             }
         )

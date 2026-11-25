@@ -1,4 +1,4 @@
-"""Read private collection counters and compare three public validator vectors. Never dispatch work."""
+"""Read collection counters, finalized validator weights and closed-epoch miner emissions."""
 
 import argparse
 from datetime import datetime, timezone
@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 
+from lab_arena import collection_distributions
 from scripts.lab_arena_restart_claim_guard import _read_scoped_environment
 
 VALIDATORS = {
@@ -22,11 +23,7 @@ def validator_snapshot(env, db):
     from lab_arena.store import ArenaStore
     from lab_arena.local_weight_signer import HttpsJsonRpcTransport
     from Leadpoet.utils.subnet_epoch import OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
-    from leadpoet_canonical.arena_weights import compare_weights_hash, derive_arena_weights, verify_accepted_weight_state_signature
-    from leadpoet_canonical.chain_source_v2 import (
-        CHAIN_RPC_METHOD, decode_selective_metagraph_result, decode_weights_storage,
-        encode_selective_metagraph_params, weights_storage_key,
-    )
+    from leadpoet_canonical.arena_weights import derive_arena_weights, verify_accepted_weight_state_signature
 
     config = chain.ArenaChainConfig(env["LAB_ARENA_CHAIN_ENDPOINT"], 71, "finney", 15)
     reader = chain.ArenaChain(config, chain.connect_substrate(config))
@@ -39,7 +36,7 @@ def validator_snapshot(env, db):
     weight_start = store.collection_reward_start_epoch()
     state = store.get_weight_state("finney", 71, epoch)
     if not state:
-        return {"block": snap.current_block, "epoch": epoch, "weight_start_epoch": weight_start, "signed_state": False}
+        return {"block": snap.current_block, "epoch": epoch, "last_epoch_block": snap.last_epoch_block, "weight_start_epoch": weight_start, "signed_state": False}
     key = signing.KmsSigner(env["LAB_ARENA_SIGNING_KEY_ID"], region_name="us-east-1")
     doc = state["state_doc"]
     verify_accepted_weight_state_signature(doc, public_key_der=key.public_key_der, expected_public_key_hash=key.public_key_hash)
@@ -48,20 +45,9 @@ def validator_snapshot(env, db):
         raise ValueError("signed state does not belong to this finalized epoch")
     rpc = HttpsJsonRpcTransport(OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT, timeout_seconds=15)
     block = snap.block_hash
-    meta = rpc.call(method="state_call", params=[CHAIN_RPC_METHOD, encode_selective_metagraph_params(netuid=71), block], request_id=1)
-    registry = decode_selective_metagraph_result(meta)
-    if registry["netuid"] != 71 or registry["block"] != snap.current_block:
-        raise ValueError("validator registry does not match the finalized SN71 block")
-    hotkeys = registry["hotkeys"]
+    hotkeys = collection_distributions.registry_at(rpc, snap.current_block, block)
     expected = derive_arena_weights(doc, hotkeys)
-    matches = {}
-    for name, hotkey in VALIDATORS.items():
-        if hotkey not in hotkeys:
-            matches[name] = "unregistered"
-            continue
-        storage = weights_storage_key(netuid=71, validator_uid=hotkeys.index(hotkey))
-        vector = decode_weights_storage(rpc.call(method="state_getStorage", params=[storage, block], request_id=2))
-        matches[name] = "matches" if compare_weights_hash(71, epoch, vector) == expected["weights_hash"] else "differs"
+    matches = collection_distributions.validator_vectors(rpc, block, hotkeys, epoch, expected["weights_hash"], VALIDATORS)
     basis = doc["reward_basis"]
     proof = {"basis_schema": basis["schema_version"], "quoted_jobs_match": None, "unweighted_funders": None}
     if "collection_share_ppb" in expected:
@@ -81,7 +67,7 @@ def validator_snapshot(env, db):
                     and (previous["network"], previous["netuid"], previous["genesis_hash"]) == scope
                     and doc["burn_hotkey"] == previous["burn_hotkey"] and weighted == {doc["burn_hotkey"]}
                     and expected["sparse_weights_u16"] == [65535] and expected["burned_residual_ppb"] == 1_000_000_000)
-    return {"block": snap.current_block, "block_hash": block, "epoch": epoch, "weight_start_epoch": weight_start,
+    return {"block": snap.current_block, "block_hash": block, "epoch": epoch, "last_epoch_block": snap.last_epoch_block, "weight_start_epoch": weight_start,
             "signed_state": True, **proof,
             "validators": matches, "champion_ppb": expected["champion_share_ppb"],
             "collection_ppb": expected.get("collection_share_ppb", 0), "burn_ppb": expected["burned_residual_ppb"]}
@@ -159,7 +145,7 @@ def edge_snapshot(directory, prior):
 def notices(data):
     """Milestones are monotone where possible. Keep idle polls and ordinary blocks quiet."""
     signals = {}
-    for name in ("collection", "worker", "weights", "edge"):
+    for name in ("collection", "worker", "weights", "edge", "distribution"):
         if name not in data:
             signals[name + " read unavailable"] = 1
     collection = data.get("collection", {})
@@ -220,6 +206,11 @@ def notices(data):
             else:
                 signals["post-cutover collection basis and zero champion component verified on all three validators"] = verified
                 signals["inspect post-cutover reward evidence"] = not verified
+    closed = data.get("distribution", {})
+    signals["closed miner distribution requires inspection"] = closed.get("result") == "inspect"
+    signals["finalized miner distribution paid only the designated burn hotkey"] = closed.get("result") == "burn_only"
+    signals["finalized collection recipients received miner emissions"] = closed.get("result") == "collection_recipients_observed"
+    signals["catching up on unobserved closed distributions"] = bool(closed.get("epochs_to_catch_up"))
     return {key: value for key, value in signals.items() if value}
 
 
@@ -229,7 +220,7 @@ def save(directory, data):
     previous = json.loads(path.read_text()) if path.exists() else {}
     # An unread source means unknown. Keep its last signals until it can be read again.
     previous_observations = previous.get("last_read", {})
-    last_read = {name: data.get(name, previous_observations.get(name)) for name in ("collection", "worker", "weights", "edge")}
+    last_read = {name: data.get(name, previous_observations.get(name)) for name in ("collection", "worker", "weights", "edge", "distribution")}
     current = notices({name: value for name, value in last_read.items() if value is not None})
     for name in last_read:
         if name not in data:
@@ -267,6 +258,7 @@ def main():
         data["collection"] = db.rpc("collection_participation_v1", {})
     except Exception as exc:
         data["read_errors"]["collection"] = type(exc).__name__
+    prior = {}
     try:
         status = args.state_directory / "status.json"
         prior = json.loads(status.read_text()).get("last_read", {}) if status.exists() else {}
@@ -284,6 +276,14 @@ def main():
             data["read_errors"]["weights"] = "StoreUnavailable"
     except Exception as exc:
         data["read_errors"]["weights"] = type(exc).__name__
+    try:
+        if db is not None:
+            data["distribution"] = collection_distributions.observe(
+                env, db, args.state_directory, prior.get("distribution") or {}, data.get("weights"), VALIDATORS)
+        else:
+            data["read_errors"]["distribution"] = "StoreUnavailable"
+    except Exception as exc:
+        data["read_errors"]["distribution"] = type(exc).__name__
     save(args.state_directory, data)
     return bool(data["read_errors"])
 

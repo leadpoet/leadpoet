@@ -52,6 +52,21 @@ VERSIONS = {
 }
 
 
+# Each additional route requires a witnessed, independently frozen private reference batch.
+REFERENCE_MODEL = "deepseek/deepseek-v4-pro-0813"
+REFERENCE_ROUTE = "coreweave/fp8"
+
+
+def approved_reference_route(model, tag, batch, mode):
+    return (
+        model == REFERENCE_MODEL
+        and tag == REFERENCE_ROUTE
+        and mode == "pilot"
+        and isinstance(batch, str)
+        and re.fullmatch(r"r[sq]-[0-9a-f]{64}", batch) is not None
+    )
+
+
 def batch_versions(routes):
     if set(routes) == set(VERSIONS):
         return VERSIONS
@@ -73,7 +88,7 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def model_only_rejection(request, response):
+def model_only_rejection(request, response, *, batch=None, mode=None):
     """Recognise the provider's pre-generation policy, independently of delayed billing.
 
     https://openrouter.ai/docs/api/reference/errors-and-debugging
@@ -103,7 +118,13 @@ def model_only_rejection(request, response):
             "data_collection",
             "max_price",
         }
-        or policy.get("only") != [route.tag]
+        or (
+            policy.get("only") != [route.tag]
+            and not (
+                policy.get("only") == [REFERENCE_ROUTE]
+                and approved_reference_route(model, REFERENCE_ROUTE, batch, mode)
+            )
+        )
         or policy.get("allow_fallbacks") is not False
         or policy.get("zdr") is not True
         or policy.get("enforce_distillable_text") is not True
@@ -171,7 +192,7 @@ def model_only_rejection(request, response):
         "no_delivered_output": True,
         "request_fee_ceiling": 0,
         "model": model,
-        "allowed_route": route.tag,
+        "allowed_route": policy["only"][0],
         "policy_sources": {
             "https://openrouter.ai/pricing": "sha256:4f3d58a68dea4d8668d3aaf472d71e955462e56aa822dfffb7e71c9ebd72510f",
             "https://openrouter.ai/docs/api/reference/errors-and-debugging": "sha256:7dc5b229ece76de22d8842e2009743cffd999cbcd00c3a738797c71e104537d0",
@@ -203,8 +224,25 @@ class CollectionBroker:
         self.versions = batch_versions(routes)
         self.catalog = catalog
         self.judge_key = judge_key
+        self.pricing_pilot = None
         self.panel_qualification = None
         self.record_generation = None
+
+    def _approved_generator_route(self, model, route):
+        if model not in GENERATOR_ROUTES:
+            return False
+        batch, mode = self.job.get("batch_id"), self.job.get("mode")
+        witnessed_live = mode == "live" and re.fullmatch(r"lq-[0-9a-f]{64}", str(batch))
+        if model != REFERENCE_MODEL or not witnessed_live:
+            return route == GENERATOR_ROUTES[model].tag or approved_reference_route(model, route, batch, mode)
+        if (route != REFERENCE_ROUTE or not self.panel_qualification
+                or not re.fullmatch(r"rq-[0-9a-f]{64}", str(self.pricing_pilot))):
+            return False
+        from lab_arena.collection_route_witness import WITNESS
+        approved = (self.database.rpc("collection_reward_schedule_v1", {}) or {}).get("pilot_evidence", {})
+        return (approved.get("batch_id") == self.pricing_pilot
+                and approved.get("panel_qualification_sha256") == self.panel_qualification
+                and approved.get("route_witness_sha256") == WITNESS)
 
     def _rpc(self, name, request_id, **params):
         return self.database.rpc(
@@ -336,7 +374,12 @@ class CollectionBroker:
             and self.record_generation
             and not broker._response_contains_credential(response, secret)
         ):
-            policy_proof = model_only_rejection(json.loads(content), response)
+            policy_proof = model_only_rejection(
+                json.loads(content),
+                response,
+                batch=self.job.get("batch_id"),
+                mode=self.job.get("mode"),
+            )
             if policy_proof:
                 policy_ref = self.record_generation(
                     request_id,
@@ -496,9 +539,7 @@ class CollectionBroker:
             ):
                 raise CollectionCallError("unsupported model request fields")
         route = self.routes[model]
-        if judge is None and (
-            model not in GENERATOR_ROUTES or GENERATOR_ROUTES[model].tag != route
-        ):
+        if judge is None and not self._approved_generator_route(model, route):
             raise CollectionCallError("unverified generator route")
         price = self.pricing["models"][model]
         policy = {

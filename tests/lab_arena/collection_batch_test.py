@@ -40,13 +40,39 @@ class Database:
         raise AssertionError(name)
 
 
+def original_journal(objects, *, batch, rid, model, row):
+    from lab_arena.collection_journal import WorkflowJournal
+
+    j = WorkflowJournal(objects, batch, rid)
+    j.append(
+        {
+            "index": 0,
+            "kind": "start",
+            "model": model,
+            "messages": [],
+            "tools": row["tools"],
+        }
+    )
+    for i, msg in enumerate(row["messages"], 1):
+        j.append({"index": i, "kind": "reply", "message": msg})
+    j.append({"index": len(row["messages"]) + 1, "kind": "finish"})
+    j.finish("completed")
+    return j.hashes
+
+
 @pytest.fixture
 def pilot(tmp_path, request):
     db = Database()
     objects = LocalObjectStore(tmp_path / "objects")
     variant = getattr(request, "param", 22)
-    exportable = variant == "training-pack"
-    candidate = variant in {"open-panel", "training-pack"}
+    witnessed = variant in {"witnessed-complete", "reference-60"}
+    exportable = variant == "training-pack" or witnessed
+    candidate = variant in {
+        "open-panel",
+        "training-pack",
+        "witnessed-complete",
+        "reference-60",
+    }
     checkpointed = variant == "checkpointed" or exportable
     split = SPLIT
     if exportable:
@@ -114,12 +140,17 @@ def pilot(tmp_path, request):
     }
     if exportable:
         raw["terms_sha256"] = intake.SYNTHETIC_TRAINING_TERMS_HASH
+    if variant == "reference-60":
+        raw["scenario_ids"] = [f"P7-s{n+2000}" for n in range(10)]
+        raw["control_slots"] = {}
+        raw["drift_slots"] = {}
+        drift_slots = []
     private_cases = {}
     source_policy = judge.BatchPolicy(
         "prior-drift-baseline", "earlier-seed", judge.digest(PROMPT), pilot=True,
         fable_version=tuple(models)[0], astra_version=tuple(models)[1],
     )
-    for i in [*drift_slots, 130, 131]:
+    for i in ([] if variant == "reference-60" else [*drift_slots, 130, 131]):
         src = f"reference-{i}"
         sid = raw["scenario_ids"][i // 6]
         original = dict(
@@ -171,6 +202,14 @@ def pilot(tmp_path, request):
 
     if checkpointed:
         raw["capture_version"] = COMPARISON_CAPTURE
+    if witnessed:
+        from lab_arena.collection_route_witness import WITNESS
+        from lab_arena.collection_broker import REFERENCE_MODEL, REFERENCE_ROUTE
+        from lab_arena.collection_generation import CAPTURE_V2
+
+        raw.update(route_witness_sha256=WITNESS, capture_version=CAPTURE_V2)
+        raw["routes"][REFERENCE_MODEL] = REFERENCE_ROUTE
+
     agent, builder = comparison_revisions(raw)
     policy = load_batch(raw, PROMPT)
     for i in range(len(raw["scenario_ids"]) * len(MODELS)):
@@ -198,11 +237,14 @@ def pilot(tmp_path, request):
 
             job.update(attempt=1, miner_hotkey=wallet.ss58_address)
             p["split"] = stamp
+            if variant == "reference-60":
+                p["final_output"] = f"Original model output for slot {i}"
             billing = {
                 "unresolved": 0,
                 "generator_calls": 0 if i in private_cases else 5,
                 "miner_cost_microusd": 0 if i in private_cases else 50,
             }
+            job.update(billing)
             db.grants.append(
                 dict(
                     job_id=rid,
@@ -256,27 +298,11 @@ def pilot(tmp_path, request):
         ]:
             manifest[field] = store_artifact(objects, policy.batch_id, rid, kind, value)
         if checkpointed:
-            from lab_arena.collection_journal import WorkflowJournal
-
             manifest["capture_version"] = raw["capture_version"]
             if i not in private_cases:
-                journal = WorkflowJournal(objects, policy.batch_id, rid)
-                journal.append(
-                    {
-                        "index": 0,
-                        "kind": "start",
-                        "model": model,
-                        "messages": [],
-                        "tools": row["tools"],
-                    }
+                manifest["events"] = original_journal(
+                    objects, batch=policy.batch_id, rid=rid, model=model, row=row
                 )
-                for m in row["messages"]:
-                    journal.append(
-                        {"index": len(journal.hashes), "kind": "reply", "message": m}
-                    )
-                journal.append({"index": len(journal.hashes), "kind": "finish"})
-                journal.finish("completed")
-                manifest["events"] = journal.hashes
         if i in private_cases:
             manifest.pop("generator")
             manifest["control"] = store_artifact(
@@ -287,6 +313,8 @@ def pilot(tmp_path, request):
         )["sha256"]
         db.rows.append(job)
     bundle = release.source_bundle(raw, PROMPT, db, objects)
+    if variant == "reference-60":
+        return raw, db, objects, bundle, None, None
     private, public = keys()
     receipt = review.sign_review(bundle, complete_marks(bundle), "test-human", private)
     return raw, db, objects, bundle, receipt, public
@@ -525,3 +553,307 @@ def test_qualified_six_model_export_checks_every_signed_job(pilot, tmp_path):
             raw, PROMPT, db, objects, tmp_path / "tampered.zip", qualification=qual
         )
     assert not (tmp_path / "tampered.zip").exists()
+
+
+@pytest.mark.parametrize("pilot", ["witnessed-complete"], indirect=True)
+def test_signed_successor_export_keeps_genuine_absolute_slots_and_matching_route(
+    pilot, tmp_path, monkeypatch
+):
+    import json
+    from zipfile import ZipFile
+    from lab_arena import collection_route_witness as witness
+    from lab_arena.collection_broker import REFERENCE_MODEL, REFERENCE_ROUTE
+    from lab_arena.collection_intake import MODELS, GENERATOR_ROUTES
+
+    qualraw, reference, objects, bundle, _, _ = pilot
+    reviewer, rkey = keys()
+    approver, akey = keys()
+    receipt = review.sign_review(
+        bundle, complete_marks(bundle), "independent-human", reviewer
+    )
+    approval = review.approve_qualification(
+        bundle, receipt, rkey, "operator-test", approver
+    )
+    qualification = dict(
+        raw=qualraw,
+        prompt=PROMPT,
+        receipt=receipt,
+        reviewer_key=rkey,
+        approval=approval,
+        approver_key=akey,
+    )
+    initial = deepcopy(qualraw)
+    initial.pop("route_witness_sha256")
+    initial.update(
+        name="new-case",
+        scenario_ids=qualraw["scenario_ids"][:1],
+        control_slots={},
+        drift_slots={},
+        control_artifacts={},
+    )
+    initial["routes"][REFERENCE_MODEL] = GENERATOR_ROUTES[REFERENCE_MODEL].tag
+    parent = load_batch(initial, PROMPT)
+    raw = deepcopy(initial)
+    raw["routes"][REFERENCE_MODEL] = REFERENCE_ROUTE
+    raw["reference_successor"] = {
+        "parent": parent.batch_id,
+        "next_slot": 1,
+        "owner_witness_sha256": witness.WITNESS,
+    }
+    target = load_batch(raw, PROMPT)
+    key = next(r for r in reference.rows if r["slot"] == 1)
+    real = dict(
+        key,
+        batch_id=target.batch_id,
+        job_id="new-successor-only",
+        budget_microusd=raw["budgets_microusd"][REFERENCE_MODEL],
+    )
+    original = next(x for x in bundle["runs"] if x["packet"]["run_id"] == key["job_id"])
+    rid = real["job_id"]
+    reader = release.read_artifact
+    previous = reader(
+        objects,
+        key["batch_id"],
+        key["job_id"],
+        "manifest",
+        {"sha256": key["artifact_sha256"]},
+        1 << 20,
+    )
+    generator = reader(
+        objects,
+        key["batch_id"],
+        key["job_id"],
+        "generator",
+        previous["generator"],
+        128 << 20,
+    )
+    generator.update(
+        run=rid, evidence={"events": [{"kind": "reply"} for _ in range(5)]}
+    )
+    pkt = dict(original["packet"], run_id=rid)
+    pkt["checks"] = dict(
+        pkt["checks"], answered=True, shape=True, code_grade=True, no_hard_failure=True
+    )
+    a = judge.assign_judges(target, [assignment(real)])[rid]
+    assessment = judge.judge_run(target, a, pkt, Caller(), prompt=PROMPT)
+    manifest = dict(
+        previous, batch_id=target.batch_id, job_id=rid, judge_policy=asdict(target)
+    )
+    for k, n, val in [
+        ("packet", "judge-input", pkt),
+        ("assessment", "judge-output", assessment),
+        ("generator", "generator", generator),
+    ]:
+        manifest[k] = store_artifact(objects, target.batch_id, rid, n, val)
+    manifest["events"] = original_journal(
+        objects, batch=target.batch_id, rid=rid, model=real["model"], row=generator
+    )
+    real["artifact_sha256"] = store_artifact(
+        objects, target.batch_id, rid, "manifest", manifest
+    )["sha256"]
+    target_data = Database()
+    target_data.rows = [real]
+    target_data.grants = [dict(reference.grants[1], job_id=rid)]
+
+    class TwoBatches:
+        def rpc(self, n, params):
+            return (
+                reference
+                if params["p_batch"] == bundle["policy"]["batch_id"]
+                else target_data
+            ).rpc(n, params)
+
+    db = TwoBatches()
+    # The owner witness verifier is tested separately and exercised with its real
+    # production S3 originals. The fixture keeps real qualification and miner signatures.
+    monkeypatch.setattr(
+        witness,
+        "verified_witness",
+        lambda raw, objects: {
+            "owner_witness_sha256": witness.WITNESS,
+            "model": REFERENCE_MODEL,
+        },
+    )
+    dest = tmp_path / "successor.zip"
+    meta = release.write_exports(
+        raw, PROMPT, db, objects, dest, qualification=qualification
+    )
+    assert (
+        meta["rows"] == 1
+        and meta["actual_slots"] == [1]
+        and meta["complete_qualification_batch"] is False
+    )
+    with ZipFile(dest) as z:
+        row = json.loads(z.read("trajectories/" + rid + ".jsonl"))
+        assert row["slot"] == 1 and row["model"] == REFERENCE_MODEL
+        assert (
+            row["provider_route"] == REFERENCE_ROUTE
+            and row["reference_successor"] == raw["reference_successor"]
+        )
+        assert not any(key["job_id"] in name for name in z.namelist())
+    with pytest.raises(ValueError, match="private reference"):
+        release.source_bundle(raw, PROMPT, db, objects)
+    bad = deepcopy(raw)
+    bad["reference_successor"]["owner_witness_sha256"] = "sha256:" + "0" * 64
+    with pytest.raises(ValueError):
+        release.write_exports(
+            bad, PROMPT, db, objects, tmp_path / "bad.zip", qualification=qualification
+        )
+    alt = deepcopy(qualraw)
+    alt["budgets_microusd"][REFERENCE_MODEL] += 1
+    with pytest.raises(ValueError, match="matches the witnessed route"):
+        witness.verify_matching_panel(raw, target, alt, PROMPT, db, successor=True)
+    with pytest.raises(ValueError, match="independent reviewer"):
+        release.write_exports(raw, PROMPT, db, objects, tmp_path / "no-review.zip")
+
+    from scripts import collection_reference_followup as progression
+    from scripts.collection_review import write_new
+
+    monkeypatch.setattr(progression, "verified_witness", witness.verified_witness)
+    independently_frozen = deepcopy(qualraw)
+    independently_frozen.update(
+        name="full-reference",
+        scenario_ids=qualraw["scenario_ids"][:10],
+        control_slots={},
+        drift_slots={},
+        control_artifacts={},
+    )
+    future = load_batch(independently_frozen, PROMPT)
+    setting = {
+        "schema": "collection.one-reference-followup.v1",
+        "after_batch_id": target.batch_id,
+        "next_batch_id": future.batch_id,
+        "next_batch_file": "complete-reference.json",
+        "contribution_cap_microusd": sum(
+            independently_frozen["budgets_microusd"].values()
+        )
+        * 10,
+    }
+    cfg = tmp_path / "handoff.json"
+    write_new(cfg, setting)
+    write_new(tmp_path / "complete-reference.json", independently_frozen)
+    assert progression.reference_for_poll(raw, PROMPT, cfg, db, objects) == raw
+    # Settled failed attempts whose entire original budget was consumed cannot be retried.
+    # The independent passing, reviewed authentic slot above still supplies the quality evidence.
+    for i in range(2, 6):
+        budget = raw["budgets_microusd"][MODELS[i]]
+        item = dict(
+            real,
+            model=MODELS[i],
+            slot=i,
+            status="failed",
+            artifact_sha256=None,
+            job_id=f"terminal-{i}",
+            budget_microusd=budget,
+            miner_cost_microusd=budget,
+        )
+        target_data.rows.append(item)
+        target_data.grants.append(
+            dict(
+                target_data.grants[0], job_id=item["job_id"], miner_cost_microusd=budget
+            )
+        )
+    assert (
+        progression.reference_for_poll(raw, PROMPT, cfg, db, objects)
+        == independently_frozen
+    )
+    target_data.rows[-1]["unresolved"] = 1
+    assert progression.reference_for_poll(raw, PROMPT, cfg, db, objects) == raw
+    wrong = tmp_path / "wrong.json"
+    write_new(wrong, dict(setting, contribution_cap_microusd=1))
+    with pytest.raises(ValueError, match="settings differ"):
+        progression.reference_for_poll(raw, PROMPT, wrong, db, objects)
+
+
+@pytest.mark.parametrize("pilot", ["reference-60"], indirect=True)
+def test_original_sealer_uses_30_actual_distinct_paired_packets(pilot, monkeypatch):
+    from scripts import collection_qualification_followup as h
+
+    ref, db, objects, bundle, _, _ = pilot
+    # The CoreWeave owner artifact is exercised against real S3 and in a dedicated test.
+    monkeypatch.setattr(h, "verified_witness", lambda *a: {"checked": True})
+    raw = dict(
+        deepcopy(ref),
+        name="independent-24",
+        scenario_ids=[f"P7-s{2000+i}" for i in range(24)],
+        seed="freeze-before",
+    )
+    pending = {"schema": "sn71.p7.qualification-draft.v1", "manifest": raw}
+    case = bundle["runs"][0]["packet"]
+    plants = []
+    for i, v in enumerate((False, True)):
+        public = dict(case, task=f"Reviewed planted statement {i}")
+        plants.append(
+            controls.planted_case(
+                public,
+                expected=v,
+                reviewer="fixture",
+                rationale="Compared to original ledger",
+                source_sha256="sha256:" + judge.digest(public),
+                source_generator="human",
+            )
+        )
+    cohort, pack, bid = h.seal(pending, PROMPT, ref, plants, db, objects)
+    assert (
+        len(cohort["control_slots"]) == 2
+        and len(cohort["drift_slots"]) == 30
+        and len(pack["cases"]) == 32
+    )
+    measured = [c["provenance"] for c in pack["cases"].values() if c["kind"] == "drift"]
+    assert len({m["source_run_id"] for m in measured}) == 30
+    assert all(
+        m["source_batch_id"] == bundle["policy"]["batch_id"]
+        and m["source_manifest_sha256"]
+        for m in measured
+    )
+    assert (
+        bid == load_batch(cohort, PROMPT).batch_id
+        and bid != bundle["policy"]["batch_id"]
+    )
+    for i in range(40):
+        db.rows[i]["generator_calls"] = db.grants[i]["generator_calls"] = 0
+    with pytest.raises(ValueError, match="30 distinct measured"):
+        h.seal(pending, PROMPT, ref, plants, db, objects)
+
+
+@pytest.mark.parametrize("pilot", ["witnessed-complete"], indirect=True)
+def test_witnessed_price_binds_original_routes_to_paid_dispatch(pilot, monkeypatch):
+    from copy import deepcopy
+    from lab_arena import collection_route_witness as witness
+    from lab_arena.collection_broker import CollectionBroker, REFERENCE_MODEL, REFERENCE_ROUTE
+    from scripts.run_locked_collection import verify_live_panel
+
+    raw, db, objects, bundle, receipt, public = pilot
+    owner, trusted = keys()
+    approval = review.approve_qualification(bundle, receipt, public, "test-operator", owner, allow_live=True)
+    args = dict(approval=approval, approver_key=trusted)
+    with pytest.raises(ValueError, match="witnessed pricing pilot required"):
+        compile_pilot(db, bundle, receipt, public, objects, **args)
+    with pytest.raises(ValueError, match="differs from the reviewed pricing pilot"):
+        compile_pilot(db, bundle, receipt, public, objects, witnessed_batch=(dict(raw, seed="altered"), PROMPT), **args)
+    # The witness verifier has a separate provider-object test. Enrollment signatures,
+    # the human review contract, the cohort approvals and stored job artifacts here are real test-key bindings.
+    witness_reads = []
+    monkeypatch.setattr(witness, "verified_witness", lambda raw, obj: witness_reads.append((raw, obj)))
+    proof = compile_pilot(db, bundle, receipt, public, objects, witnessed_batch=(raw, PROMPT), **args)
+    assert witness_reads == [(raw, objects)]
+    live = dict(deepcopy(raw), mode="live", pricing_pilot=proof["batch_id"], control_slots={}, drift_slots={},
+                control_artifacts={}, panel_qualification_sha256=judge.digest(approval))
+    policy = load_batch(live, PROMPT)
+    verify_live_panel(live, policy, proof)
+    class Schedule:
+        def rpc(self, name, params):
+            assert name == "collection_reward_schedule_v1" and params == {}
+            return {"pilot_evidence": proof}
+    meter = CollectionBroker(None, Schedule(), None, {"mode":"live", "batch_id":policy.batch_id}, {},
+                             routes=live["routes"])
+    assert not meter._approved_generator_route(REFERENCE_MODEL, REFERENCE_ROUTE)
+    meter.panel_qualification = live["panel_qualification_sha256"]
+    meter.pricing_pilot = live["pricing_pilot"]
+    assert meter._approved_generator_route(REFERENCE_MODEL, REFERENCE_ROUTE)
+    assert not meter._approved_generator_route(REFERENCE_MODEL, "deepinfra/fp8")
+    meter.pricing_pilot = "rq-" + "0"*64
+    assert not meter._approved_generator_route(REFERENCE_MODEL, REFERENCE_ROUTE)
+    proof["route_witness_sha256"] = None
+    with pytest.raises(ValueError, match="generator route"):
+        verify_live_panel(live, policy, proof)

@@ -41,6 +41,14 @@ def write_new(path, value):
         os.fsync(f.fileno())
 
 
+def blind_files(jobs, batch_sha256=None):
+    return {
+        **({"batch_sha256": batch_sha256} if batch_sha256 else {}),
+        "sample_sha256": judge.digest(jobs),
+        "marks": {alias: dict.fromkeys(judge.PARTS) for alias in jobs},
+    }
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
@@ -102,9 +110,9 @@ def main(argv=None):
                 args.marks_template,
                 {
                     **extra,
-                    **({"batch_sha256": judge.digest(bundle)} if args.for_qualification else {}),
-                    "sample_sha256": judge.digest(jobs),
-                    "marks": {alias: dict.fromkeys(judge.PARTS) for alias in jobs},
+                    **blind_files(
+                        jobs, judge.digest(bundle) if args.for_qualification else None
+                    ),
                 },
             )
             print(

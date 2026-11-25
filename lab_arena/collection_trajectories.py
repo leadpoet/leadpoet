@@ -16,7 +16,7 @@ SCHEMA = "collection.trajectories.v1"
 LABEL = re.compile(r"[A-Za-z0-9_ .:-]{1,128}")
 
 
-def verified_grants(database, batch, jobs, *, mode, scope, digest):
+def verified_grants(database, batch, jobs, *, mode, scope, digest, allow_pending=False):
     """Use the original signed registration of each actual job, including retries."""
     from lab_arena import collection_intake as intake
     from lab_arena.chain import verify_hotkey_signature
@@ -50,14 +50,9 @@ def verified_grants(database, batch, jobs, *, mode, scope, digest):
             now=envelope["timestamp"],
             verify_signature=verify_hotkey_signature,
         )
-        allowed_body = {
-            "credentials_sha256",
-            "terms_sha256",
-            "daily_cap_microusd",
-            "task_scope",
-        }
+        signed_slots = intake.signed_daily_slots(signed["body"])
         if (
-            set(signed["body"]) != allowed_body
+            signed_slots != auth.get("max_slots_per_utc_day", 1)
             or type(signed["body"]["daily_cap_microusd"]) is not int
             or signed["body"]["daily_cap_microusd"] <= 0
         ):
@@ -74,7 +69,7 @@ def verified_grants(database, batch, jobs, *, mode, scope, digest):
         for k in ("unresolved", "generator_calls", "miner_cost_microusd"):
             if type(auth[k]) is not int or auth[k] < 0 or (k in j and j[k] != auth[k]):
                 raise ValueError("funding evidence differs from original job")
-        if auth["unresolved"]:
+        if auth["unresolved"] and not allow_pending:
             raise ValueError("unconfirmed miner charges")
     return by_id
 
@@ -523,6 +518,8 @@ def partial_generator(objects, job, expected_events=None):
                     "content": event["output"][:20000],
                 }
             )
+        elif kind == "interrupted":
+            finish = "interrupted"
         elif kind in ("before", "finish"):
             if "code_checks" in event:
                 states.append(

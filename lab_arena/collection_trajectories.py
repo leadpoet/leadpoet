@@ -50,14 +50,9 @@ def verified_grants(database, batch, jobs, *, mode, scope, digest, allow_pending
             now=envelope["timestamp"],
             verify_signature=verify_hotkey_signature,
         )
-        allowed_body = {
-            "credentials_sha256",
-            "terms_sha256",
-            "daily_cap_microusd",
-            "task_scope",
-        }
+        signed_slots = intake.signed_daily_slots(signed["body"])
         if (
-            set(signed["body"]) != allowed_body
+            signed_slots != auth.get("max_slots_per_utc_day", 1)
             or type(signed["body"]["daily_cap_microusd"]) is not int
             or signed["body"]["daily_cap_microusd"] <= 0
         ):

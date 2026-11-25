@@ -11,7 +11,7 @@ import time
 import requests
 
 from lab_arena import contracts
-from lab_arena.collection_intake import CORRECTION_SCOPE, SCOPE, TASK_SCOPE, TERMS, TERMS_HASH, scope_id
+from lab_arena.collection_intake import CORRECTION_SCOPE, MAX_DAILY_SLOTS, SCOPE, TASK_SCOPE, TERMS, TERMS_HASH, scope_id
 from lab_arena.credentials import OPENROUTER_FUNDING_FIELDS
 from lab_arena.miner_submit import (
     MinerSubmissionError,
@@ -53,6 +53,10 @@ def add_commands(commands, common_options):
         if action in ("terms", "register"):
             parser.add_argument("--task-scope", choices=(TASK_SCOPE, CORRECTION_SCOPE), default=TASK_SCOPE)
         if action == "register":
+            parser.add_argument(
+                "--max-slots-per-day", type=int, choices=range(1, MAX_DAILY_SLOTS + 1),
+                help="maximum distinct funded assignments per UTC day (default 1)",
+            )
             parser.add_argument(
                 "--daily-cap-usd",
                 required=True,
@@ -128,6 +132,10 @@ def run(args, wallet, *, session=requests):
                     "task_scope": task_scope,
                     "credentials_sha256": contracts.document_hash(creds),
                 }
+                # Omitting the option preserves compatibility with older gateways and signatures.
+                slots = getattr(args, "max_slots_per_day", None)
+                if slots is not None:
+                    body["max_slots_per_utc_day"] = slots
             if action == "revoke":
                 body = {"registration_id": args.registration_id}
             from bittensor_wallet.errors import KeyFileError, PasswordError, WalletError

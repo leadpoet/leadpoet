@@ -37,7 +37,7 @@ The pilot uses **your OpenRouter credits and pays no emissions**. Leadpoet pays 
    leadpoet collection-revoke --mode pilot --wallet-name miner --hotkey-name default --registration-id REGISTRATION_ID
    ```
 
-Paid assignments require fresh live consent after the pilot qualifies.
+Paid assignments require fresh live consent after the pilot qualifies. In paid comparison mode, `collection-terms` also lists the approved fixed quote and maximum run budget for each model and task class in `fixed_quotes`. Both amounts are in micro-USD. An empty list means there is no approved price for a synthetic comparison in the current schedule.
 
 For setup help or to volunteer for a blind workflow review, use the [public pilot thread](https://github.com/leadpoet/leadpoet/issues/1343). Reviewing does not require a wallet or API credits. Submit provider keys only through the local miner CLI.
 

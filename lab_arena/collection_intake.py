@@ -186,6 +186,32 @@ def terms(mode, task_scope=TASK_SCOPE):
     }
 
 
+def approved_comparison_quotes(transport):
+    """Return only miner-facing rates from the staged or activated price schedule."""
+    try:
+        schedule = transport.rpc("collection_reward_schedule_v1", {})
+        if schedule == {}:
+            return []
+        evidence = schedule["pilot_evidence"]
+        prices, budgets = evidence["prices"], evidence["budgets"]
+        if not isinstance(prices, dict) or not isinstance(budgets, dict) or not prices:
+            raise ValueError("invalid price schedule")
+        quotes = []
+        for family in ("B", "C", "E", "K", "P"):
+            if family not in prices:
+                continue
+            for model in MODELS:
+                quotes.append({
+                    "task_class": family,
+                    "model": model,
+                    "quote_microusd": _micros(prices[family][model], 1),
+                    "cap_microusd": _micros(budgets[family][model], 1),
+                })
+        return quotes
+    except (KeyError, TypeError, ValueError, store.ArenaStoreError) as exc:
+        raise IntakeError("collection_comparison_prices_unavailable", 503) from exc
+
+
 def open_correction_quotes(transport):
     register_signatures()
     quotes = transport.rpc("collection_open_correction_quotes_v1", {})

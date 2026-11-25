@@ -9424,6 +9424,11 @@ class ArenaService:
                 state = collection_rewards.epoch_state(self._store, self._config.chain, self._reward_signer(),
                     epoch=requested_epoch, burn_hotkey=self._config.accepted_burn_hotkey,
                     valuation_source=self._config.collection_emission_valuation)
+            except collection_rewards.EpochNotCurrent as exc:
+                # The same boundary race the legacy path below refuses with 409.
+                raise ServiceError("accepted_weight_epoch_not_current", 409) from exc
+            except ServiceError:
+                raise
             except Exception as exc:
                 raise ServiceError("collection_weight_state_unavailable", 503) from exc
             return {"state": state, "lookup_ok": True}

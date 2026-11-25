@@ -171,7 +171,7 @@ def test_validator_snapshot_authenticates_original_burn_hotkey(monkeypatch):
     states = {epoch: signed(epoch, hotkeys[0]), epoch-1: signed(epoch-1, hotkeys[0])}
     db = SimpleNamespace(rpc=lambda name, params: {k: v for k, v in states[epoch]["reward_basis"].items()
                                                    if k != "valuation"})
-    snapshot = SimpleNamespace(current_block=1002, block_hash="0x" + "b" * 64, network_genesis_hash="0x" + "1" * 64,
+    snapshot = SimpleNamespace(current_block=1002, last_epoch_block=1000, block_hash="0x" + "b" * 64, network_genesis_hash="0x" + "1" * 64,
                                settlement_epoch_id=lambda _: epoch)
     rpc = SimpleNamespace(call=lambda method, **kwargs: {"netuid": 71, "block": 1002, "hotkeys": hotkeys}
                           if method == "state_call" else [(0, 65535)])
@@ -180,8 +180,8 @@ def test_validator_snapshot_authenticates_original_burn_hotkey(monkeypatch):
     monkeypatch.setattr(chain, "finalized_epoch_snapshot", lambda _:snapshot)
     monkeypatch.setattr(chain, "load_arena_cutover", lambda _:None)
     monkeypatch.setattr(local_weight_signer, "HttpsJsonRpcTransport", lambda *a, **k:rpc)
-    monkeypatch.setattr(chain_source_v2, "decode_selective_metagraph_result", lambda x:x)
-    monkeypatch.setattr(chain_source_v2, "decode_weights_storage", lambda x:x)
+    monkeypatch.setattr("lab_arena.collection_distributions.decode_selective_metagraph_result", lambda x:x)
+    monkeypatch.setattr("lab_arena.collection_distributions.decode_weights_storage", lambda x:x)
     monkeypatch.setattr(signing, "KmsSigner", lambda *a, **k:signer)
     monkeypatch.setattr(store, "ArenaStore", lambda _:SimpleNamespace(collection_reward_start_epoch=lambda:epoch,
                         get_weight_state=lambda network, netuid, idx:{"state_doc":states[idx]}))

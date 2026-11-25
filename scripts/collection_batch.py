@@ -562,6 +562,7 @@ def main(argv=None):
                     receipt,
                     public_key,
                     objects,
+                    witnessed_batch=(raw, prompt),
                     approval=(
                         json.loads(read_file(args.qualification))
                         if args.qualification

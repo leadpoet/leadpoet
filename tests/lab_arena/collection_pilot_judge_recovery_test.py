@@ -40,6 +40,7 @@ def test_owner_judge_can_recover_unavailable_pilot_without_changing_settlement()
         747,
         748,
         749,
+        753,
     )
     migrations = tuple(next(directory.glob(f"{n}-*.sql")).name for n in numbers)
     for pg, dsn in database_with_lab_arena_migration(DEFAULT_MIGRATIONS + migrations):
@@ -57,7 +58,7 @@ def test_owner_judge_can_recover_unavailable_pilot_without_changing_settlement()
         genargs = dict(p_job=rid, p_lease=store.hash_lease_token(job["lease_token"]))
         for request, provider, maxfee, price, status in [
             ("generate-1", "openrouter", 1000, 100, 200),
-            ("prior-owner-error", "judge", 9000, None, 429),
+            ("collection-" + "a" * 64 + "-1", "judge", 9000, None, 429),
         ]:
             assert (
                 db.rpc(
@@ -93,6 +94,11 @@ def test_owner_judge_can_recover_unavailable_pilot_without_changing_settlement()
             original,
             7,
         )
+        def awaiting():
+            return db.rpc("collection_interrupted_pilot_judges_v1", {"p_batch": batch})
+
+        assert awaiting() == [{"job": rid, "request": "collection-" + "a" * 64 + "-1"}]
+        assert db.rpc("collection_interrupted_pilot_judges_v1", {"p_batch": "other-pilot"}) == []
         scope = {"p_job": rid, "p_source": original, "p_attempt": str(uuid4())}
         request = "collection-" + "3" * 64 + "-1"
 
@@ -104,6 +110,7 @@ def test_owner_judge_can_recover_unavailable_pilot_without_changing_settlement()
 
         assert reserve(job["budget_microusd"] - 9099)["status"] == "budget_exhausted"
         assert reserve(300)["status"] == "reserved"
+        assert awaiting() == []
         assert reserve(300)["status"] == "already_reserved"
         db.rpc(
             "collection_record_launch_judge_v1",
@@ -226,6 +233,12 @@ def test_only_the_unavailable_vote_is_replayed_and_an_authentic_overlay_is_requi
 
     monkeypatch.setattr(recovery, "finish_review", finish)
     attempt = str(uuid4())
+    # A retry scheduled by the timer must be for the very same failed HTTP request.
+    worker.rejudge_ready(
+        db, objects, None, raw, policy, PROMPT, "standin-owner", rid, attempt,
+        interrupted_request="collection-" + "b" * 64 + "-1",
+    )
+    assert called == []
     worker.rejudge_ready(
         db, objects, None, raw, policy, PROMPT, "standin-owner", rid, attempt
     )
@@ -254,3 +267,32 @@ def test_only_the_unavailable_vote_is_replayed_and_an_authentic_overlay_is_requi
         worker.rejudge_ready(
             db, objects, None, raw, policy, PROMPT, "standin-owner", rid, attempt
         )
+
+
+def test_idle_recovery_selects_one_and_reuses_the_attempt_across_restarts(monkeypatch, capsys):
+    from types import SimpleNamespace
+    from scripts import run_locked_collection as worker
+
+    job, other = str(uuid4()), str(uuid4())
+    items = [{"job": job, "request": "a"}, {"job": other, "request": "b"}]
+    def lookup(method, params):
+        assert method == "collection_interrupted_pilot_judges_v1" and params == {"p_batch": "pilot"}
+        return items
+
+    attempts = []
+    def retry(*args, interrupted_request):
+        attempts.append((args[-2], args[-1], interrupted_request))
+        return True
+
+    monkeypatch.setattr(worker, "rejudge_ready", retry)
+    args = (SimpleNamespace(rpc=lookup), None, None, {}, SimpleNamespace(batch_id="pilot"), {}, "owner")
+    for tick in (0, 300, 600):
+        monkeypatch.setattr(worker.time, "time", lambda: tick)
+        worker.recover_idle_judge(*args)
+    assert len(attempts) == 3 and attempts[0] == attempts[2]
+    assert attempts[0][0::2] == (job, "a") and attempts[1][0::2] == (other, "b")
+    assert attempts[0][1] != attempts[1][1]
+    assert capsys.readouterr().out.count('"pilot_judge_recovered"') == 3
+    items.clear()
+    worker.recover_idle_judge(*args)
+    assert len(attempts) == 3 and not capsys.readouterr().out

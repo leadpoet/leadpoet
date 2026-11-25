@@ -100,6 +100,10 @@ def run(args, wallet, *, session=requests):
                 if response.status_code != 200:
                     raise MinerSubmissionError("collection_correction_terms_unavailable" if task_scope == CORRECTION_SCOPE else "collection_terms_unavailable")
                 published = response.json()
+                if getattr(args, "max_slots_per_day", None) is not None and published.get(
+                    "max_selectable_slots_per_utc_day"
+                ) != MAX_DAILY_SLOTS:
+                    raise MinerSubmissionError("collection_slot_opt_in_unavailable")
                 if (published.get("mode") != args.mode or published.get("task_scope") != task_scope
                         or published.get("terms_sha256") != expected or published.get("terms") != text):
                     raise MinerSubmissionError("collection_terms_changed")

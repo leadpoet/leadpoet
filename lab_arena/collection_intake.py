@@ -178,6 +178,7 @@ def terms(mode, task_scope=TASK_SCOPE):
     return {
         "mode": mode,
         "task_scope": task_scope,
+        "max_selectable_slots_per_utc_day": MAX_DAILY_SLOTS,
         "terms": SYNTHETIC_TRAINING_TERMS,
         "terms_sha256": SYNTHETIC_TRAINING_TERMS_HASH,
         "network": "finney",

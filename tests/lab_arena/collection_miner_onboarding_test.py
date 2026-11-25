@@ -102,3 +102,18 @@ def test_comparison_rechecks_published_mode_before_using_funding_keys():
 def test_gateway_rejects_an_invalid_signed_count(slots):
     with pytest.raises(intake.IntakeError,match="collection_consent_invalid"):
         intake.signed_daily_slots(dict.fromkeys(intake.REGISTRATION_FIELDS)|{"max_slots_per_utc_day":slots})
+
+
+def test_explicit_slots_on_an_older_gateway_fails_before_wallet_or_credentials(monkeypatch):
+    old_terms = dict(intake.terms("pilot"))
+    old_terms.pop("max_selectable_slots_per_utc_day")
+    session = SimpleNamespace(
+        get=lambda *a, **kw: SimpleNamespace(status_code=200, json=lambda: old_terms),
+        post=lambda *a, **kw: pytest.fail("credentials were sent"),
+    )
+    monkeypatch.setattr(collection_cli, "read_masked_credential", lambda _: pytest.fail("requested a key"))
+    assert collection_cli.run(
+        register_args(extra=["--max-slots-per-day", "3"]),
+        lambda _: pytest.fail("wallet was opened"),
+        session=session,
+    ) == 2

@@ -127,6 +127,10 @@ def reference_for_poll(raw, prompt, configuration, database, objects):
         scope=TASK_SCOPE,
         digest=raw["terms_sha256"],
     )
+    originals = {
+        j["job_id"]: j
+        for j in database.rpc("collection_batch_jobs_v1", {"p_batch": current.batch_id})
+    }
     _, builder = comparison_revisions(raw)
     for job in sorted(rows, key=lambda j: (j["slot"], j["attempt"])):
         rid = job["job_id"]
@@ -152,12 +156,17 @@ def reference_for_poll(raw, prompt, configuration, database, objects):
             <= raw["budgets_microusd"][job["model"]]
         ):
             raise ValueError("funded reference cost exceeds its slot cap")
+        # Cost views bind the original immutable job. Only the private registry
+        # can supply an owner-reviewed replacement assessment for that original.
+        registered = originals.get(rid)
+        if not registered or registered["artifact_sha256"] != job["artifact_sha256"]:
+            raise ValueError("reference job differs from its registered original")
         checked = reviews.registered_bundle(
             current,
             [assignment(job)],
             planted={},
             drift={},
-            jobs=[dict(job, mode="pilot")],
+            jobs=[dict(registered, mode="pilot")],
             objects=objects,
             expected_builder=builder,
             capture_version=raw["capture_version"],

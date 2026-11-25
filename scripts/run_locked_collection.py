@@ -291,17 +291,58 @@ def rejudge_ready(
     from lab_arena.collection_workflow import store_artifact
     from scripts.collection_batch import read_artifact
 
-    schedule = database.rpc("collection_reward_schedule_v1", {})
-    pending = schedule.get("pending") or {}
-    if (
-        not schedule.get("staged")
-        or pending.get("status") != "ready"
-        or pending.get("job_id") != job_id
-    ):
-        raise ValueError("requested staged job is not ready for owner adjudication")
-    approved = schedule["pilot_evidence"]
-    verify_live_panel(raw, policy, approved)
-    evidence = ready_launch_evidence(pending, objects, policy, approved)
+    if policy.pilot:
+        from lab_arena import collection_judge_review as review
+        from lab_arena.collection_quality import verify_split
+
+        rows = database.rpc("collection_batch_jobs_v1", {"p_batch": policy.batch_id})
+        pending = next((r for r in rows if r["job_id"] == job_id), None)
+        if (
+            not pending
+            or pending["mode"] != "pilot"
+            or pending["status"] != "accepted"
+            or str(pending["slot"]) in raw.get("control_artifacts", {})
+            or not raw.get("capture_version")
+            or not raw.get("split_manifest")
+        ):
+            raise ValueError("expected one complete funded ordinary pilot job")
+        _, builder = comparison_revisions(raw)
+        bundle = review.registered_bundle(
+            policy,
+            [assignment(pending)],
+            jobs=[pending],
+            objects=objects,
+            expected_builder=builder,
+            capture_version=raw["capture_version"],
+            planted={},
+            drift={},
+        )
+        bundle["split_manifest_sha256"] = judge.digest(raw["split_manifest"])
+        if raw.get("claim_protocol"):
+            bundle["claim_protocol"] = raw["claim_protocol"]
+        review._read_bundle(bundle)
+        (evidence,) = bundle["runs"]
+        packet = evidence["packet"]
+        verify_split(packet["split"], raw["split_manifest"])
+        if not all(packet["checks"].values()) or judge.claim_verdict(packet) not in (
+            "passed",
+            "not_applicable",
+        ):
+            raise ValueError("pilot lacks complete native, privacy or factual checks")
+        if pending.get("pilot_review_sha256"):
+            return  # Already verified the only registered recovery above.
+    else:
+        schedule = database.rpc("collection_reward_schedule_v1", {})
+        pending = schedule.get("pending") or {}
+        if (
+            not schedule.get("staged")
+            or pending.get("status") != "ready"
+            or pending.get("job_id") != job_id
+        ):
+            raise ValueError("requested staged job is not ready for owner adjudication")
+        approved = schedule["pilot_evidence"]
+        verify_live_panel(raw, policy, approved)
+        evidence = ready_launch_evidence(pending, objects, policy, approved)
     previous = evidence["assessment"]
     if not previous.get("verifier_unavailable") or any(
         v["cannot_judge"] for v in previous["records"]
@@ -369,6 +410,8 @@ def rejudge_ready(
         quality,
         channel.completed_requests,
     )
+    if policy.pilot:
+        return
     current = database.rpc("collection_reward_schedule_v1", {}).get("pending") or {}
     if (
         current.get("job_id") != job_id
@@ -714,16 +757,16 @@ def _run_options(args, p, raw, *, before_claim=None):
     )
     if args.rejudge_ready:
         if (
-            args.pilot_only
+            (args.pilot_only and not policy.pilot)
             or args.preflight
             or args.research_stdio
-            or policy.pilot
-            or os.getenv("LAB_ARENA_COLLECTION_MODE") != "live"
+            or os.getenv("LAB_ARENA_COLLECTION_MODE")
+            != ("pilot" if policy.pilot else "live")
             or not live_finney_arena()
             or not judge_key
         ):
             p.error(
-                "owner adjudication requires the original live Finney/71 batch and owner credential"
+                "owner adjudication requires the original Finney/71 mode, batch and owner credential"
             )
         database, objects = evidence_stores()
         job_id, attempt_id = map(str, args.rejudge_ready)

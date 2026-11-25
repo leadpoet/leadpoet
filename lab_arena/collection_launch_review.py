@@ -58,7 +58,7 @@ class LaunchReviewBroker(CollectionBroker):
             None,
             database,
             transport,
-            {**pending, "mode": "live"},
+            {**pending, "mode": pending.get("mode", "live")},
             pricing,
             routes=routes,
             judge_key=judge_key,

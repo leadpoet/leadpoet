@@ -57,6 +57,8 @@ A reference successor keeps its parent’s unassigned slot numbers and identifie
 
 After independent qualification, the trajectory exporter can read the successor’s actually completed slots under their own signed consents. It verifies the owner witness, matching route, model revision, split, policy, budgets and settled generator costs in the complete qualification cohort. Training metadata retains the parent ID, absolute slot, successor ID and owner witness. Pending jobs stay out of that snapshot.
 
+For a completed pilot with a missing required judge, the operator can run the existing locked worker with `--rejudge-ready JOB_ID ATTEMPT_UUID` against the original pilot manifest and rubric. It verifies the original checks, scope, inputs and saved first vote. The owner funds only the unavailable judge within the remaining job cap. The stored job and its original judgment stay intact. `collection_batch_jobs_v1` returns a separate `pilot_review_sha256` after a verified recovery, and review, export and reference progression verify that link to the original hash. A real low score or an explicit abstention does not qualify for a retry.
+
 ## Running one batch
 
 Use an approved operator environment on the gateway. Source revisions are in `lab_arena/collection_workflow.py`. The public champion and authorized private Poet9B Git checkouts must contain those exact commit objects. The worker materializes the source trees from Git. The private checkout supplies guarded scenario generation, reference answers and deterministic graders.

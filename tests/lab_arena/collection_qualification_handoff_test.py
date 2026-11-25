@@ -93,6 +93,9 @@ def test_independent_planted_labels_and_blind_sample_safety(tmp_path):
     with pytest.raises(ValueError, match="frozen qualification"):
         store_once(target, dict(files, **{"marks.blank.json": {"invented": 1}}))
     assert json.loads(read_file(target / "marks.blank.json")) == {}
+    target.chmod(0o755)
+    with pytest.raises(ValueError, match="directory changed"):
+        store_once(target, files)
 
 
 def test_full_materialized_handoff_at_the_business_boundary(tmp_path, monkeypatch):

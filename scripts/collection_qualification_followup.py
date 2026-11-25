@@ -5,6 +5,7 @@ from hashlib import sha256
 from pathlib import Path
 import json
 import tempfile
+import os
 
 from lab_arena import (
     collection_controls as controls,
@@ -237,7 +238,12 @@ def store_once(directory, files):
             except OSError:
                 if not directory.is_dir():
                     raise
-    if directory.is_symlink() or set(p.name for p in directory.iterdir()) != set(files):
+    if (
+        directory.is_symlink()
+        or directory.stat().st_uid != os.getuid()
+        or directory.stat().st_mode & 0o077
+        or set(p.name for p in directory.iterdir()) != set(files)
+    ):
         raise ValueError("private qualification output directory changed")
     if any(
         json.loads(read_file(directory / name)) != value

@@ -22,7 +22,7 @@ Registered miners can fund a simulated sales workflow with an OpenRouter key and
 
 Pilot jobs use real API credits and pay no emissions. To join, follow the [miner enrollment steps](docs/locked-collection.md#enrollment). Choose your daily spending and assignment limits when you enroll. You can check your spending and revoke access at any time.
 
-Champion allocations end at the retirement epoch. The designated burn hotkey receives all unallocated emissions. When paid collection opens, eligible completed jobs earn a fixed price from the available emissions. See the [pilot and reviewer thread](https://github.com/leadpoet/leadpoet/issues/1343) for setup help or to volunteer for a blind review.
+Champion rewards have ended. The designated burn hotkey receives unallocated miner emissions. When paid collection opens, eligible completed jobs earn a fixed price from the available emissions. See the [pilot and reviewer thread](https://github.com/leadpoet/leadpoet/issues/1343) for setup help or to volunteer for a blind review.
 
 ## Install and register
 

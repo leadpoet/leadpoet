@@ -664,33 +664,28 @@ authorize a release.
 
 ```sh
 python3.11 -m scripts.collection_batch bundle --batch batch.json --prompt prompt.json --output review-input.json
-python3.11 -m scripts.collection_review sample --bundle review-input.json --jobs blind.json --marks-template marks.json
+python3.11 -m scripts.collection_review sample --for-qualification --bundle review-input.json --jobs blind.json --marks-template marks.json
 ```
 
-The human completes the blind marks on their own machine and signs the
-review with `scripts.collection_review sign`. Use the signed receipt to
-compile quotes and produce the private training release.
+The current pilot worker prepares the same private blind sample once the cohort
+qualifies. The reviewer scores the 50 ordinary runs and signs the receipt on
+their own machine. An authorized operator separately approves the measured
+panel for compensated use with `collection_review qualify --allow-live`. Use
+the signed receipt and that approval to compile prices.
+[Judge qualification procedure](judge-output-spec.md#qualification-and-split-evidence).
 
 ```sh
-python3.11 -m scripts.collection_batch prices --batch batch.json --prompt prompt.json --receipt signed-review.json --output approved-prices.json
+python3.11 -m scripts.collection_batch prices --batch batch.json --prompt prompt.json --receipt signed-review.json --qualification panel-approval.json --output approved-prices.json
 ```
 
-Each command reconstructs the complete registered job set and sealed
-controls. Price compilation checks registered pilot measurements, and the
-cutover transaction verifies the same fee table directly against settled
-provider receipts. Comparison enrollment authorizes private evaluation and pricing. It does not
-grant training release rights. Only separately consented correction experiments
-can produce training exports under the current mechanism.
+The compiler reconstructs the registered jobs and sealed controls. The database
+checks the fee table against settled miner charges. Export eligibility follows
+each miner's signed terms. Comparison grants with training rights and separately
+consented corrections can contribute eligible data. [Training exports](locked-collection.md#exporting-full-synthetic-trajectories)
 
-Before scheduling the switch, stop opening new competition rounds and let
-all issued paid rounds, pending Git promotions and the latest award finish.
-The cutover must immediately follow the current accepted legacy epoch. The
-price document's `cutover_anchor` records that epoch, its signed state hash,
-and a fresh finalized chain block with its observed timestamp. Use
-`cutover_anchor.epoch + 1` for `first_epoch`. If the anchor is older than
-120 seconds at insertion, rerun the price command for a fresh observation.
-A missing accepted legacy state, a pending promotion, an overlapping award,
-or an incomplete measured six-model cohort stops activation. Once scheduled,
-the gateway and database fence new mainnet competition issuance and new
-Git promotion plans even if a worker returns to an older environment setting.
-Previously issued signed states retain their original signature and history.
+After champion retirement, use the current signed burn-only epoch as the staging
+anchor. The compiled `cutover_anchor` contains its epoch, signed state hash and a
+fresh finalized block observation. Stage the launch for `cutover_anchor.epoch + 1`
+using the owner procedure above. If the observation is more than 120 seconds old,
+rerun the price command for a fresh anchor. The first accepted live job fixes the
+paid settlement boundary. Previously signed states keep their original history.

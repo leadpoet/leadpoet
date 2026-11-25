@@ -7,14 +7,15 @@ import pytest
 from bittensor_wallet import Keypair
 
 from lab_arena import collection_cli, collection_intake as intake, contracts, miner_cli
+from lab_arena.chain import wallet_signature_verifier
 
 
-def register_args(scope=intake.TASK_SCOPE):
+def register_args(scope=intake.TASK_SCOPE, extra=()):
     terms = intake.terms("pilot", scope)
     return miner_cli.build_parser().parse_args([
         "collection-register", "--mode", "pilot", "--task-scope", scope,
         "--wallet-name", "miner", "--hotkey-name", "default",
-        "--daily-cap-usd", "0.30", "--accept-terms", terms["terms_sha256"],
+        "--daily-cap-usd", "0.30", "--accept-terms", terms["terms_sha256"], *extra,
     ])
 
 
@@ -27,7 +28,8 @@ def test_wallet_read_error_reports_how_to_select_the_wallet(capsys, tmp_path):
 
 
 @pytest.mark.parametrize("scope", [intake.TASK_SCOPE, intake.CORRECTION_SCOPE])
-def test_register_from_terminal_prompts_only_for_funding_keys(scope, monkeypatch):
+@pytest.mark.parametrize("slots", [None, 1, 6])
+def test_register_from_terminal_prompts_only_for_funding_keys(scope, slots, monkeypatch):
     from lab_arena import miner_submit
     for name in ("OPENROUTER_API_KEY", "OPENROUTER_MANAGEMENT_KEY"):
         monkeypatch.delenv(name, raising=False)
@@ -43,13 +45,29 @@ def test_register_from_terminal_prompts_only_for_funding_keys(scope, monkeypatch
         signed = json["authorization"]
         assert signed["body"]["daily_cap_microusd"] == 300_000
         assert signed["body"]["task_scope"] == scope
-        assert signed["body"]["credentials_sha256"] == contracts.document_hash(json["credentials"])
-        return SimpleNamespace(status_code=200, json=lambda: {"registration_id": str(uuid.uuid4())})
+        assert signed["body"].get("max_slots_per_utc_day") == slots
+        checked = contracts.validate_signed_request(
+            signed,
+            expected_scope=intake.SCOPE["register"],
+            expected_round_id=intake.scope_id("pilot"),
+            now=signed["timestamp"],
+            verify_signature=wallet_signature_verifier,
+        )
+        assert checked["body"] == signed["body"]
+        assert signed["body"]["credentials_sha256"] == contracts.document_hash(
+            json["credentials"]
+        )
+        return SimpleNamespace(
+            status_code=200, json=lambda: {"registration_id": str(uuid.uuid4())}
+        )
     session = SimpleNamespace(
-        get=lambda *a, **k: SimpleNamespace(status_code=200, json=lambda: intake.terms("pilot", scope)),
+        get=lambda *a, **k: SimpleNamespace(
+            status_code=200, json=lambda: intake.terms("pilot", scope)
+        ),
         post=post,
     )
-    assert collection_cli.run(register_args(scope), lambda _: key, session=session) == 0
+    extra = [] if slots is None else ["--max-slots-per-day", str(slots)]
+    assert collection_cli.run(register_args(scope,extra), lambda _: key, session=session) == 0
     assert len(prompts) == 2
 
 
@@ -78,3 +96,24 @@ def test_comparison_rechecks_published_mode_before_using_funding_keys():
     session = SimpleNamespace(get=lambda *a, **kw: remote,
                               post=lambda *a, **kw: pytest.fail("credentials were sent"))
     assert collection_cli.run(register_args(), lambda _: pytest.fail("wallet was opened"), session=session) == 2
+
+
+@pytest.mark.parametrize("slots",[0,7,False,"3",2.5,None])
+def test_gateway_rejects_an_invalid_signed_count(slots):
+    with pytest.raises(intake.IntakeError,match="collection_consent_invalid"):
+        intake.signed_daily_slots(dict.fromkeys(intake.REGISTRATION_FIELDS)|{"max_slots_per_utc_day":slots})
+
+
+def test_explicit_slots_on_an_older_gateway_fails_before_wallet_or_credentials(monkeypatch):
+    old_terms = dict(intake.terms("pilot"))
+    old_terms.pop("max_selectable_slots_per_utc_day")
+    session = SimpleNamespace(
+        get=lambda *a, **kw: SimpleNamespace(status_code=200, json=lambda: old_terms),
+        post=lambda *a, **kw: pytest.fail("credentials were sent"),
+    )
+    monkeypatch.setattr(collection_cli, "read_masked_credential", lambda _: pytest.fail("requested a key"))
+    assert collection_cli.run(
+        register_args(extra=["--max-slots-per-day", "3"]),
+        lambda _: pytest.fail("wallet was opened"),
+        session=session,
+    ) == 2

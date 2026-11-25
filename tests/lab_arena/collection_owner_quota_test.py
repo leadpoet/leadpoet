@@ -11,9 +11,11 @@ from tests.lab_arena.locked_collection_pipeline_test import claim
 
 
 @pytest.fixture
-def database():
+def database(request):
     scripts = Path(__file__).resolve().parents[2] / "scripts"
-    numbers = (720, 721, 722, 723, 724, 725, 726, 727, 728, 729, 732, 733, 738, 740, 743, 744, 745)
+    numbers = (720, 721, 722, 723, 724, 725, 726, 727, 728, 729, 732, 733, 738, 740, 741, 743, 744, 745, 746, 752)
+    if getattr(request, "param", None) == "before-752":
+        numbers = numbers[:-1]
     files = tuple(next(scripts.glob(f"{n}-*.sql")).name for n in numbers)
     yield from database_with_lab_arena_migration(DEFAULT_MIGRATIONS + files)
 
@@ -32,13 +34,14 @@ def api(database):
     db.close()
 
 
-def enroll(db, key, owner=None, funding_key=None, cap=kit.CAP, mode="pilot", scope=funding.TASK_SCOPE):
+def enroll(db, key, owner=None, funding_key=None, cap=kit.CAP, mode="pilot", scope=funding.TASK_SCOPE, slots=None):
     client = funding.CollectionIntake(db, kit.manager(), mode)
     signed, credentials = kit.registration(key, mode)
     credentials = kit.credentials_for(funding_key or key)
     signed = contracts.build_signed_request(
         scope=funding.SCOPE["register"], round_id=funding.scope_id(mode), hotkey=signed["hotkey"],
-        body=dict(signed["body"], daily_cap_microusd=cap, task_scope=scope,
+        body=dict(signed["body"], **({"max_slots_per_utc_day": slots} if slots is not None else {}),
+                  daily_cap_microusd=cap, task_scope=scope,
                   terms_sha256=funding.terms(mode, scope)["terms_sha256"],
                   credentials_sha256=contracts.document_hash(credentials)),
         timestamp=1, sign_message=lambda _: "a" * 128)
@@ -91,7 +94,7 @@ def test_quota_independently_follows_coldkey_and_funding_fingerprint(database, a
     owner_a, owner_b, owner_c = ("5" + letter * 47 for letter in "XYZ")
 
     def run_and_revoke(key, owner, funding_key, batch):
-        client, rid = enroll(api, key, owner, funding_key)
+        client, rid = enroll(api, key, owner, funding_key, slots=2)
         job = take(client, batch)
         if job:
             assert job["miner_hotkey"] == "5" + key * 47
@@ -124,7 +127,7 @@ def test_ordinary_and_experiment_scopes_share_the_owner_allowance(database, api)
 
     owner = "5" + "Z" * 47
     client, _ = enroll(api, "A", owner)
-    expert, _ = enroll(api, "B", owner, scope=funding.CORRECTION_SCOPE)
+    expert, _ = enroll(api, "B", owner, scope=funding.CORRECTION_SCOPE, slots=2)
     ordinary = take(client)
     assert ordinary["miner_hotkey"] == "5" + "A" * 47
     finish(client, ordinary, "failed")
@@ -138,8 +141,8 @@ def test_ordinary_and_experiment_scopes_share_the_owner_allowance(database, api)
 def test_concurrent_hotkeys_share_one_active_lease_and_one_daily_quota(database, api):
     owner = "5" + "Z" * 47
     sql(database, "UPDATE public.collection_dispatch_settings SET daily_slots_per_owner=2")
-    client, _ = enroll(api, "A", owner)
-    enroll(api, "B", owner)
+    client, _ = enroll(api, "A", owner, slots=2)
+    enroll(api, "B", owner, slots=2)
 
     def race(batch):
         with ThreadPoolExecutor(max_workers=4) as pool:
@@ -196,3 +199,151 @@ def test_dispatch_limit_is_bounded_and_writable_only_by_operator(database):
     for role in ("anon", "authenticated", "service_role", "lab_arena_service"):
         assert sql(database, "SELECT has_table_privilege(%s,'public.collection_dispatch_settings','UPDATE')",
                    (role,)) == (False,)
+
+
+def test_explicit_new_quota_preserves_default_late_costs_and_reenrollment(
+    database, api
+):
+    from scripts import reconcile_collection_generation
+
+    sql(
+        database,
+        "UPDATE public.collection_dispatch_settings SET daily_slots_per_owner=6",
+    )
+    miner, rid = enroll(api, "A", cap=500)
+    first = take(miner, "old-first")
+    key = first["miner_hotkey"]
+    call = dict(
+        p_job=first["job_id"],
+        p_lease=store.hash_lease_token(first["lease_token"]),
+        p_request="late",
+    )
+    assert (
+        api.rpc(
+            "collection_reserve_call_v1",
+            dict(call, p_provider="openrouter", p_amount=300, p_hash="1" * 64),
+        )["status"]
+        == "reserved"
+    )
+    api.rpc(
+        "collection_record_call_v1",
+        dict(
+            call,
+            p_hash="2" * 64,
+            p_provider_id="original-generation",
+            p_cost=None,
+            p_status=429,
+        ),
+    )
+    finish(miner, first, "failed")
+    assert take(miner, "legacy-second") is None
+    registry = miner.statement(key)["enrollments"][0]
+    assert (
+        registry["max_slots_per_utc_day"]
+        == registry["effective_max_slots_per_utc_day"]
+        == 1
+    )
+    miner.revoke(key, rid)
+    fresh, rid2 = enroll(api, "A", cap=500, slots=3)
+    assert rid != rid2
+    second = take(fresh, "opted-in")
+    assert second and take(fresh, "overlapping") is None
+    args = dict(
+        p_job=second["job_id"],
+        p_lease=store.hash_lease_token(second["lease_token"]),
+        p_provider="openrouter",
+        p_hash="4" * 64,
+    )
+    assert (
+        api.rpc(
+            "collection_reserve_call_v1",
+            dict(args, p_request="over-rolling-cap", p_amount=201),
+        )["status"]
+        == "budget_exhausted"
+    )
+    settled = api.rpc(
+        "collection_settle_generation_v1",
+        dict(
+            p_job=first["job_id"],
+            p_request="late",
+            p_generation="original-generation",
+            p_response_hash="2" * 64,
+            p_lookup_hash="3" * 64,
+            p_cost=150,
+        ),
+    )
+    assert settled == {"status": "settled", "cost_microusd": 150}
+    # Historical calls using the same funding fingerprint still reduce the new grant's cap.
+    assert (
+        api.rpc(
+            "collection_reserve_call_v1",
+            dict(args, p_request="after-receipt", p_amount=351),
+        )["status"]
+        == "budget_exhausted"
+    )
+    assert (
+        api.rpc(
+            "collection_reserve_call_v1",
+            dict(args, p_request="within-cap", p_amount=350),
+        )["status"]
+        == "reserved"
+    )
+    finish(fresh, second, "failed")
+    third = take(fresh, "yes-third")
+    assert third
+    finish(fresh, third, "failed")
+    assert take(fresh, "fourth") is None
+    regs = fresh.statement(key)["enrollments"]
+    assert [(r["max_slots_per_utc_day"], r["daily_cap_microusd"]) for r in regs] == [
+        (3, 500),
+        (1, 500),
+    ]
+
+
+def test_signed_six_stays_below_operator_ceiling_and_seventh_is_blocked(database, api):
+    miner, _ = enroll(api, "A", slots=6)
+    first = take(miner, "first")
+    finish(miner, first, "failed")
+    assert take(miner, "second") is None
+    sql(
+        database,
+        "UPDATE public.collection_dispatch_settings SET daily_slots_per_owner=6",
+    )
+    for slot in range(2, 7):
+        job = take(miner, "test-slot-" + str(slot))
+        assert job
+        finish(miner, job, "failed")
+    assert take(miner, "seventh") is None
+
+
+@pytest.mark.parametrize("database", ["before-752"], indirect=True)
+def test_untrusted_historical_slot_field_is_never_grandfathered(database, api):
+    miner, rid = enroll(api, "A")
+    # Older trusted database import paths did not validate this optional JSON key.
+    sql(
+        database,
+        "UPDATE collection_registrations SET consent=jsonb_set(consent,'{body,max_slots_per_utc_day}','6') WHERE registration_id=%s",
+        (rid,),
+    )
+    before = sql(
+        database,
+        "SELECT consent::text FROM collection_registrations WHERE registration_id=%s",
+        (rid,),
+    )
+    pg, dsn = database
+    with pg.connect(**dsn) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            (
+                Path(__file__).resolve().parents[2]
+                / "scripts/752-signed-collection-daily-slots.sql"
+            ).read_text()
+        )
+    assert sql(
+        database,
+        "SELECT consent::text,max_slots_per_utc_day FROM collection_registrations WHERE registration_id=%s",
+        (rid,),
+    ) == (before[0], 1)
+    sql(database, "UPDATE collection_dispatch_settings SET daily_slots_per_owner=6")
+    first = take(miner, "grandfathered")
+    finish(miner, first, "failed")
+    assert take(miner, "grandfathered-second") is None

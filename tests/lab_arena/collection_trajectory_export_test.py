@@ -313,3 +313,58 @@ def test_partial_interruption_has_an_observed_finish_and_unknown_task_outcome(tm
     assert observed["finish_reason"] == "interrupted" and observed["unanswered"]
     assert observed["verified_task_pass"] is None and not observed["final_turn_present"]
     assert "private provider error" not in json.dumps(observed)
+
+
+def test_reverify_signed_optional_slots_against_persisted_admission(monkeypatch):
+    from types import SimpleNamespace
+    from uuid import UUID
+    from bittensor_wallet import Keypair
+    from lab_arena import chain, contracts, collection_intake as intake
+    from lab_arena.collection_trajectories import verified_grants
+    import pytest
+
+    signer = Keypair.create_from_uri("//CollectionSlotsExport")
+    envelope = contracts.build_signed_request(
+        scope=intake.SCOPE["register"],
+        round_id=intake.scope_id("pilot"),
+        hotkey=signer.ss58_address,
+        timestamp=1,
+        sign_message=lambda m: signer.sign(m.encode()).hex(),
+        body=dict(
+            task_scope=intake.TASK_SCOPE,
+            terms_sha256=intake.SYNTHETIC_TRAINING_TERMS_HASH,
+            daily_cap_microusd=100000,
+            credentials_sha256="sha256:" + "a" * 64,
+            max_slots_per_utc_day=3,
+        ),
+    )
+    job = dict(job_id="run", miner_hotkey=signer.ss58_address)
+    original = dict(
+        **job,
+        consent=envelope,
+        registration_id=str(UUID(hex=envelope["request_id"])),
+        mode="pilot",
+        generator_calls=1,
+        unresolved=0,
+        miner_cost_microusd=25,
+        max_slots_per_utc_day=3
+    )
+    monkeypatch.setattr(
+        chain, "verify_hotkey_signature", chain.wallet_signature_verifier
+    )
+    db = SimpleNamespace(rpc=lambda *args: [original])
+
+    def verify():
+        return verified_grants(
+            db,
+            "batch",
+            [job],
+            mode="pilot",
+            scope=intake.TASK_SCOPE,
+            digest=intake.SYNTHETIC_TRAINING_TERMS_HASH,
+        )
+
+    assert verify()["run"]["max_slots_per_utc_day"] == 3
+    original["max_slots_per_utc_day"] = 1
+    with pytest.raises(ValueError, match="original enrollment body"):
+        verify()

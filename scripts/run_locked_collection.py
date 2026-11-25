@@ -53,6 +53,7 @@ def load_batch(raw, prompt):
         "terms_sha256",
         "reference_successor",
         "route_witness_sha256",
+        "pricing_pilot",
         "control_artifacts",
         "claim_pack_sha256",
     } != {
@@ -111,6 +112,8 @@ def load_batch(raw, prompt):
         raise ValueError("every generator and judge needs one pinned provider route")
     successor = raw.get("reference_successor")
     full_witness = raw.get("route_witness_sha256")
+    if "pricing_pilot" in raw and (not full_witness or raw["mode"] != "live"):
+        raise ValueError("pricing pilot requires a witnessed paid batch")
     if "route_witness_sha256" in raw:
         from lab_arena.collection_route_witness import WITNESS
         from lab_arena.collection_generation import CAPTURE_V2
@@ -118,7 +121,11 @@ def load_batch(raw, prompt):
         if (
             successor
             or full_witness != WITNESS
-            or raw["mode"] != "pilot"
+            or (raw["mode"] == "live" and (
+                not re.fullmatch(r"rq-[0-9a-f]{64}", str(raw.get("pricing_pilot")))
+                or not certificate or raw["control_slots"] or raw["drift_slots"]
+                or raw.get("control_artifacts")
+            ))
             or not qualification
             or raw.get("capture_version") != CAPTURE_V2
             or raw.get("terms_sha256") != SYNTHETIC_TRAINING_TERMS_HASH
@@ -189,7 +196,7 @@ def load_batch(raw, prompt):
             "rs-" + bundle_hash
             if successor
             else (
-                "rq-" + bundle_hash
+                ("lq-" if raw["mode"] == "live" else "rq-") + bundle_hash
                 if full_witness
                 else raw["name"] + "-" + bundle_hash[:24]
             )
@@ -449,6 +456,12 @@ def report_split_hold(policy, exc):
 
 def verify_live_panel(raw, policy, approved):
     certificate = raw.get("panel_qualification_sha256")
+    witness = raw.get("route_witness_sha256")
+    priced_id = approved.get("batch_id", "")
+    priced_witness = bool(re.fullmatch(r"rq-[0-9a-f]{64}", str(priced_id)))
+    if (bool(witness) != priced_witness or witness != approved.get("route_witness_sha256")
+            or (witness and raw.get("pricing_pilot") != priced_id)):
+        raise ValueError("generator route differs from the qualified pricing pilot")
     if (
         comparison_revisions(raw) != comparison_revisions(approved)
         or certificate != approved.get("panel_qualification_sha256")
@@ -558,6 +571,7 @@ def run_cohort(
                 judge_key=judge_key,
             )
             model_broker.panel_qualification = raw.get("panel_qualification_sha256")
+            model_broker.pricing_pilot = raw.get("pricing_pilot")
             a = assignment(job)
             manifest = process_job(
                 job=job,

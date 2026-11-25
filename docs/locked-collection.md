@@ -45,7 +45,7 @@ The six slots in each comparison pack use the same scenario and the approved gen
 
 A verified model-only 429 may receive one replacement on its original pilot slot. The first charge can stay unknown. The worker reserves it in full and subtracts it from the replacement budget. This requires an authenticated refusal before generation and provable absence of hosted services or per-request charges. It makes no assumption about the eventual billed amount. [OpenRouter pricing](https://openrouter.ai/pricing) and [error semantics](https://openrouter.ai/docs/api/reference/errors-and-debugging).
 
-An unresolved miner charge retains its original reservation. If OpenRouter supplied a generation ID on a finished job, the gateway operator can run `python -m scripts.reconcile_collection_generation --job JOB_ID --request REQUEST_ID --environment-file GATEWAY_ENV`. This reads the original generation on its authorized account and records the exact charge once. A missing, revoked or unpriced generation keeps its reservation. The job's outcome and earnings stay tied to the original execution.
+An unresolved miner charge retains its original reservation. The existing collection watcher checks two eligible receipts at a time, using the original provider account. It revisits missing receipts after each hourly sweep. If OpenRouter supplied a generation ID on a finished job, the gateway operator can run `python -m scripts.reconcile_collection_generation --job JOB_ID --request REQUEST_ID --environment-file GATEWAY_ENV`. This reads the original generation on its authorized account and records the exact charge once. A missing, revoked or unpriced generation keeps its reservation. The job's outcome and earnings stay tied to the original execution.
 
 ### A witnessed route change in a private reference pack
 
@@ -81,6 +81,12 @@ The supplied `deploy/leadpoet-collection-pilot.timer` runs the existing worker o
 Apply collection migrations 720–729, 732 and 733 in numeric order through the [reviewed RDS migration channel](arena-rds-migrations.md). Deploy all required validator, signer and gateway revisions through the [paired release controller](arena_paired_restart.md). Confirm native routing and data readback before opening paid collection. The existing configuration helper supports a scoped `--collection-mode pilot` check/apply. Prepare each approved live batch within one task family so its model prices and caps come from one measured pilot class.
 
 Run `python -m scripts.collection_batch prices` on the verified, signed pilot evidence. Champion retirement closes legacy submissions and routes unallocated emissions to the designated burn hotkey. Collection qualification continues during this period. After the pilot qualifies, stage the approved prices under the [validator weights procedure](arena_normal_validator_weights.md). The first accepted, miner-funded live job activates collection rewards for the next epoch. The worker can recover its completed result after a restart. The subnet then quotes each verified completed job 125% of measured pilot cost for that class and model. Payout weights are proportional to those fixed quotes. An epoch with insufficient emissions scales every quote by the same factor. Surplus goes to burn. Each job contributes once, with no carry-forward.
+
+For the witnessed CoreWeave route, price the complete six-model qualification batch with its frozen manifest.
+The resulting approval records the route witness. When preparing live work, retain that witness, the measured
+routes and the per-model caps. Set `pricing_pilot` to the approved full pilot’s `batch_id`, use the approved
+panel digest, and omit the pilot’s control and drift cases. The worker verifies the installed price schedule and
+the original route evidence before a lease. A partially collected reference successor cannot supply live prices.
 
 ## Route check on November 23, 2026
 

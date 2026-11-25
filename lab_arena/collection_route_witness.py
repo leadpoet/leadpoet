@@ -121,6 +121,7 @@ def verify_matching_panel(raw, policy, qualification, prompt, database, *, succe
         or not panel.batch_id.startswith("rq-")
         or qualification.get("reference_successor")
         or qualification.get("route_witness_sha256") != WITNESS
+        or (not policy.pilot and raw.get("pricing_pilot") != panel.batch_id)
         or (successor and panel.batch_id == policy.batch_id)
         or comparison_revisions(qualification) != comparison_revisions(raw)
         or batch_versions(qualification["routes"]) != batch_versions(raw["routes"])

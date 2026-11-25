@@ -224,8 +224,25 @@ class CollectionBroker:
         self.versions = batch_versions(routes)
         self.catalog = catalog
         self.judge_key = judge_key
+        self.pricing_pilot = None
         self.panel_qualification = None
         self.record_generation = None
+
+    def _approved_generator_route(self, model, route):
+        if model not in GENERATOR_ROUTES:
+            return False
+        batch, mode = self.job.get("batch_id"), self.job.get("mode")
+        witnessed_live = mode == "live" and re.fullmatch(r"lq-[0-9a-f]{64}", str(batch))
+        if model != REFERENCE_MODEL or not witnessed_live:
+            return route == GENERATOR_ROUTES[model].tag or approved_reference_route(model, route, batch, mode)
+        if (route != REFERENCE_ROUTE or not self.panel_qualification
+                or not re.fullmatch(r"rq-[0-9a-f]{64}", str(self.pricing_pilot))):
+            return False
+        from lab_arena.collection_route_witness import WITNESS
+        approved = (self.database.rpc("collection_reward_schedule_v1", {}) or {}).get("pilot_evidence", {})
+        return (approved.get("batch_id") == self.pricing_pilot
+                and approved.get("panel_qualification_sha256") == self.panel_qualification
+                and approved.get("route_witness_sha256") == WITNESS)
 
     def _rpc(self, name, request_id, **params):
         return self.database.rpc(
@@ -522,15 +539,7 @@ class CollectionBroker:
             ):
                 raise CollectionCallError("unsupported model request fields")
         route = self.routes[model]
-        if judge is None and (
-            model not in GENERATOR_ROUTES
-            or (
-                GENERATOR_ROUTES[model].tag != route
-                and not approved_reference_route(
-                    model, route, self.job.get("batch_id"), self.job.get("mode")
-                )
-            )
-        ):
+        if judge is None and not self._approved_generator_route(model, route):
             raise CollectionCallError("unverified generator route")
         price = self.pricing["models"][model]
         policy = {

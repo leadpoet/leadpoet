@@ -265,14 +265,16 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
                 stamp = None
                 if rid in by_id:
                     item = by_id[rid]
-                    if item["manifest_sha256"] != job["artifact_sha256"]:
+                    if item["manifest_sha256"] != job.get(
+                        "pilot_review_sha256", job["artifact_sha256"]
+                    ):
                         raise ValueError("registered generator manifest changed")
                     manifest = read_artifact(
                         objects,
                         policy.batch_id,
                         rid,
                         "manifest",
-                        {"sha256": job["artifact_sha256"]},
+                        {"sha256": item["manifest_sha256"]},
                         1024 * 1024,
                     )
                     generator = read_artifact(

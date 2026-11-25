@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 import json
 import re
 import base64
@@ -399,6 +400,7 @@ def run_experiment(
     before_claim=None,
     prompt=None,
 ):
+    from lab_arena.collection_prices import claim_at_current_price
     from lab_arena.collection_broker import CollectionBroker
     from lab_arena.collection_workflow import (
         play_workflow,
@@ -418,9 +420,10 @@ def run_experiment(
     fixed_quote = tariff["measurement"]["quote_microusd"] if live else 0
     count = 0
     for _ in range(max_jobs):
-        if before_claim is not None:
-            before_claim()
-        job = intake.claim_experiment(spec, agent, fixed_quote=fixed_quote)
+        job, job_prices = claim_at_current_price(
+            partial(intake.claim_experiment, spec, agent, fixed_quote=fixed_quote),
+            pricing, before_claim=before_claim,
+        )
         if not job:
             break
         run_id = job["job_id"]
@@ -480,7 +483,7 @@ def run_experiment(
                 database,
                 transport,
                 job,
-                pricing,
+                job_prices,
                 routes=spec.routes,
                 judge_key=judge_key,
             )

@@ -230,6 +230,10 @@ def _uuid(value):
 
 
 def register_signatures():
+    store.FUNCTION_SIGNATURES.setdefault(
+        "collection_priced_claim_v1",
+        tuple(("p_" + name, kind) for name, kind in _SIGNATURES["claim"]) + (("p_expected_model", "text"),),
+    )
     store.FUNCTION_SIGNATURES.setdefault("collection_interrupted_pilot_judges_v1", (("p_batch", "text"),))
     store.FUNCTION_SIGNATURES.setdefault("collection_training_consents_v1", (("p_batch", "text"),))
     store.FUNCTION_SIGNATURES.setdefault("collection_open_correction_quotes_v1", ())
@@ -327,6 +331,7 @@ class CollectionIntake:
         budgets_microusd,
         *,
         terms_hash=TERMS_HASH,
+        expected_model="*",
         job_id=None,
         lease_token=None,
     ):
@@ -363,8 +368,7 @@ class CollectionIntake:
         token = lease_token if lease_token is not None else store.new_lease_token()
         if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{64}", token):
             raise IntakeError("collection_lease_invalid")
-        job = self._rpc(
-            "claim",
+        return self._lease(token, expected_model,
             job=_uuid(job_id) if job_id else str(uuid.uuid4()),
             token_hash=store.hash_lease_token(token),
             batch=batch_id,
@@ -376,9 +380,17 @@ class CollectionIntake:
             budgets=dict(budgets_microusd),
             terms_hash=terms_hash,
         )
+
+    def _lease(self, token, expected_model, **arguments):
+        if expected_model == "*":
+            job = self._rpc("claim", **arguments)
+        else:
+            job = self._rpc("priced_claim", expected_model=expected_model, **arguments)
+            if expected_model is None:
+                return job
         return dict(job, lease_token=token) if job else None
 
-    def claim_experiment(self, experiment, harness_commit, *, fixed_quote=0):
+    def claim_experiment(self, experiment, harness_commit, *, fixed_quote=0, expected_model="*"):
         """Claim exactly one frozen slot under its own mode and signed consent."""
         if self.mode != experiment.raw["mode"] or not re.fullmatch(r"xp-[0-9a-f]{64}", experiment.batch_id):
             raise IntakeError("collection_correction_pilot_required")
@@ -390,15 +402,14 @@ class CollectionIntake:
             raise IntakeError("collection_harness_unpinned")
         token = store.new_lease_token()
         models = [arm["model"] for _, arm, _ in experiment.slots]
-        job = self._rpc(
-            "claim", job=str(uuid.uuid4()), token_hash=store.hash_lease_token(token),
+        return self._lease(token, expected_model,
+            job=str(uuid.uuid4()), token_hash=store.hash_lease_token(token),
             batch=experiment.batch_id, mode=self.mode, commit=harness_commit,
             scenarios=[case["scenario_id"] for case, _, _ in experiment.slots], models=models,
             prices=dict.fromkeys(models, fixed_quote),
             budgets={arm["model"]:arm["budget_microusd"] for _, arm, _ in experiment.slots},
             terms_hash=terms_hash,
         )
-        return dict(job, lease_token=token) if job else None
 
     def credential(self, job_id, lease_token, provider):
         if provider not in PROVIDERS:

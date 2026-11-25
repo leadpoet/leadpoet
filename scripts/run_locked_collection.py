@@ -781,6 +781,18 @@ def main(argv=None):
                 database,
                 objects,
             )
+            from scripts.collection_qualification_followup import qualification_for_poll
+
+            if baseline.get("route_witness_sha256"):
+                baseline, controls = qualification_for_poll(
+                    baseline,
+                    json.loads(read_file(args.prompt)),
+                    args.next_reference.parent,
+                    database,
+                    objects,
+                )
+                if controls is not None:
+                    args.control_pack = controls
         except (ValueError, OSError, KeyError, TypeError, ArenaStoreError) as exc:
             print(
                 json.dumps(

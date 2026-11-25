@@ -1,97 +1,35 @@
 # Agent Instructions
 
-Applies to this repository. Keep `AGENTS.md` and `CLAUDE.md` byte-identical.
+Keep this file and `CLAUDE.md` byte-identical.
 
-## Work and delivery
+## Delivery
 
-Make the smallest durable change that completes the user's request. Resolve minor
-ambiguity from code and existing conventions. Ask only when a decision materially
-changes the outcome or needs authority the user has not already granted. Preserve
-the agreed scope and approvals across follow-ups. Do not delete user data,
-unrelated files, or requested functionality without authorization.
-
-Implementation requests include testing, pushing, merging, deployment where
-applicable, and verification of the affected result, unless the user says
-otherwise. The owning task completes these steps; it does not depend on another
-chat's release handoff. Production operations use the existing authorized scope,
-canonical controllers and shared release lock. Wait for a held lock, recheck live
-state, and continue. Do not repeat a deployment already verified live.
-
-Independent agent review and delegation are optional. Use them when they improve
-the work; unavailable agent capacity does not block implementation or release.
-Required repository checks and configured release approvals still apply.
-
-## Git and concurrent work
-
-Fetch at task start or resumption and before integration or release. Inspect
-`git status --short`, divergence counts, and a bounded commit log; expand only
-when needed. Start new branches from the latest remote default branch unless the
-task needs another base. Continue existing PR work from its relevant branch.
-Before push or merge, verify the edited checkout includes its intended base and
-any stacked parent.
-
-Preserve dirty and concurrent work. Inspect the diff before overlapping edits;
-use a clean worktree when needed. Do not stash, reset, clean, overwrite, rebase,
-or discard another change. Keep tests tied to the edited checkout and sync
-through commits or PRs. Never force-push or rewrite shared history.
-
-GitHub uses the GitHub App and git credential helper. Use git for pushes; do not
-gate work on `gh auth status`.
-
-Keep user-visible tasks isolated. Report overlap in the owning task. Internal
-subagents report to their owning task. Earlier task-specific authorization
-remains valid within its agreed scope.
+- Make the smallest durable change. Carry forward the user's scope and approvals. Use existing code to resolve routine choices. New production dependencies require approval. Preserve user data, unrelated files and requested functionality unless removal is authorized.
+- The owning task tests, pushes, merges and, where applicable, deploys and verifies live unless the user directs otherwise. Use canonical controllers, shared release locks and configured approvals. Wait for a held lock, then check what is already live.
+- Fetch at start, resumption and integration or release. Inspect status, divergence and recent commits. Branch from the latest remote default or continue the existing PR. Verify the intended base and stacked parent before push or merge. Use git and its credential helper for pushes.
+- Inspect concurrent diffs, work in a clean worktree when needed, and test that checkout. Integrate through commits or PRs. Never discard others' edits, force-push or rewrite shared history. Report overlap to the owning task. Delegation is optional.
 
 ## Verification
 
-Trace the affected behavior through callers, defaults, validators, stored state,
-and failure handling. For a defect, reproduce it and add a regression that fails
-before the fix. Run the smallest useful checks for the change, then expand when
-risk or failures require it. Verify the actual affected flow and preserved
-behavior; report substitutions and unverified paths. Repeat checks only when
-changes or missing evidence invalidate their result.
+Trace callers, defaults, validators, stored state and failure handling. Reproduce bugs with a failing regression. Run focused checks, verify the affected flow, and report gaps. Run `git diff --check`, compile touched Python, round-trip changed Pydantic models through JSON, and check scoring changes for silent exception sentinels.
 
-Run `git diff --check`; compile touched Python files. For Pydantic changes,
-round-trip JSON. For scoring changes, check for silent exception sentinels.
-Preserve required security, migration, release, billing and audit checks. Ask
-before adding production dependencies. Passing tests, a plan, or a healthy
-process alone does not prove the requested outcome.
+An independent, reproducible check against authoritative evidence suffices for a deterministic fact, such as a file hash or finalized payout. Measuring agreement with people requires genuine independent blind human ratings. Preserve existing security, migration, billing, audit and release checks. [Collection judging](docs/judge-output-spec.md)
 
-## Arena contracts and relevant references
+Keep secrets out of source and diagnostics. Prefer authorized normal AWS access and verify the principal, account and permissions. Bound searches to relevant paths. Recursive searches of drive roots, user profiles, `.codex` or `AppData` require explicit scope. Use OnePatch only on request, with fresh scoped telemetry and direct evidence. Start monitors or schedules only when requested.
 
-Preserve frozen round source, ICPs, scorer and policies; accepted judgments;
-provider costs; private provenance; published results; rewards and weights.
-Distinguish substantive negative results from incomplete work and provider
-failures. Before baseline execution and publication, verify the frozen source
-against the intended finalized prior champion and resolve pending prior-round
-corrections before freezing the next baseline.
+## Arena
 
-Keep raw capture, training eligibility, dataset quality and training permissions
-separate. Preserve original evidence, hashes, source/lease/receipt links, privacy,
-explicit gaps and the round's frozen coverage rules. Do not invent missing
-historical evidence or replay paid work merely to manufacture verification.
+Preserve frozen sources, ICPs, scorers, policies, accepted judgments, provider costs, provenance, results, rewards and weights. Verify a baseline's source against its intended finalized prior champion before execution or publication. Resolve pending corrections before freezing its successor. Record incomplete work and provider failures distinctly from negative results.
 
-Read the relevant existing document for the changed surface:
+Keep original evidence, hashes, source/lease/receipt links, privacy, coverage rules and gaps. Apply separate checks for training eligibility, quality and permissions. Never fabricate historical evidence or pay to replay work solely to recreate proof.
 
-| Surface | Reference |
+| Surface | Existing controls |
 | --- | --- |
-| Scoring, costs and evidence | [Score integrity](docs/arena-score-integrity.md), [company quality](docs/arena-company-quality.md) |
-| Capture and training | [Training data](docs/arena_training_data.md), [curation](docs/arena-training-curation.md), [full-thinking policy](docs/arena-full-thinking-policy.md) |
-| Host and scorer releases | [Arena runbook](lab_arena/RUNBOOK.md), [gateway deployment](docs/gateway_git_deployment_runbook.md) |
-| Paired restart and recovery | [Paired restart](docs/arena_paired_restart.md) |
-| Validator rewards and weights | [Verification checklist](docs/v2_deployment_verification_checklist.md), [normal validator](docs/arena_normal_validator_weights.md) |
-| AWS access and signing authority | [Production access](docs/production-access.md), [key boundaries](docs/arena-iam-key-boundaries.md) |
-| Attested builds | [Release isolation](docs/attested-release-isolation.md) |
-
-These documents contain the existing controls; this file adds no release gates.
-Keep secrets out of source and diagnostics. Use existing authorized AWS sessions
-and verify the principal, account and required permissions before requesting
-new access. Use normal operator access when it is sufficient.
-
-Keep searches bounded to the relevant repository paths. Do not recursively
-search a drive root, user profile, `.codex`, or `AppData` without explicit scope.
-Use OnePatch only when explicitly requested; verify fresh scoped telemetry and
-direct production evidence without starting unrequested monitors or schedules.
+| Scoring | [Integrity and costs](docs/arena-score-integrity.md), [company quality](docs/arena-company-quality.md) |
+| Training | [Capture](docs/arena_training_data.md), [curation](docs/arena-training-curation.md), [full thinking](docs/arena-full-thinking-policy.md) |
+| Releases | [Arena runbook](lab_arena/RUNBOOK.md), [gateway](docs/gateway_git_deployment_runbook.md), [paired restart](docs/arena_paired_restart.md), [attested builds](docs/attested-release-isolation.md) |
+| Weights | [Verification checklist](docs/v2_deployment_verification_checklist.md), [normal validator](docs/arena_normal_validator_weights.md) |
+| Authority | [Production access](docs/production-access.md), [key boundaries](docs/arena-iam-key-boundaries.md) |
 
 ## Gamma lead orders
 
@@ -123,11 +61,6 @@ Boundary:
 - A failed order is never retried automatically. Setting the mode to `off`
   is the rollback.
 
-## Historical task records
+## Historical instructions
 
-Dated approvals and incident instructions are in the
-[instruction archive](docs/agent-instruction-history-20261025.md). Read only the
-relevant entry when continuing that task, including its scope, supersession and
-expiry. Archive entries grant no new authority; the current request and its
-limits take precedence. Keep new one-task details in that task's record rather
-than appending them to these standing instructions.
+[Archived instructions](docs/agent-instruction-history-20261025.md) apply only within their task, scope and expiry. They grant no new authority. The current request governs. Keep new task-specific details in the task record.

@@ -57,3 +57,21 @@ def test_public_weight_state_refuses_409_not_503_at_the_epoch_boundary():
         service.public_weight_state(EPOCH)
     assert refusal.value.status == 409
     assert refusal.value.code == "accepted_weight_epoch_not_current"
+
+
+def test_collection_chain_failure_remains_unavailable():
+    def unreadable_scope():
+        raise OSError('finalized chain read failed')
+
+    service = object.__new__(ArenaService)
+    service._store = _store()
+    service._config = SimpleNamespace(
+        mode='live', chain=SimpleNamespace(accepted_weight_epoch_scope=unreadable_scope),
+        accepted_burn_hotkey=BURN, collection_emission_valuation=lambda _: None,
+    )
+    service._chain_scope = lambda: ('finney', 71)
+    service._collection_reward_active = lambda _: True
+    service._reward_signer = lambda: object()
+    with pytest.raises(ServiceError) as unavailable:
+        service.public_weight_state(EPOCH)
+    assert (unavailable.value.status, unavailable.value.code) == (503, 'collection_weight_state_unavailable')

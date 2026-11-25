@@ -191,3 +191,78 @@ def test_validator_snapshot_authenticates_original_burn_hotkey(monkeypatch):
     assert healthy["weight_start_epoch"] == epoch and set(healthy["validators"].values()) == {"matches"}
     states[epoch-1] = signed(epoch-1, hotkeys[1])
     assert not validator_snapshot(env, db)["signed_burn_only"]
+
+
+def test_desktop_keeps_failed_attempts_private_and_reports_work_after_recovery(tmp_path):
+    import subprocess
+    from scripts.collection_watch_desktop import deliver
+
+    def snapshot(number, enrollments, billed):
+        return {"event": {"number": number, "changes": {"current epoch": number}}, "collection": {
+            "enrollments": [{"registrations": enrollments}], "billing": [{"funded_runs": billed}]}}
+
+    def disconnected():
+        raise subprocess.CalledProcessError(255, ['aws'], stderr='Could not connect to the endpoint URL: private-detail')
+
+    sent = []
+    first = snapshot(8, 1, 2)
+    deliver(tmp_path, lambda: first, sent.append)
+    deliver(tmp_path, disconnected, sent.append)
+    deliver(tmp_path, disconnected, sent.append)
+    record = json.loads((tmp_path / 'latest.json').read_text())
+    assert record['delivery'] == 'offline' and record['snapshot'] == first
+    assert record['readback_failure']['attempts'] == 2
+    assert record['readback_failure']['reason'] == 'operator_connection_unavailable'
+    assert record['readback_failure']['checked_at']
+    assert 'private-detail' not in str((record, sent)) and len(sent) == 2
+    deliver(tmp_path, lambda: snapshot(12, 2, 3), sent.append)
+    assert len(sent) == 3 and 'restored' in sent[-1] and '1 new enrollment' in sent[-1] and '1 newly billed run' in sent[-1]
+    assert 'readback_failure' not in json.loads((tmp_path / 'latest.json').read_text())
+
+
+def test_desktop_retries_poll_timeout_using_the_same_read_command(monkeypatch):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    import subprocess
+    from scripts import collection_watch_desktop as watcher
+
+    data = {'observed_at': datetime.now(timezone.utc).isoformat()}
+    calls = []
+    def check_output(args, **kwargs):
+        calls.append('submit'); return 'example-read-command'
+    def run(args, **kwargs):
+        assert args[args.index('--command-id') + 1] == 'example-read-command'
+        calls.append('poll')
+        if calls.count('poll') == 1:
+            raise subprocess.TimeoutExpired(args, 20)
+        return SimpleNamespace(returncode=0, stdout=json.dumps({'Status':'Success','StandardOutputContent':json.dumps(data)}))
+    monkeypatch.setattr(watcher.subprocess, 'check_output', check_output)
+    monkeypatch.setattr(watcher.subprocess, 'run', run)
+    monkeypatch.setattr(watcher.time, 'sleep', lambda _:None)
+    assert watcher.fetch() == data and calls == ['submit','poll','poll']
+
+
+def test_desktop_retries_a_disconnected_submit_and_preserves_credential_errors(monkeypatch):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    import subprocess
+    import pytest
+    from scripts import collection_watch_desktop as watcher
+
+    data = {'observed_at': datetime.now(timezone.utc).isoformat()}
+    attempts = []
+    def submit(*args, **kwargs):
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise subprocess.CalledProcessError(255, 'aws', stderr='Could not connect to the endpoint URL: hidden')
+        return 'one-accepted-command'
+    monkeypatch.setattr(watcher.subprocess, 'check_output', submit)
+    monkeypatch.setattr(watcher.time, 'sleep', lambda _: None)
+    monkeypatch.setattr(watcher.subprocess, 'run', lambda *a, **kw: SimpleNamespace(
+        returncode=0, stdout=json.dumps({'Status': 'Success', 'StandardOutputContent': json.dumps(data)})))
+    assert watcher.fetch() == data and len(attempts) == 2
+    monkeypatch.setattr(watcher.subprocess, 'run', lambda *a, **kw: SimpleNamespace(
+        returncode=254, stderr='An error occurred (AccessDeniedException): hidden'))
+    with pytest.raises(subprocess.CalledProcessError) as refused:
+        watcher.fetch()
+    assert watcher.failure_reason(refused.value) == 'operator_access_denied' and len(attempts) == 3

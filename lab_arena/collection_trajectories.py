@@ -22,6 +22,8 @@ def verified_grants(database, batch, jobs, *, mode, scope, digest, allow_pending
     from lab_arena.chain import verify_hotkey_signature
 
     permitted = {intake.SYNTHETIC_TRAINING_TERMS_HASH}
+    if mode == "live" and scope == intake.TASK_SCOPE and intake.PAID_OFFER_ID.fullmatch(batch):
+        permitted = {intake.PAID_WORKFLOW_TERMS_HASH}
     if scope == intake.CORRECTION_SCOPE:
         permitted.add(intake.LEGACY_CORRECTION_TERMS_HASHES[mode])
     if digest not in permitted:
@@ -64,6 +66,7 @@ def verified_grants(database, batch, jobs, *, mode, scope, digest, allow_pending
             or str(UUID(hex=signed["request_id"])) != auth["registration_id"]
             or signed["body"].get("task_scope") != scope
             or signed["body"].get("terms_sha256") != digest
+            or (digest == intake.PAID_WORKFLOW_TERMS_HASH and signed["body"].get("offer_id") != batch)
         ):
             raise ValueError("signed release consent differs from funded job")
         for k in ("unresolved", "generator_calls", "miner_cost_microusd"):

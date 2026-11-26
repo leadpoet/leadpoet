@@ -4,42 +4,30 @@ Miners enroll an OpenRouter funding key for operator-run synthetic sales workflo
 
 ## Enrollment
 
-The pilot uses **your OpenRouter credits and pays no emissions**. Leadpoet pays for verification. Choose one scope per hotkey. A comparison funds one assigned open model on a simulated sales task. The experiment scope funds either a continuation from a smaller model’s mistake or repeated attempts from an approved task’s initial state.
-
-1. Use a registered Finney subnet 71 hotkey and the miner runtime from [Install and register](../README.md#install-and-register). If you already have the miner dependencies, update your checkout, activate its miner environment, and run `python -m pip install --no-deps -e .` from the repo root. This refreshes the installed `leadpoet` command. The examples use wallet `miner` and hotkey `default`. Substitute your names or add `--wallet-path` for a custom location.
-2. Create a dedicated funded [OpenRouter API key](https://openrouter.ai/settings/keys) and a [read-only management key](https://openrouter.ai/blog/announcements/scoped-management-keys/) for the same workspace. Disable prompt and output logging, sharing, and external trace broadcast. The gateway uses the management key once to verify ownership and stores only the encrypted runtime key.
-3. Choose a scope and read the published terms. Use one of these commands:
+1. Use your registered Finney SN71 hotkey and the [miner CLI](../README.md#install-and-register). If you already installed the miner runtime, update the checkout and run `python -m pip install --no-deps -e .` in its environment.
+2. Create a dedicated, funded [OpenRouter API key](https://openrouter.ai/settings/keys) and a [read-only management key](https://openrouter.ai/blog/announcements/scoped-management-keys/) in the same workspace. Disable prompt and output logging, sharing and external trace broadcast. Only the encrypted runtime key is stored. The management key verifies that you control it.
+3. Choose a rolling 24-hour cap. For example, to allow up to **$0.30**, run the command below with your wallet name. Add `--hotkey-name NAME` if your hotkey is not named `default`.
 
    ```bash
-   leadpoet collection-terms --task-scope synthetic_workflows
-   leadpoet collection-terms --task-scope synthetic_corrections
+   leadpoet collection-register --mode live --wallet-name miner --daily-cap-usd 0.30
    ```
 
-4. To enroll, copy the full `terms_sha256` value for your chosen scope. Run the matching command below, replacing `DIGEST` with that value. The example authorizes up to **$0.30 per rolling 24 hours**. Choose your own cap. A smaller cap may end a run early. At the two hidden prompts enter the runtime key and management key. For unattended use, supply `OPENROUTER_API_KEY` and `OPENROUTER_MANAGEMENT_KEY` in the environment.
+   The CLI displays the reward and maximum spend for each assignment, the spending limit, and the terms. If you accept, enter both keys at the hidden prompts. Your hotkey signs the offer and funding limits. The worker picks up eligible enrollments automatically. The default is one new assignment per UTC day. To allow more, add `--max-slots-per-day N` (1–6). Save your registration ID.
 
-   ```bash
-   leadpoet collection-register --mode pilot --task-scope synthetic_workflows --wallet-name miner --hotkey-name default --daily-cap-usd 0.30 --accept-terms DIGEST
-   ```
+**Rewards.** A paid sales workflow earns the fixed quote shown before enrollment when its result passes the native task checks and we verify its complete trace, original provider reasoning and settled charges. The quote is 1.25× the measured reference cost for that model and task. Actual spend can vary. Failed or partial calls may cost credits. The miner pays for the agent’s calls and Leadpoet covers verification. If total quotes exceed available emissions, every quote scales by the same proportion. An unpaid difference does not carry forward. `leadpoet collection-terms` shows the gateway's current offer. An empty price list means paid enrollment is unavailable.
 
-   ```bash
-   leadpoet collection-register --mode pilot --task-scope synthetic_corrections --wallet-name miner --hotkey-name default --daily-cap-usd 0.30 --accept-terms DIGEST
-   ```
+**Check or stop funding.** Use the same wallet and hotkey. Your statement lists jobs, charges, unresolved reservations and reward targets. Revoking stops new calls. Calls already dispatched may still be billed.
 
-5. Save the returned registration ID. The worker polls every five minutes. By default you fund at most one new assignment per UTC day. To volunteer for up to six, add `--max-slots-per-day N` when you register. Your rolling dollar cap still applies. To change an existing enrollment, revoke it and register again. Check your enrollments and jobs with the same hotkey:
+```bash
+leadpoet collection-statement --mode live --wallet-name miner
+leadpoet collection-revoke --mode live --wallet-name miner --registration-id REGISTRATION_ID
+```
 
-   ```bash
-   leadpoet collection-statement --mode pilot --wallet-name miner --hotkey-name default
-   ```
+**Returning pilot miners.** Pilot work stays unpaid. To reuse your pilot key, use the two commands above with `--mode pilot` to find and revoke the original registration. Then enroll in live mode. A paid signature never authorizes Deepline research. Correction experiments use a separate scope and appear only when their own offer is available.
 
-   Each job shows confirmed miner charges and unresolved reservations in micro-USD (1,000,000 = $1). Match the charges to your dedicated key’s OpenRouter activity. A pilot quote is zero. To switch scopes or stop new calls, use the registration ID from your statement. Calls already dispatched may still be billed.
+For unattended enrollment, read `collection-terms` and supply its exact `--accept-terms DIGEST` and `--accept-offer OFFER_ID` along with the cap. Use `OPENROUTER_API_KEY` and `OPENROUTER_MANAGEMENT_KEY` in the process environment. Submit keys only through the local CLI.
 
-   ```bash
-   leadpoet collection-revoke --mode pilot --wallet-name miner --hotkey-name default --registration-id REGISTRATION_ID
-   ```
-
-Paid assignments require fresh live consent after the pilot qualifies. In paid comparison mode, `collection-terms` also lists the approved fixed quote and maximum run budget for each model and task class in `fixed_quotes`. Both amounts are in micro-USD. An empty list means there is no approved price for a synthetic comparison in the current schedule.
-
-For setup help or to volunteer for a blind workflow review, use the [public pilot thread](https://github.com/leadpoet/leadpoet/issues/1343). Reviewing does not require a wallet or API credits. Submit provider keys only through the local miner CLI.
+## Comparison and calibration packs
 
 The six slots in each comparison pack use the same scenario and the approved generator routes below. Each subsequent complete group advances to a fresh scenario. A provider receipt records known spend even when the run fails. Unknown bills retain their reservation. The worker cannot issue the same paid request identifier twice. Synthetic tools run locally. The worker prices the assigned generator and its approved judges before reserving the slot. An outage on a different generator does not block that assignment. The miner funds the billed generator calls. Private verifier calls use an owner-controlled credential and count against the job budget.
 
@@ -80,7 +68,7 @@ The supplied `deploy/leadpoet-collection-pilot.timer` runs the existing worker o
 
 Apply collection migrations 720–729, 732 and 733 in numeric order through the [reviewed RDS migration channel](arena-rds-migrations.md). Deploy all required validator, signer and gateway revisions through the [paired release controller](arena_paired_restart.md). Confirm native routing and data readback before opening paid collection. The existing configuration helper supports a scoped `--collection-mode pilot` check/apply. Prepare each approved live batch within one task family so its model prices and caps come from one measured pilot class.
 
-Run `python -m scripts.collection_batch prices` on the verified, signed pilot evidence. Champion retirement closes legacy submissions and routes unallocated emissions to the designated burn hotkey. Collection qualification continues during this period. After the pilot qualifies, stage the approved prices under the [validator weights procedure](arena_normal_validator_weights.md). The first accepted, miner-funded live job activates collection rewards for the next epoch. The worker can recover its completed result after a restart. The subnet then quotes each verified completed job 125% of measured pilot cost for that class and model. Payout weights are proportional to those fixed quotes. An epoch with insufficient emissions scales every quote by the same factor. Surplus goes to burn. Each job contributes once, with no carry-forward.
+Run `python -m scripts.collection_batch prices` on the verified, signed pilot evidence. Champion retirement closes legacy submissions and routes unallocated emissions to the designated burn hotkey. Collection qualification continues during this period. For work that relies on a model judge, qualify the panel before staging its prices under the [validator weights procedure](arena_normal_validator_weights.md). The first accepted, miner-funded live job activates collection rewards for the next epoch. The worker can recover its completed result after a restart. The subnet then quotes each verified completed job 125% of measured pilot cost for that class and model. Payout weights are proportional to those fixed quotes. An epoch with insufficient emissions scales every quote by the same factor. Surplus goes to burn. Each job contributes once, with no carry-forward.
 
 For the witnessed CoreWeave route, price the complete six-model qualification batch with its frozen manifest.
 The resulting approval records the route witness. When preparing live work, retain that witness, the measured
@@ -101,13 +89,13 @@ These generator routes passed owner-funded, synthetic tool calls and continuatio
 | 5 | Nemotron 3.5 Super VL | `deepinfra/fp4` | 0.00072340 | 4/4 |
 | 6 | DeepSeek V4.1 Flash-1017 | `particle-ai/us/flex` | 0.000210405 | 2/4 |
 
-All six returned the expected tool call and decision. The Responses case required reconciling several consent events. It counted original reasoning text from the same field the research recorder reads. Flash omitted reasoning on the simple Responses case and exposed it on the harder case. The measurements establish compatibility. Fixed fees require full miner-funded pilot jobs and signed human review.
+All six returned the expected tool call and decision. The Responses case required reconciling several consent events. It counted original reasoning text from the same field the research recorder reads. Flash omitted reasoning on the simple Responses case and exposed it on the harder case. The measurements establish compatibility. These small compatibility calls do not establish a fixed fee. Verified native tasks use complete, measured reference jobs. Human calibration applies to work that relies on model judges.
 
 The author licenses are [Kimi K3.1 Pro](https://huggingface.co/moonshotai/Kimi-K3.1-Pro/blob/d9e99b0792a5e93b78ea9bea62a68167e36ddd9e/LICENSE), [DeepSeek Pro](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813/blob/72e1d3230f6c080a530b0a1d46f8eb4602340597/LICENSE), [Mistral Large 4](https://huggingface.co/mistralai/Mistral-Large-4-1T-A52B/blob/af26e7869af601441d5cdf75a1272469ddc3d059/LICENSE), [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B/tree/37561816e66b5b9153b1b64c10968c18c1e6f4a0), [Nemotron OpenMDW 1.1](https://openmdw.ai/license/1-1/) and [DeepSeek Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/08c8657f02291e11b6f6b63e0e16014f8e748518/LICENSE). Text distillation applies to model-generated text. Rights to third-party documents, tool results and personal data require separate clearance. [OpenRouter routing policy](https://openrouter.ai/docs/guides/routing/provider-selection) · [DeepInfra terms](https://deepinfra.com/terms) · [Mistral commercial terms](https://legal.mistral.ai/terms/commercial-terms-of-service/) · [Particle terms](https://particle.ai/terms).
 
 OpenRouter returned HTTP 404 for Inkling 2 Small, Tencent HY4 and GLM-5.3 under the author-permission filter, including earlier checks without a provider selector. An earlier check found no Fable 5.2 endpoint under zero retention. Generator route tests do not qualify a judge or authorize a cutover.
 
-For a private qualification pilot, use Kimi K3 on `deepinfra/mxfp4` and Mistral Large 3 on `mistral/zdr`. Each generator is scored only by independent families. A paid batch needs successful blind calibration, a separate signed operator approval for live use and a staged price schedule naming that approval. See the [qualification procedure](judge-output-spec.md#qualification-and-split-evidence).
+For a private qualification pilot, use Kimi K3 on `deepinfra/mxfp4` and Mistral Large 3 on `mistral/zdr`. Each generator is scored only by independent families. A paid batch using that panel needs successful blind calibration, a separate signed operator approval for live use and a staged price schedule naming that approval. See the [qualification procedure](judge-output-spec.md#qualification-and-split-evidence).
 
 The validator can verify a newly discovered company using exact, passive, same-run source fetches when the source URL, company identity, dated signal and quoted facts all match. Its evidence packet identifies these observations separately from previously verified Arena results. Incomplete research and unsupported context remain visible for review. A checkpoint alone cannot earn the fixed fee: the worker must also prove Tyche finalized the run.
 

@@ -11,7 +11,10 @@ import time
 import requests
 
 from lab_arena import contracts
-from lab_arena.collection_intake import CORRECTION_SCOPE, MAX_DAILY_SLOTS, SCOPE, TASK_SCOPE, TERMS, TERMS_HASH, scope_id
+from lab_arena.collection_intake import (
+    CORRECTION_SCOPE, MAX_DAILY_SLOTS, MAX_MICROUSD, MODELS, PAID_OFFER_ID, PAID_WORKFLOW_TERMS,
+    PAID_WORKFLOW_TERMS_HASH, SCOPE, TASK_SCOPE, TERMS, TERMS_HASH, scope_id,
+)
 from lab_arena.credentials import OPENROUTER_FUNDING_FIELDS
 from lab_arena.miner_submit import (
     MinerSubmissionError,
@@ -26,6 +29,13 @@ from lab_arena.miner_submit import (
 
 # Only display local guidance. Intake failures may contain echoed credentials.
 _ERROR_GUIDANCE = {
+    "registration_conflict": "If this key is already enrolled in the pilot, check collection-statement --mode pilot and revoke it before enrolling for paid work.",
+    "collection_prices_unavailable": "Paid enrollment needs a published fixed price. Check collection-terms.",
+    "collection_comparison_prices_unavailable": "The gateway has no usable fixed-price offer. Check collection-terms.",
+    "collection_offer_changed": "The paid offer changed. Read collection-terms before signing.",
+    "collection_terms_changed": "Your mode or terms do not match the gateway. Check collection-terms.",
+    "review_collection_terms_and_supply_published_accept_flags": "Read collection-terms and supply --accept-terms and, for a paid offer, --accept-offer.",
+    "collection_enrollment_cancelled": "Enrollment cancelled.",
     "hotkey_unregistered": "Use a hotkey registered on Finney subnet 71.",
     "collection_ineligible_hotkey": "This hotkey is ineligible for collection.",
     "revoke_current_registration_first": "Use collection-statement to find your active registration, then collection-revoke to change it.",
@@ -64,10 +74,10 @@ def add_commands(commands, common_options):
             )
             parser.add_argument(
                 "--accept-terms",
-                required=True,
                 metavar="SHA256",
-                help="Digest shown by collection-terms",
+                help="Published terms digest for unattended enrollment (interactive enrollment shows the terms)",
             )
+            parser.add_argument("--accept-offer", metavar="OFFER_ID", help="Published offer ID for unattended paid enrollment")
         elif action == "revoke":
             parser.add_argument("--registration-id", required=True)
 
@@ -86,6 +96,29 @@ def daily_cap(value):
     raise MinerSubmissionError("daily_cap_invalid")
 
 
+def _review_paid_offer(published, args, cap):
+    offer_id = published.get("offer_id")
+    quotes = published.get("fixed_quotes")
+    if not isinstance(offer_id, str) or not PAID_OFFER_ID.fullmatch(offer_id) or not isinstance(quotes, list) or not quotes:
+        raise MinerSubmissionError("collection_comparison_prices_unavailable")
+    print("Fixed reward and maximum OpenRouter spend per assignment (USD)", file=sys.stderr)
+    seen = set()
+    for quote in quotes:
+        model = quote["model"]
+        fee, budget = quote["quote_microusd"], quote["cap_microusd"]
+        if (model not in MODELS or model in seen or quote["task_class"] != "P"
+                or any(type(v) is not int or not 0 < v <= MAX_MICROUSD for v in (fee, budget))):
+            raise MinerSubmissionError("collection_comparison_prices_unavailable")
+        print(f"{model}  reward ${Decimal(fee).scaleb(-6):f}  spend cap ${Decimal(budget).scaleb(-6):f}", file=sys.stderr)
+        seen.add(model)
+    print(f"Your rolling 24-hour cap is ${Decimal(cap).scaleb(-6):f}. "
+          f"Maximum assignments per UTC day: {getattr(args, 'max_slots_per_day', None) or 1}.", file=sys.stderr)
+    pinned_offer = getattr(args, "accept_offer", None)
+    if pinned_offer is not None and pinned_offer != offer_id:
+        raise MinerSubmissionError("collection_offer_changed")
+    return offer_id
+
+
 def run(args, wallet, *, session=requests):
     action = args.command.removeprefix("collection-")
     try:
@@ -93,6 +126,7 @@ def run(args, wallet, *, session=requests):
         task_scope = getattr(args, "task_scope", TASK_SCOPE)
         expected = TERMS_HASH
         text = TERMS
+        offer_id = None
         if action in ("terms", "register"):
             url = base + "terms" + ("?task_scope=" + CORRECTION_SCOPE if task_scope == CORRECTION_SCOPE else "")
             response = session.get(url, timeout=30, allow_redirects=False)
@@ -104,15 +138,30 @@ def run(args, wallet, *, session=requests):
                     "max_selectable_slots_per_utc_day"
                 ) != MAX_DAILY_SLOTS:
                     raise MinerSubmissionError("collection_slot_opt_in_unavailable")
+                if args.mode == "live" and task_scope == TASK_SCOPE and "offer_id" in published:
+                    expected, text = PAID_WORKFLOW_TERMS_HASH, PAID_WORKFLOW_TERMS
                 if (published.get("mode") != args.mode or published.get("task_scope") != task_scope
                         or published.get("terms_sha256") != expected or published.get("terms") != text):
                     raise MinerSubmissionError("collection_terms_changed")
         if action != "terms":
             creds, body = None, {}
             if action == "register":
-                if args.accept_terms != expected:
-                    raise MinerSubmissionError("collection_terms_changed")
                 cap = daily_cap(args.daily_cap_usd)
+                if args.mode == "live" and not published.get("fixed_quotes"):
+                    raise MinerSubmissionError("collection_prices_unavailable")
+                if expected == PAID_WORKFLOW_TERMS_HASH:
+                    offer_id = _review_paid_offer(published, args, cap)
+                elif getattr(args, "accept_offer", None) is not None:
+                    raise MinerSubmissionError("collection_offer_changed")
+                accepted = getattr(args, "accept_terms", None)
+                if accepted is not None and accepted != expected:
+                    raise MinerSubmissionError("collection_terms_changed")
+                if accepted is None or (offer_id and not getattr(args, "accept_offer", None)):
+                    if not sys.stdin.isatty():
+                        raise MinerSubmissionError("review_collection_terms_and_supply_published_accept_flags")
+                    print(text, file=sys.stderr)
+                    if input("Sign this enrollment and spending cap? Type yes to continue: ").strip().lower() != "yes":
+                        raise MinerSubmissionError("collection_enrollment_cancelled")
                 creds = {}
                 for field in OPENROUTER_FUNDING_FIELDS:
                     value = os.environ.get(REQUIRED_SUBMISSION_CREDENTIAL_ENV_VARS[field], "")
@@ -136,6 +185,8 @@ def run(args, wallet, *, session=requests):
                     "task_scope": task_scope,
                     "credentials_sha256": contracts.document_hash(creds),
                 }
+                if offer_id:
+                    body["offer_id"] = offer_id
                 # Omitting the option preserves compatibility with older gateways and signatures.
                 slots = getattr(args, "max_slots_per_day", None)
                 if slots is not None:
@@ -186,6 +237,7 @@ def run(args, wallet, *, session=requests):
         return 0
     except (
         requests.RequestException,
+        EOFError,
         ValueError,
         KeyError,
         TypeError,
@@ -193,7 +245,7 @@ def run(args, wallet, *, session=requests):
     ) as exc:
         print(
             (
-                exc.code
+                _ERROR_GUIDANCE.get(exc.code, exc.code)
                 if isinstance(exc, MinerSubmissionError)
                 else "Collection request failed."
             ),

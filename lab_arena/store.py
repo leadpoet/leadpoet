@@ -382,6 +382,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "collection_reward_schedule_v1": (),
     "collection_batch_jobs_v1": (("p_batch", "text"),),
     "collection_pilot_costs_v1": (("p_batch", "text"),),
+    "collection_verified_p7_fees_v1": (("p_batch", "text"), ("p_jobs", "jsonb")),
     "collection_pilot_fees_v1": (("p_batch", "text"), ("p_controls", "jsonb")),
     "collection_reward_quotes_v1": (("p_epoch", "bigint"),),
     "lab_arena_publish_weight_state_v1": (("p_network", "text"), ("p_netuid", "integer"), ("p_epoch", "bigint"), ("p_state_hash", "text"), ("p_state_doc", "jsonb")),

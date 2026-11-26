@@ -117,3 +117,120 @@ def test_explicit_slots_on_an_older_gateway_fails_before_wallet_or_credentials(m
         lambda _: pytest.fail("wallet was opened"),
         session=session,
     ) == 2
+
+
+OFFER_ID = 'dv-' + 'c' * 64
+MODEL = intake.MODELS[2]
+
+
+def paid_schedule():
+    return {'pilot_evidence': {'schema': 'leadpoet.collection.verified_p7_prices.v1',
+            'live_batch_id': OFFER_ID, 'prices': {'P': {MODEL: 2822}},
+            'budgets': {'P': {MODEL: 30000}}}}
+
+
+def test_paid_registration_displays_offer_and_signs_only_after_consent(monkeypatch, capsys):
+    from lab_arena.service import ArenaService
+    service = SimpleNamespace(collection_mode=lambda: 'live', _store=SimpleNamespace(
+        _transport=SimpleNamespace(rpc=lambda *args: paid_schedule())))
+    offer = ArenaService.collection_terms(service)
+    assert offer['offer_id'] == OFFER_ID
+    assert offer['fixed_quotes'] == [{'model': MODEL, 'task_class': 'P', 'quote_microusd': 2822, 'cap_microusd': 30000}]
+    assert offer['terms_sha256'] != intake.TERMS_HASH
+    args = miner_cli.build_parser().parse_args(['collection-register', '--mode', 'live', '--daily-cap-usd', '0.30'])
+    monkeypatch.setattr(collection_cli.sys.stdin, 'isatty', lambda: True)
+    got = []
+    key = Keypair.create_from_uri('//PaidOfferFixture')
+    def post(url, *, json, **kwargs):
+        signed = contracts.validate_signed_request(json['authorization'], expected_scope=intake.SCOPE['register'],
+                expected_round_id=intake.scope_id('live'), now=json['authorization']['timestamp'], verify_signature=wallet_signature_verifier)
+        got.append(signed['body'])
+        return SimpleNamespace(status_code=200, json=lambda: {'registration_id': str(uuid.uuid4())})
+    session = SimpleNamespace(get=lambda *a, **kw: SimpleNamespace(status_code=200, json=lambda: offer), post=post)
+    monkeypatch.setattr('builtins.input', lambda prompt: 'no')
+    assert collection_cli.run(args, lambda _: pytest.fail('wallet accessed before consent'), session=session) == 2
+    assert not got
+    monkeypatch.setattr('builtins.input', lambda prompt: 'yes')
+    for field in ('OPENROUTER_API_KEY', 'OPENROUTER_MANAGEMENT_KEY'):
+        monkeypatch.setenv(field, 'sk-or-v1-' + 'g'*40)
+    assert collection_cli.run(args, lambda _: key, session=session) == 0
+    assert got[0]['offer_id'] == OFFER_ID and got[0]['terms_sha256'] == offer['terms_sha256']
+    printed = capsys.readouterr()
+    assert '$0.002822' in printed.err and MODEL in printed.err and '$0.30' in printed.err
+
+
+@pytest.mark.parametrize('action', ['statement', 'revoke'])
+def test_pilot_funder_can_manage_signed_pilot_registration_after_live_cutover(action):
+    from datetime import datetime, timezone
+    from lab_arena.service import ArenaService
+    from lab_arena.miner_submit import _signed_request
+    from time import time
+    key = Keypair.create_from_uri('//PilotAccessAfterCutover')
+    reg = str(uuid.uuid4())
+    body = {'registration_id': reg} if action == 'revoke' else {}
+    signed = _signed_request(scope=intake.SCOPE[action], round_id=intake.scope_id('pilot'), body=body, keypair=key, now=time)
+    service = object.__new__(ArenaService)
+    service._config = SimpleNamespace(verify_signature=wallet_signature_verifier, credential_manager=None)
+    service._clock = lambda: datetime.now(timezone.utc)
+    service.collection_mode = lambda: 'live'
+    calls = []
+    service._store = SimpleNamespace(_transport=SimpleNamespace(rpc=lambda name, args: calls.append((name,args)) or {}))
+    assert service.handle_collection_request(action, signed) == {}
+    assert calls[0][1]['p_mode'] == 'pilot' and calls[0][1]['p_hotkey'] == key.ss58_address and len(calls) == 1
+
+
+@pytest.mark.parametrize('change', ['no_schedule', 'offer_changed', 'old_terms', 'wrong_scope'])
+def test_gateway_denies_inactive_or_stale_paid_offer_before_key_validation(change):
+    from tests.lab_arena.collection_intake_test import registration
+    signed, creds = registration('X', 'live')
+    signed['body'].update(offer_id=OFFER_ID, terms_sha256=intake.PAID_WORKFLOW_TERMS_HASH)
+    schedule = paid_schedule()
+    if change == 'no_schedule':
+        schedule = {}
+    elif change == 'offer_changed':
+        schedule['pilot_evidence']['live_batch_id'] = 'dv-' + 'd'*64
+    elif change == 'old_terms':
+        signed['body']['terms_sha256'] = intake.TERMS_HASH
+        signed['body'].pop('offer_id')
+    else:
+        signed['body']['task_scope'] = intake.CORRECTION_SCOPE
+    transport = SimpleNamespace(rpc=lambda name, _: schedule if name == 'collection_reward_schedule_v1' else pytest.fail(name))
+    offer = {**intake.terms('live'), **intake.comparison_offer(transport)}
+    service = intake.CollectionIntake(transport, SimpleNamespace(
+        validate_openrouter_funding=lambda *a, **kw: pytest.fail('contacted provider before verifying consent')), 'live')
+    with pytest.raises(intake.IntakeError):
+        service.register(signed, '5' + 'p'*47, creds, published=offer)
+
+
+def test_paid_allocator_uses_only_the_signed_p7_model_roster():
+    calls = []
+    db = SimpleNamespace(rpc=lambda name, args: calls.append(args) or None)
+    service = intake.CollectionIntake(db, None, 'live')
+    def claim(prices, caps, scenarios=('P7-s40401',), digest=intake.PAID_WORKFLOW_TERMS_HASH):
+        return service.claim(OFFER_ID, scenarios, 'a'*40, prices, caps, terms_hash=digest, expected_model=None)
+    claim({MODEL: 2822}, {MODEL: 30000})
+    assert calls[-1]['p_models'] == [MODEL] and calls[-1]['p_prices'] == {MODEL: 2822}
+    for fees, caps, cases, digest in (
+        ({MODEL: 2822}, {}, ('P7-s40401',), intake.PAID_WORKFLOW_TERMS_HASH),
+        ({'no-such-model': 1}, {'no-such-model': 5}, ('P7-s40401',), intake.PAID_WORKFLOW_TERMS_HASH),
+        ({MODEL: 2822}, {MODEL: 30000}, ('P6-s40401',), intake.PAID_WORKFLOW_TERMS_HASH),
+        ({MODEL: 2822}, {MODEL: 30000}, ('P7-s40401',), intake.TERMS_HASH),
+    ):
+        with pytest.raises(intake.IntakeError):
+            claim(fees, caps, cases, digest)
+    assert len(calls) == 1
+
+
+def test_paid_registration_requires_unattended_offer_pin(monkeypatch):
+    from lab_arena.service import ArenaService
+    service = SimpleNamespace(collection_mode=lambda: 'live', _store=SimpleNamespace(
+        _transport=SimpleNamespace(rpc=lambda *args: paid_schedule())))
+    offer = ArenaService.collection_terms(service)
+    args = miner_cli.build_parser().parse_args(['collection-register', '--mode', 'live',
+            '--daily-cap-usd', '0.30', '--accept-terms', offer['terms_sha256']])
+    session = SimpleNamespace(get=lambda *a, **kw: SimpleNamespace(status_code=200, json=lambda: offer),
+                              post=lambda *a, **kw: pytest.fail('posted credentials'))
+    monkeypatch.setattr(collection_cli.sys.stdin, 'isatty', lambda: False)
+    assert collection_cli.run(args, lambda _: pytest.fail('wallet opened'), session=session) == 2
+    args.accept_offer = 'dv-' + '0'*64
+    assert collection_cli.run(args, lambda _: pytest.fail('wallet opened'), session=session) == 2

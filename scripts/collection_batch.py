@@ -14,7 +14,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from lab_arena import collection_judge as judge, collection_judge_review as review
 from lab_arena.collection_calibration import compile_pilot
 from lab_arena.collection_intake import MODELS, live_finney_arena
-from lab_arena.collection_workflow import comparison_revisions
+from lab_arena.collection_workflow import comparison_revisions, read_artifact
 from lab_arena.service import S3ObjectStore
 from lab_arena.store import PostgrestTransport
 from scripts.collection_review import read_file, write_new
@@ -145,19 +145,6 @@ def _registered_projection(raw, prompt, transport, objects, *, export_successor=
     return {**bundle, "split_manifest_sha256": judge.digest(raw["split_manifest"])}
 
 
-def read_artifact(objects, batch, run, kind, link, limit):
-    digest = link.get("sha256")
-    if type(digest) is not str or not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
-        raise ValueError("missing trusted artifact hash")
-    ref = f"collection/{batch}/{run}/{kind}-{digest[7:]}.json"
-    if link.get("key", ref) != ref:
-        raise ValueError("cross-run artifact reference")
-    data = objects.get_bounded(ref, limit)
-    if hashlib.sha256(data).hexdigest() != digest[7:]:
-        raise ValueError("stored evidence did not match review")
-    return json.loads(data)
-
-
 def write_exports(raw, prompt, database, objects, output, *, qualification=None):
     """Publish authorized, originally funded comparison traces against a separately qualified panel."""
     from lab_arena import collection_intake as intake, collection_trajectories as traces
@@ -170,10 +157,15 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
     )
     from lab_arena.collection_workflow import store_artifact
 
+    from lab_arena.collection_worker import P7_PAYMENT_RULE, registered_native_result
+    from scripts.run_locked_collection import verify_live_panel
+
     terms = raw.get("terms_sha256")
-    if not terms or terms != intake.SYNTHETIC_TRAINING_TERMS_HASH:
+    native = raw.get("payment_rule") == P7_PAYMENT_RULE
+    expected_terms = intake.PAID_WORKFLOW_TERMS_HASH if native else intake.SYNTHETIC_TRAINING_TERMS_HASH
+    if not terms or terms != expected_terms:
         raise ValueError("comparison enrollment did not grant training release rights")
-    if not qualification:
+    if not qualification and not native:
         raise ValueError("independent reviewer and qualification signatures required")
     policy = load_batch(raw, prompt)
     split = raw["split_manifest"]
@@ -184,7 +176,12 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
             "split_sha256": split_hash,
         }
     )
-    approved = verified_panel(database, objects, raw, policy, **qualification)
+    if native:
+        schedule = database.rpc("collection_reward_schedule_v1", {})
+        approved = (schedule or {}).get("pilot_evidence") or {}
+        verify_live_panel(raw, policy, approved)
+    else:
+        approved = verified_panel(database, objects, raw, policy, **qualification)
     witness = None
     successor = raw.get("reference_successor")
     if successor or raw.get("route_witness_sha256"):
@@ -206,7 +203,7 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
         raise ValueError(
             "comparison training release requires a checkpointed transcript"
         )
-    bundle = _registered_projection(
+    bundle = {} if native else _registered_projection(
         raw, prompt, database, objects, export_successor=bool(successor)
     )
     rows = database.rpc("collection_batch_jobs_v1", {"p_batch": policy.batch_id})
@@ -217,16 +214,34 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
         mode=raw["mode"],
         scope=intake.TASK_SCOPE,
         digest=terms,
-        allow_pending=bool(successor),
+        allow_pending=native or bool(successor),
     )
-    by_id = {item["packet"]["run_id"]: item for item in bundle["runs"]}
+    by_id = {item["packet"]["run_id"]: item for item in bundle.get("runs", ())}
     failed = {item["run_id"] for item in bundle.get("failed_attempts", ())}
+    if native:
+        rows = [job for job in rows if job["status"] in {"accepted", "rejected", "failed"}
+                and not grants[job["job_id"]]["unresolved"]]
+        if not rows:
+            raise ValueError("no settled native collection runs available to export")
+        for job in rows:
+            rid = job["job_id"]
+            if job["status"] == "failed":
+                failed.add(rid)
+                continue
+            manifest, checked = registered_native_result(job, objects, policy, approved)
+            if (checked["eligible"] != (job["status"] == "accepted")
+                    or checked["cost_microusd"] != grants[rid]["miner_cost_microusd"]
+                    or checked["calls"] != grants[rid]["generator_calls"]):
+                raise ValueError("verified native run differs from the funded outcome")
+            packet = read_artifact(objects, policy.batch_id, rid, "judge-input", manifest["packet"], 16 * 1024 * 1024)
+            by_id[rid] = {"packet": packet, "assessment": None, "manifest_sha256":job["artifact_sha256"]}
+
     if successor:
         allowed = set(by_id) | failed
         rows = [r for r in rows if r["job_id"] in allowed]
     if set(by_id) | failed != {r["job_id"] for r in rows}:
         raise ValueError("registered jobs changed during release")
-    controls = set(bundle["planted"]) | set(bundle["drift"])
+    controls = set(bundle.get("planted", ())) | set(bundle.get("drift", ()))
     agent, builder = comparison_revisions(raw)
     revisions = batch_versions(raw["routes"])
     settings_hash = "sha256:" + judge.digest(raw)
@@ -346,6 +361,12 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
                     partial=rid in failed,
                     hold=hold,
                 )
+                if native:
+                    trajectory["verification_method"] = P7_PAYMENT_RULE
+                    if packet and trajectory["final_turn_present"]:
+                        trajectory["verified_task_pass"] = all(packet["checks"][k] is True for k in (
+                            "answered", "shape", "code_grade", "no_hard_failure", "privacy", "training_split"
+                        ))
                 if successor:
                     trajectory["reference_successor"] = dict(successor)
                 if witness and job["model"] == witness["model"]:
@@ -357,7 +378,7 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
                 "batch_id": policy.batch_id,
                 "settings_sha256": settings_hash,
                 "split_sha256": split_hash,
-                "qualification_sha256": "sha256:" + judge.digest(approved),
+                ("price_schedule_sha256" if native else "qualification_sha256"): "sha256:" + judge.digest(approved),
                 "rows": result.get("trajectory_rows", 0),
                 **result,
             }
@@ -463,7 +484,10 @@ def main(argv=None):
     p.add_argument("--dataset-metadata", type=Path)
     p.add_argument("--evaluation", type=Path)
     args = p.parse_args(argv)
-    if args.action in {"prices", "export", "corrections"} and args.receipt is None:
+    raw, prompt = (json.loads(read_file(path)) for path in (args.batch, args.prompt))
+    from lab_arena.collection_worker import P7_PAYMENT_RULE
+    native_export = args.action == "export" and raw.get("payment_rule") == P7_PAYMENT_RULE
+    if args.action in {"prices", "export", "corrections"} and not native_export and args.receipt is None:
         p.error("--receipt is required")
     if not live_finney_arena():
         raise ValueError("expected Finney/71 operator configuration")
@@ -475,7 +499,6 @@ def main(argv=None):
         os.environ["LAB_ARENA_BUCKET"],
         prefix=os.environ.get("LAB_ARENA_OBJECT_PREFIX", ""),
     )
-    raw, prompt = (json.loads(read_file(path)) for path in (args.batch, args.prompt))
     from lab_arena.collection_experiment import SCHEMA, load_experiment
     from lab_arena.collection_experiment_export import record_feedback, write_dataset
 
@@ -504,7 +527,7 @@ def main(argv=None):
         return 0
     if args.action in {"experiment-audit", "corrections", "export"}:
         qualification = None
-        if args.action != "experiment-audit":
+        if args.action != "experiment-audit" and not native_export:
             if not (args.panel_batch and args.panel_prompt and args.qualification):
                 p.error(
                     "supply the original qualification pilot and independent approvals"

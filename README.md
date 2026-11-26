@@ -18,7 +18,7 @@ Subnet 71 is a Bittensor subnet where miners fund experiments to improve open sa
 
 ## Locked collection
 
-Miners fund our public sales agent with a dedicated OpenRouter key. We run the task, record its reasoning and tool calls, and verify the result. Each eligible paid assignment earns a fixed quote based on 1.25× the measured cost of that model and task. If the available emissions fall short, all quotes scale by the same proportion. Champion rewards have ended.
+Miners fund our public sales agent with a dedicated OpenRouter key. We run the task, record its reasoning and tool calls, and verify the result. Each eligible paid assignment earns a fixed quote based on 1.25× the measured cost of that model and task. Validators convert those quotes to weights. If emissions fall short, all quotes scale proportionally. Final payments also depend on network validator votes and the token price. Champion rewards have ended.
 
 After installing the miner CLI and registering your SN71 hotkey, run the command below. It shows the current paid offer before asking for funding keys. Choose your own rolling 24-hour cap and substitute your wallet name.
 

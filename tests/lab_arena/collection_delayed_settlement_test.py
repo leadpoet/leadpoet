@@ -281,5 +281,9 @@ def test_optional_archive_failure_keeps_existing_billing_post_step_enabled(
     observed = {}
     monkeypatch.setattr(watch, "save", lambda folder, data: observed.update(data))
     assert not watch.main()
+    assert observed["read_errors"] == {}
+    assert observed["settlement"] == {}
+    (tmp_path / "status.json").write_text('{"last_read":{"distribution":{"epoch":12}}}')
+    assert not watch.main()
     assert observed["read_errors"] == {"settlement": "ConnectionError"}
     assert observed["distribution"] == {"epoch": 12}

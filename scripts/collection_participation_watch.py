@@ -290,10 +290,16 @@ def main():
         data["read_errors"]["distribution"] = type(exc).__name__
     try:
         if db is not None and "distribution" in data and "collection" in data:
-            data["settlement"] = collection_settlement.observe(
-                env, db, args.state_directory, prior.get("settlement") or {},
-                data["distribution"].get("epoch"), data["collection"].get("first_epoch"), VALIDATORS,
-            )
+            closed = data["distribution"].get("epoch")
+            previous_settlement = prior.get("settlement") or {}
+            # Keep the two expensive archive proofs in separate timer invocations.
+            if closed != (prior.get("distribution") or {}).get("epoch"):
+                data["settlement"] = previous_settlement
+            else:
+                data["settlement"] = collection_settlement.observe(
+                    env, db, args.state_directory, previous_settlement, closed,
+                    data["collection"].get("first_epoch"), VALIDATORS,
+                )
     except Exception as exc:
         data["read_errors"]["settlement"] = type(exc).__name__
     save(args.state_directory, data)

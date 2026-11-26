@@ -21,7 +21,7 @@ def _profile():
     return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
 
 
-@pytest.mark.parametrize("spec", [494, 495])
+@pytest.mark.parametrize("spec", [494, 495, 497])
 def test_measured_finney_runtime_uses_mechanism_call_and_transaction_version_two(spec):
     profile = select_chain_signing_profile(
         _profile(),

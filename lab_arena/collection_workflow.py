@@ -774,3 +774,16 @@ def store_artifact(objects, batch_id, run_id, kind, value):
     if objects.get_bounded(key, len(data)) != data:
         raise RuntimeError("stored collection artifact did not verify")
     return {"key": key, "sha256": "sha256:" + identity}
+
+
+def read_artifact(objects, batch, run, kind, link, limit):
+    digest = link.get("sha256")
+    if type(digest) is not str or not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+        raise ValueError("missing trusted artifact hash")
+    ref = f"collection/{batch}/{run}/{kind}-{digest[7:]}.json"
+    if link.get("key", ref) != ref:
+        raise ValueError("cross-run artifact reference")
+    data = objects.get_bounded(ref, limit)
+    if hashlib.sha256(data).hexdigest() != digest[7:]:
+        raise ValueError("stored evidence did not match review")
+    return json.loads(data)

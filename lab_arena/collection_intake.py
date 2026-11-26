@@ -539,6 +539,11 @@ def _validate_quality(summary):
         "scores",
         "failure_tags",
         "training_status",
+        "payment_rule",
+    }:
+        raise IntakeError("collection_quality_invalid")
+    if "payment_rule" in summary and summary != {
+        "payment_rule": "verified_p7_v1", "training_status": "needs_review"
     }:
         raise IntakeError("collection_quality_invalid")
     if "training_status" in summary and summary["training_status"] not in {

@@ -18,11 +18,15 @@ Subnet 71 is a Bittensor subnet where miners fund experiments to improve open sa
 
 ## Locked collection
 
-Registered miners can fund a simulated sales workflow with an OpenRouter key and a daily spending cap. Choose a model comparison or a correction, where an expert resumes a task after a smaller model makes a mistake. The subnet runs the agent.
+Miners fund our public sales agent with a dedicated OpenRouter key. We run the task, record its reasoning and tool calls, and verify the result. Each eligible paid assignment earns a fixed quote based on 1.25× the measured cost of that model and task. If the available emissions fall short, all quotes scale by the same proportion. Champion rewards have ended.
 
-Pilot jobs use real API credits and pay no emissions. To join, follow the [miner enrollment steps](docs/locked-collection.md#enrollment). Choose your daily spending and assignment limits when you enroll. You can check your spending and revoke access at any time.
+After installing the miner CLI and registering your SN71 hotkey, run the command below. It shows the current paid offer before asking for funding keys. Choose your own rolling 24-hour cap and substitute your wallet name.
 
-Champion rewards have ended. The designated burn hotkey receives unallocated miner emissions. When paid collection opens, eligible completed jobs earn a fixed price from the available emissions. See the [pilot and reviewer thread](https://github.com/leadpoet/leadpoet/issues/1343) for setup help or to volunteer for a blind review.
+```bash
+leadpoet collection-register --mode live --wallet-name miner --daily-cap-usd 0.30
+```
+
+Pilot enrollments require a new signature to join paid collection. You can check charges and stop new spending at any time. [Enrollment and spending controls](docs/locked-collection.md#enrollment)
 
 ## Install and register
 

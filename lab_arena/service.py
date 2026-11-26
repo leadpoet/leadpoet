@@ -2751,7 +2751,7 @@ class ArenaService:
             if mode == "live" and task_scope == collection_intake.CORRECTION_SCOPE:
                 document["fixed_quotes"] = collection_intake.open_correction_quotes(self._store._transport)
             elif mode == "live":
-                document["fixed_quotes"] = collection_intake.approved_comparison_quotes(self._store._transport)
+                document.update(collection_intake.comparison_offer(self._store._transport))
             return document
         except collection_intake.IntakeError as exc:
             raise ServiceError(exc.code, exc.status) from None
@@ -2767,6 +2767,9 @@ class ArenaService:
         )):
             raise ServiceError("collection_request_invalid", 400)
         envelope = request["authorization"] if register else request
+        # Historical funders retain private access to the grant they signed after the mode changes.
+        if not register and isinstance(envelope, dict):
+            mode = next((m for m in ("pilot", "live") if envelope.get("round_id") == collection.scope_id(m)), mode)
         try:
             signed = contracts.validate_signed_request(
                 envelope, expected_scope=collection.SCOPE[operation], now=int(self.now().timestamp()),
@@ -2788,7 +2791,8 @@ class ArenaService:
                 if self._config.credential_manager is None:
                     raise ServiceError("credential_validation_unavailable", 503)
                 owner = resolve_finalized_owner(self._config.chain, hk)
-                return intake.register(signed, owner.coldkey, request["credentials"])
+                published = self.collection_terms(signed["body"].get("task_scope")) if mode == "live" else None
+                return intake.register(signed, owner.coldkey, request["credentials"], published=published)
             if operation == "revoke" and set(signed["body"]) == {"registration_id"}:
                 return intake.revoke(hk, signed["body"]["registration_id"])
             if operation == "statement" and not signed["body"]:

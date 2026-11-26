@@ -297,7 +297,8 @@ def main():
     except Exception as exc:
         data["read_errors"]["settlement"] = type(exc).__name__
     save(args.state_directory, data)
-    return bool(data["read_errors"])
+    # A delayed archive proof must not skip the existing systemd billing reconciliation step.
+    return bool(data["read_errors"].keys() - {"settlement"})
 
 
 if __name__ == "__main__":

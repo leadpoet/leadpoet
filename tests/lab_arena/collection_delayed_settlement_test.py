@@ -243,3 +243,43 @@ def test_reveals_belong_to_the_quote_period_and_precede_distribution(monkeypatch
     records.append(dict(records[0]))
     records[1]["submitted_at"] = 50
     assert set(replay()) == {"yuma"}
+
+
+def test_optional_archive_failure_keeps_existing_billing_post_step_enabled(
+    tmp_path, monkeypatch
+):
+    import sys
+    from lab_arena import store
+    from scripts import collection_participation_watch as watch
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["watch", "--environment-file", "unused", "--state-directory", str(tmp_path)],
+    )
+    monkeypatch.setattr(
+        watch,
+        "_read_scoped_environment",
+        lambda _: {"LAB_ARENA_SUPABASE_URL": "unused", "LAB_ARENA_SERVICE_KEY": "test"},
+    )
+    monkeypatch.setattr(
+        store,
+        "PostgrestTransport",
+        lambda *a, **kw: SimpleNamespace(rpc=lambda *a: {"first_epoch": 11}),
+    )
+    monkeypatch.setattr(watch, "edge_snapshot", lambda *a: {})
+    monkeypatch.setattr(watch, "worker_snapshot", lambda: {})
+    monkeypatch.setattr(watch, "validator_snapshot", lambda *a: {})
+    monkeypatch.setattr(
+        watch.collection_distributions, "observe", lambda *a: {"epoch": 12}
+    )
+
+    def offline(*args):
+        raise ConnectionError("offline")
+
+    monkeypatch.setattr(settlement, "observe", offline)
+    observed = {}
+    monkeypatch.setattr(watch, "save", lambda folder, data: observed.update(data))
+    assert not watch.main()
+    assert observed["read_errors"] == {"settlement": "ConnectionError"}
+    assert observed["distribution"] == {"epoch": 12}

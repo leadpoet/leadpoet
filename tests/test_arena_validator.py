@@ -814,3 +814,30 @@ def test_weight_api_only_recognizes_bounded_participation_denial(monkeypatch, st
     assert isinstance(caught.value, ArenaParticipationRequired) is participation
     assert "private" not in str(caught.value)
     assert stream.closed
+
+
+def test_closed_epoch_absence_cannot_authorize_another_broadcast_or_report(tmp_path):
+    proof = {
+        "status": "not_included_expired",
+        "finalized": False,
+        "expiry_proof": {
+            "first_block": 1000,
+            "last_block": 1031,
+            "last_block_hash": "2" * 64,
+            "nonce": 7,
+        },
+    }
+    signer, broadcasts = _Signer(_protected(), [proof]), []
+    orchestrator = _orchestrator(tmp_path, signer, broadcasts)
+    assert orchestrator.run_once(9) == "broadcast"
+    signed = orchestrator.paths.signed(9).read_bytes()
+    # Even if the host offers a still-retryable context, a historical nonce is audit-only.
+    orchestrator.chain.submission_ready = True
+    orchestrator.api.submit_chain_outcome = lambda _: pytest.fail("reported an absent transaction")
+    assert orchestrator.run_once(9) == "not_included_expired"
+    assert orchestrator.paths.signed(9).read_bytes() == signed
+    assert _read_hashed_json(orchestrator.paths.outcome(9))["report_document"] is None
+    restarted = _orchestrator(tmp_path, signer, broadcasts)
+    assert restarted.run_once(9) == "not_included_expired"
+    assert restarted.poll_prior_outcomes(10)
+    assert len(broadcasts) == signer.prepares == signer.confirms == 1

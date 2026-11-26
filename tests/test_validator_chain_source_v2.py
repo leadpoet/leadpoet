@@ -1140,3 +1140,83 @@ def test_finalized_extrinsic_rejects_inclusion_without_expected_state_change():
             minimum_block=BLOCK,
             maximum_block=BLOCK,
         )
+
+
+@pytest.mark.parametrize(
+    "anchor", ["complete", "head_before_end", "no_archive", "conflicting_header"]
+)
+def test_archived_nonce_anchor_needs_the_entire_authorized_absence_scan(anchor):
+    from lab_arena.chain_source import FinalizedExtrinsicAbsent
+    from leadpoet_canonical.chain_source_v2 import system_account_storage_key
+
+    end = BLOCK + 1
+    head = BLOCK if anchor == "head_before_end" else end + 1
+    calls = []
+
+    def rpc(role, *, method, params, request_id):
+        calls.append((role, method, params))
+        if method == "chain_getFinalizedHead":
+            return "0x" + head.to_bytes(32, "big").hex()
+        if method == "chain_getBlockHash":
+            return "0x" + params[0].to_bytes(32, "big").hex()
+        number = int(params[-1], 16)
+        hdr = {
+            "number": hex(number),
+            "stateRoot": "0x" + "12" * 32,
+            "extrinsicsRoot": "0x" + "56" * 32,
+            "parentHash": "0x" + (number - 1).to_bytes(32, "big").hex(),
+        }
+        if method == "chain_getHeader":
+            return hdr
+        if method == "chain_getBlock":
+            if role == "archive" and anchor == "conflicting_header":
+                hdr["stateRoot"] = "0x" + "ff" * 32
+            return {"block": {"header": hdr, "extrinsics": ["0x1234"]}, "justifications": None}
+        assert (role, method, params) == (
+            "archive",
+            "state_getStorage",
+            [system_account_storage_key(OWNER), "0x" + end.to_bytes(32, "big").hex()],
+        )
+        return "0x07000000"
+
+    from functools import partial
+
+    source = ValidatorChainSourceV2(
+        rpc_call=partial(rpc, "live"),
+        archive_rpc_call=None if anchor == "no_archive" else partial(rpc, "archive"),
+        finalization_sleep=lambda _: None,
+        epoch_authority_supplier=lambda: {},
+    )
+    missing = b"missing-extrinsic"
+    with pytest.raises(ValidatorChainSourceV2Error) as exc:
+        source.find_finalized_extrinsic_inclusion(
+            expected_extrinsics={signed_extrinsic_hash_v2(missing): missing.hex()},
+            expected_commitments={signed_extrinsic_hash_v2(missing): {}},
+            minimum_block=BLOCK,
+            maximum_block=end,
+        )
+    if anchor != "complete":
+        error = (
+            "headers differ" if anchor == "conflicting_header" else "no authorized weight extrinsic"
+        )
+        assert error in str(exc.value)
+        assert not isinstance(exc.value, FinalizedExtrinsicAbsent)
+        return
+    assert isinstance(exc.value, FinalizedExtrinsicAbsent)
+    assert (exc.value.first_block, exc.value.last_block, exc.value.last_block_hash) == (
+        BLOCK,
+        end,
+        end.to_bytes(32, "big").hex(),
+    )
+    for role in ("archive", "live"):
+        assert [p for r, m, p in calls if r == role and m == "chain_getBlock"] == [
+            ["0x" + i.to_bytes(32, "big").hex()] for i in (end, BLOCK)
+        ]
+    assert (
+        source.read_finalized_account_nonce(
+            account_public_key_hex=OWNER.hex(),
+            finalized_block_hash=exc.value.last_block_hash,
+            archive=True,
+        )
+        == 7
+    )

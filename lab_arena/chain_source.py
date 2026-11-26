@@ -55,6 +55,16 @@ class ValidatorChainSourceV2Error(RuntimeError):
     """The validator could not authenticate a complete chain snapshot."""
 
 
+class FinalizedExtrinsicAbsent(ValidatorChainSourceV2Error):
+    """Both the live and archive reads completed the entire authorized byte scan."""
+
+    def __init__(self, first_block: int, last_block: int, last_block_hash: str):
+        super().__init__("no authorized weight extrinsic was found in finalized blocks")
+        self.first_block = first_block
+        self.last_block = last_block
+        self.last_block_hash = last_block_hash
+
+
 def validate_rewarded_uid_ownership(
     hotkeys: Sequence[str], bindings: Sequence[Mapping[str, Any]]
 ) -> None:
@@ -182,7 +192,7 @@ class ValidatorChainSourceV2:
 
     @chain_read("account_nonce")
     def read_finalized_account_nonce(
-        self, *, account_public_key_hex: str, finalized_block_hash: str
+        self, *, account_public_key_hex: str, finalized_block_hash: str, archive: bool = False
     ) -> int:
         """Read nonce from authenticated System.Account at one finalized hash."""
 
@@ -191,7 +201,10 @@ class ValidatorChainSourceV2:
         except ValueError as exc:
             raise ValidatorChainSourceV2Error("account public key is invalid") from exc
         target = normalize_raw_hash(finalized_block_hash, "finalized block hash")
-        result = self._call(method='state_getStorage', params=[system_account_storage_key(account), '0x' + target], request_id=1)
+        if archive and self._archive_rpc_call is None:
+            raise ValidatorChainSourceV2Error("archived account nonce is unavailable")
+        call = self._archive_call if archive else self._call
+        result = call(method='state_getStorage', params=[system_account_storage_key(account), '0x' + target], request_id=1)
         try:
             return decode_system_account_nonce(result)
         except ChainSourceV2Error as exc:
@@ -1042,6 +1055,8 @@ class ValidatorChainSourceV2:
             block_hash = normalize_raw_hash(
                 block_hash_result, "finalized block hash"
             )
+            if block_number == end:
+                last_block_hash = block_hash
             block_result = finalization_call(method='chain_getBlock', params=['0x' + block_hash], request_id=request_id)
             request_id += 1
             block = parse_finalized_block_extrinsics(
@@ -1126,6 +1141,8 @@ class ValidatorChainSourceV2:
                         "finalized_head": finalized_header,
                         "state_transition_hash": sha256_json(matched_commits[0]),
                     }
+        if end == requested_end and self._archive_rpc_call is not None:
+            raise FinalizedExtrinsicAbsent(start, end, last_block_hash)
         raise ValidatorChainSourceV2Error(
             "no authorized weight extrinsic was found in finalized blocks"
         )

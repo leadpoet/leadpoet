@@ -157,6 +157,7 @@ def test_paid_registration_displays_offer_and_signs_only_after_consent(monkeypat
     assert got[0]['offer_id'] == OFFER_ID and got[0]['terms_sha256'] == offer['terms_sha256']
     printed = capsys.readouterr()
     assert '$0.002822' in printed.err and MODEL in printed.err and '$0.30' in printed.err
+    assert 'Network votes and token prices determine the actual payout.' in printed.err
 
 
 @pytest.mark.parametrize('action', ['statement', 'revoke'])

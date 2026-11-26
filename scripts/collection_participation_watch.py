@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 
-from lab_arena import collection_distributions
+from lab_arena import collection_distributions, collection_settlement
 from scripts.lab_arena_restart_claim_guard import _read_scoped_environment
 
 VALIDATORS = {
@@ -145,7 +145,7 @@ def edge_snapshot(directory, prior):
 def notices(data):
     """Milestones are monotone where possible. Keep idle polls and ordinary blocks quiet."""
     signals = {}
-    for name in ("collection", "worker", "weights", "edge", "distribution"):
+    for name in ("collection", "worker", "weights", "edge", "distribution", "settlement"):
         if name not in data:
             signals[name + " read unavailable"] = 1
     collection = data.get("collection", {})
@@ -207,9 +207,13 @@ def notices(data):
                 signals["post-cutover collection basis and zero champion component verified on all three validators"] = verified
                 signals["inspect post-cutover reward evidence"] = not verified
     closed = data.get("distribution", {})
-    signals["closed miner distribution requires inspection"] = closed.get("result") == "inspect"
+    settlement = (data.get("settlement") or {}).get("last_paid") or {}
+    settled_here = (settlement.get("result") == "collection_recipients_observed"
+                    and settlement.get("distribution_epoch") == closed.get("epoch"))
+    signals["closed miner distribution requires inspection"] = closed.get("result") == "inspect" and not settled_here
+    signals["unreconciled paid collection distribution"] = settlement.get("result") == "inspect"
     signals["finalized miner distribution paid only the designated burn hotkey"] = closed.get("result") == "burn_only"
-    signals["finalized collection recipients received miner emissions"] = closed.get("result") == "collection_recipients_observed"
+    signals["finalized collection recipients received miner emissions"] = settled_here or closed.get("result") == "collection_recipients_observed"
     signals["catching up on unobserved closed distributions"] = bool(closed.get("epochs_to_catch_up"))
     return {key: value for key, value in signals.items() if value}
 
@@ -220,7 +224,7 @@ def save(directory, data):
     previous = json.loads(path.read_text()) if path.exists() else {}
     # An unread source means unknown. Keep its last signals until it can be read again.
     previous_observations = previous.get("last_read", {})
-    last_read = {name: data.get(name, previous_observations.get(name)) for name in ("collection", "worker", "weights", "edge", "distribution")}
+    last_read = {name: data.get(name, previous_observations.get(name)) for name in ("collection", "worker", "weights", "edge", "distribution", "settlement")}
     current = notices({name: value for name, value in last_read.items() if value is not None})
     for name in last_read:
         if name not in data:
@@ -284,8 +288,23 @@ def main():
             data["read_errors"]["distribution"] = "StoreUnavailable"
     except Exception as exc:
         data["read_errors"]["distribution"] = type(exc).__name__
+    try:
+        if db is not None and "distribution" in data and "collection" in data:
+            closed = data["distribution"].get("epoch")
+            previous_settlement = prior.get("settlement") or {}
+            # Keep the two expensive archive proofs in separate timer invocations.
+            if closed != (prior.get("distribution") or {}).get("epoch"):
+                data["settlement"] = previous_settlement
+            else:
+                data["settlement"] = collection_settlement.observe(
+                    env, db, args.state_directory, previous_settlement, closed,
+                    data["collection"].get("first_epoch"), VALIDATORS,
+                )
+    except Exception as exc:
+        data["read_errors"]["settlement"] = type(exc).__name__
     save(args.state_directory, data)
-    return bool(data["read_errors"])
+    # A delayed archive proof must not skip the existing systemd billing reconciliation step.
+    return bool(data["read_errors"].keys() - {"settlement"})
 
 
 if __name__ == "__main__":

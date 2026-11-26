@@ -396,6 +396,36 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
     return metadata
 
 
+def paid_capture_counts(archive, job, batch):
+    """Verify the accepted job in a private first-payment export."""
+    from uuid import UUID
+    from lab_arena.collection_worker import P7_PAYMENT_RULE
+
+    if str(UUID(job)) != job:
+        raise ValueError("invalid funded job identifier")
+    path = f"trajectories/{job}.jsonl"
+    with ZipFile(archive) as z:
+        if z.namelist().count(path) != 1:
+            raise ValueError("first paid trajectory is missing or duplicated")
+        with z.open(path) as source:
+            row = json.load(source)
+    if (
+        row["run_id"] != job
+        or row["batch_id"] != batch
+        or row["job_status"] != "accepted"
+        or row["verified_task_pass"] is not True
+        or row["verification_method"] != P7_PAYMENT_RULE
+    ):
+        raise ValueError("export does not prove the first accepted paid job")
+    counts = row["length"]
+    if any(
+        type(counts.get(k)) is not int or counts[k] <= 0
+        for k in ("reasoning_bytes", "tool_result_bytes")
+    ):
+        raise ValueError("first paid trajectory lacks reasoning or tool results")
+    return counts
+
+
 def cutover_anchor(transport, *, launch_job=None):
     """Bind pricing to the current signed, finalized epoch before paid collection."""
     from lab_arena import chain, signing

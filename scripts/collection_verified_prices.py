@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 import re
 
@@ -13,11 +12,9 @@ from lab_arena.collection_generation import CAPTURE_V2
 from lab_arena.collection_intake import PAID_WORKFLOW_TERMS_HASH, live_finney_arena
 from lab_arena.collection_worker import P7_PAYMENT_RULE, native_payment_evidence
 from lab_arena.collection_workflow import comparison_revisions
-from lab_arena.service import S3ObjectStore
-from lab_arena.store import PostgrestTransport
 from scripts.collection_batch import cutover_anchor, read_artifact
 from scripts.collection_review import read_file, write_new
-from scripts.run_locked_collection import load_batch
+from scripts.run_locked_collection import evidence_stores, load_batch
 
 
 def compile_prices(source, prompt, jobs, scenarios, db, objects):
@@ -181,14 +178,7 @@ def main(argv=None):
         ):
             raise ValueError("Finney/71 and a bounded P7 scenario range required")
         source, prompt = (json.loads(read_file(p)) for p in (args.source, args.prompt))
-        db = PostgrestTransport(
-            os.environ["LAB_ARENA_SUPABASE_URL"],
-            service_key=os.environ["LAB_ARENA_SERVICE_KEY"],
-        )
-        objects = S3ObjectStore(
-            os.environ["LAB_ARENA_BUCKET"],
-            prefix=os.environ.get("LAB_ARENA_OBJECT_PREFIX", ""),
-        )
+        db, objects = evidence_stores()
         scenarios = [
             f"P7-s{seed}"
             for seed in range(args.first_seed, args.first_seed + args.scenario_count)

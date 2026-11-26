@@ -112,6 +112,13 @@ def test_paid_offer_through_first_epoch(db):
         bill(job, key, 6537)
         bill(job, None, 900000, request="judge", provider="judge")
         measured = rpc("collection_verified_p7_fees_v1", source, Json([job]))
+        # The operator reads this exact RPC over the shared transport allowlist.
+        from lab_arena.store import FUNCTION_SIGNATURES
+
+        assert FUNCTION_SIGNATURES["collection_verified_p7_fees_v1"] == (
+            ("p_batch", "text"),
+            ("p_jobs", "jsonb"),
+        )
         assert measured["prices"] == {"P": {model: 8172}}
         assert measured["budgets"] == {"P": {model: 20000}}
         q.execute("SAVEPOINT sample")

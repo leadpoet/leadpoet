@@ -122,6 +122,13 @@ Signed bytes are persisted before broadcast. Restarts and uncertain results
 reuse those exact bytes. A fresh attempt requires proof of expiry, absence of
 inclusion, an unchanged nonce, and a successful authenticated state read. Each
 cycle attempts the current epoch first, then advances one prior reveal or report.
+After an accepted state closes, a later transaction can advance the wallet nonce.
+The validator can close the original journal as expired once the live and archive
+reads cover every block in its mortal era, the signed bytes are absent, and the
+archive confirms its signed nonce at the final block of that era. It keeps the
+original signed record and writes a local expiry receipt. Only the latest
+finalized nonce can authorize a retry while a state is open.
+
 Prior work rotates across unfinished journals, including after a failed read or
 report. A recovery backlog cannot consume the cycle before current signing.
 Each chain operation retains its existing timeout. Success requires finalized commitment/reveal readback,

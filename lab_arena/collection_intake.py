@@ -243,8 +243,11 @@ def approved_comparison_quotes(transport):
 
 def open_correction_quotes(transport):
     register_signatures()
-    quotes = transport.rpc("collection_open_correction_quotes_v1", {})
-    if not isinstance(quotes, list) or not quotes:
+    try:
+        quotes = transport.rpc("collection_open_correction_quotes_v1", {})
+    except store.ArenaStoreError as exc:
+        raise IntakeError("collection_compensated_corrections_unavailable", 503) from exc
+    if not isinstance(quotes, list):
         raise IntakeError("collection_compensated_corrections_unavailable", 503)
     return quotes
 
@@ -351,10 +354,14 @@ class CollectionIntake:
         ):
             raise IntakeError("collection_consent_invalid")
         if self.mode == "live":
-            if "fixed_quotes" in published and not published["fixed_quotes"]:
+            if body["task_scope"] == CORRECTION_SCOPE:
+                quotes = published.get("fixed_quotes")
+                if "fixed_quotes" not in published:
+                    quotes = open_correction_quotes(self.transport)
+                if not quotes:
+                    raise IntakeError("collection_compensated_corrections_unavailable", 503)
+            elif "fixed_quotes" in published and not published["fixed_quotes"]:
                 raise IntakeError("collection_comparison_prices_unavailable", 503)
-            if body["task_scope"] == CORRECTION_SCOPE and "fixed_quotes" not in published:
-                open_correction_quotes(self.transport)
         cap = _micros(body["daily_cap_microusd"], 1)
         registration = str(uuid.UUID(hex=signed["request_id"]))
         prefix = "collection:" + registration

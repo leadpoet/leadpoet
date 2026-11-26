@@ -112,3 +112,62 @@ def test_unpaid_comparison_terms_do_not_read_financial_state():
     from lab_arena.service import ArenaService
 
     assert ArenaService.collection_terms(SimpleNamespace(collection_mode=lambda: 'pilot')) == intake.terms('pilot')
+
+
+def test_empty_paid_correction_offer_is_readable_and_cannot_fund_a_job(monkeypatch):
+    from fastapi.testclient import TestClient
+    from lab_arena.api import create_app
+    from lab_arena.service import ArenaService
+
+    monkeypatch.delenv("LAB_ARENA_LIVE_CORRECTION_TERMS_SHA256", raising=False)
+    reads = []
+    def rpc(name, args):
+        assert (name, args) == ("collection_open_correction_quotes_v1", {})
+        reads.append(name)
+        return []
+
+    transport = SimpleNamespace(rpc=rpc)
+    service = object.__new__(ArenaService)
+    service.collection_mode = lambda: "live"
+    service._store = SimpleNamespace(_transport=transport)
+    reply = TestClient(create_app(service)).get("/arena/v1/collection/terms", params={"task_scope": intake.CORRECTION_SCOPE})
+    assert reply.status_code == 200
+    published = reply.json()
+    assert published == {**intake.terms("live", intake.CORRECTION_SCOPE), "fixed_quotes": []}
+
+    signed, keys = registration("R", "live")
+    signed["body"]["task_scope"] = intake.CORRECTION_SCOPE
+    class UnusedCredentials:
+        def validate_openrouter_funding(self, *args, **kwargs):
+            pytest.fail("an empty offer reached provider key validation")
+    client = intake.CollectionIntake(transport, UnusedCredentials(), "live")
+    for offer in (published, None):
+        with pytest.raises(intake.IntakeError, match="collection_compensated_corrections_unavailable") as refusal:
+            client.register(signed, "5" + "Y" * 47, keys, published=offer)
+        assert refusal.value.status == 503
+    assert len(reads) == 2
+
+
+@pytest.mark.parametrize("response", [None, {}, intake.store.ArenaStoreError("delivery failed")])
+def test_failed_correction_price_read_never_becomes_an_empty_offer(response):
+    from lab_arena.service import ArenaService, ServiceError
+
+    def rpc(name, args):
+        if isinstance(response, Exception):
+            raise response
+        return response
+    service = SimpleNamespace(collection_mode=lambda: "live", _store=SimpleNamespace(_transport=SimpleNamespace(rpc=rpc)))
+    with pytest.raises(ServiceError, match="collection_compensated_corrections_unavailable") as refusal:
+        ArenaService.collection_terms(service, intake.CORRECTION_SCOPE)
+    assert refusal.value.status == 503
+
+
+def test_disabled_paid_correction_terms_cannot_publish_even_with_open_tariff(monkeypatch):
+    from lab_arena.service import ArenaService, ServiceError
+
+    transport = SimpleNamespace(rpc=lambda *args: pytest.fail("read prices with disabled consent"))
+    service = SimpleNamespace(collection_mode=lambda: "live", _store=SimpleNamespace(_transport=transport))
+    monkeypatch.setenv("LAB_ARENA_LIVE_CORRECTION_TERMS_SHA256", "off")
+    with pytest.raises(ServiceError, match="collection_correction_terms_unavailable") as refusal:
+        ArenaService.collection_terms(service, intake.CORRECTION_SCOPE)
+    assert refusal.value.status == 503

@@ -25,9 +25,9 @@ from lab_arena.collection_broker import (
 )
 from lab_arena.collection_intake import (
     GENERATOR_ROUTES, LEGACY_COMPARISON_TERMS_HASH, MODELS, SYNTHETIC_TRAINING_TERMS_HASH,
-    CollectionIntake, live_finney_arena,
+    PAID_WORKFLOW_TERMS_HASH, VERIFIED_PRICE_SCHEMA, CollectionIntake, live_finney_arena,
 )
-from lab_arena.collection_worker import process_job
+from lab_arena.collection_worker import P7_PAYMENT_RULE, process_job, verify_paid_job
 from lab_arena.collection_workflow import (
     CHAMPION_REV,
     POET_REV,
@@ -58,6 +58,8 @@ def load_batch(raw, prompt):
         "pricing_pilot",
         "control_artifacts",
         "claim_pack_sha256",
+        "payment_rule",
+        "fixed_quotes_microusd",
     } != {
         "mode",
         "seed",
@@ -74,7 +76,9 @@ def load_batch(raw, prompt):
     ):
         raise ValueError("invalid collection batch")
     scenarios = raw["scenario_ids"]
-    if "terms_sha256" in raw and raw["terms_sha256"] != SYNTHETIC_TRAINING_TERMS_HASH:
+    paid = "payment_rule" in raw
+    terms = PAID_WORKFLOW_TERMS_HASH if paid else SYNTHETIC_TRAINING_TERMS_HASH
+    if "terms_sha256" in raw and raw["terms_sha256"] != terms:
         raise ValueError("unrecognized synthetic collection training terms")
     if "terms_sha256" in raw and any(isinstance(s, str) and s.startswith("research-") for s in scenarios):
         raise ValueError("synthetic funding terms cannot authorize research")
@@ -94,7 +98,27 @@ def load_batch(raw, prompt):
         "[0-9a-f]{64}", raw.get("research_index_sha256", "")
     ):
         raise ValueError("research pack needs a frozen case index")
-    if set(raw["budgets_microusd"]) != set(MODELS) or any(
+    models = set(raw["budgets_microusd"])
+    if paid:
+        from lab_arena.collection_generation import CAPTURE_V2
+        quotes = raw.get("fixed_quotes_microusd")
+        if (
+            raw["payment_rule"] != P7_PAYMENT_RULE or raw["mode"] != "live"
+            or not models or not models <= set(MODELS)
+            or not isinstance(quotes, dict) or set(quotes) != models
+            or any(type(v) is not int or not 0 < v <= 10**10 for v in quotes.values())
+            or raw.get("terms_sha256") != terms or raw.get("capture_version") != CAPTURE_V2
+            or not raw.get("split_manifest")
+            or not all(re.fullmatch(r"P7-s[1-9][0-9]{0,7}", sid) for sid in scenarios)
+            or raw["control_slots"] or raw["drift_slots"] or raw.get("control_artifacts")
+            or any(k in raw for k in ("panel_qualification_sha256", "route_witness_sha256",
+                                      "reference_successor", "pricing_pilot", "claim_pack_sha256",
+                                      "research_index_sha256", "thresholds"))
+        ):
+            raise ValueError("invalid deterministic P7 payment offer")
+    elif "fixed_quotes_microusd" in raw or models != set(MODELS):
+        raise ValueError("every model needs a bounded positive budget")
+    if any(
         type(n) is not int or not 0 < n <= 10**10
         for n in raw["budgets_microusd"].values()
     ):
@@ -102,7 +126,7 @@ def load_batch(raw, prompt):
     revisions = batch_versions(raw["routes"])
     qualification = set(judge.QUALIFICATION_JUDGES) <= revisions.keys()
     certificate = raw.get("panel_qualification_sha256")
-    if qualification and raw["mode"] == "live":
+    if qualification and raw["mode"] == "live" and not paid:
         if not re.fullmatch(r"[0-9a-f]{64}", str(certificate)) or "split_manifest" not in raw:
             raise ValueError("live open judges require independent qualification and a frozen split")
     elif certificate is not None:
@@ -172,6 +196,8 @@ def load_batch(raw, prompt):
             if (successor or full_witness) and model == REFERENCE_MODEL
             else route.tag
         )
+        if paid and model in models and model == REFERENCE_MODEL and raw["routes"][model] == REFERENCE_ROUTE:
+            continue
         if raw["routes"][model] != expected:
             raise ValueError("unverified generator route")
     bundle_hash = judge.digest(
@@ -193,16 +219,16 @@ def load_batch(raw, prompt):
     versions = {}
     if qualification:
         versions["fable_version"], versions["astra_version"] = judge.QUALIFICATION_JUDGES
+    if paid:
+        batch_id = "dv-" + bundle_hash
+    elif successor:
+        batch_id = "rs-" + bundle_hash
+    elif full_witness:
+        batch_id = ("lq-" if raw["mode"] == "live" else "rq-") + bundle_hash
+    else:
+        batch_id = raw["name"] + "-" + bundle_hash[:24]
     policy = judge.BatchPolicy(
-        (
-            "rs-" + bundle_hash
-            if successor
-            else (
-                ("lq-" if raw["mode"] == "live" else "rq-") + bundle_hash
-                if full_witness
-                else raw["name"] + "-" + bundle_hash[:24]
-            )
-        ),
+        batch_id,
         raw["seed"],
         judge.digest(prompt),
         pilot=raw["mode"] == "pilot",
@@ -281,9 +307,12 @@ def complete_launch_verdict(assessment):
 def finish_launch(database, pending, objects, policy, approved):
     from scripts.collection_batch import cutover_anchor
 
-    evidence = ready_launch_evidence(pending, objects, policy, approved)
-    if not complete_launch_verdict(evidence["assessment"]):
-        raise ValueError("first live collection job awaits owner verification")
+    if approved.get("schema") == VERIFIED_PRICE_SCHEMA:
+        verify_paid_job(pending, objects, policy, approved)
+    else:
+        evidence = ready_launch_evidence(pending, objects, policy, approved)
+        if not complete_launch_verdict(evidence["assessment"]):
+            raise ValueError("first live collection job awaits owner verification")
     anchor = cutover_anchor(database, launch_job=pending)
     result = database.rpc(
         "collection_launch_finish_v1", {"p_job": pending["job_id"], "p_anchor": anchor}
@@ -492,6 +521,23 @@ def report_split_hold(policy, exc):
 
 
 def verify_live_panel(raw, policy, approved):
+    if "payment_rule" in raw or approved.get("schema") == VERIFIED_PRICE_SCHEMA:
+        if (
+            approved.get("schema") != VERIFIED_PRICE_SCHEMA
+            or raw.get("payment_rule") != P7_PAYMENT_RULE
+            or approved.get("payment_rule") != raw["payment_rule"]
+            or approved.get("live_batch_id") != policy.batch_id
+            or approved.get("terms_sha256") != raw["terms_sha256"]
+            or approved.get("routes") != {m: raw["routes"][m] for m in raw["budgets_microusd"]}
+            or approved.get("prices") != {"P": raw["fixed_quotes_microusd"]}
+            or approved.get("budgets") != {"P": raw["budgets_microusd"]}
+            or approved.get("capture_version") != raw["capture_version"]
+            or approved.get("split_manifest_sha256") != judge.digest(raw["split_manifest"])
+            or approved.get("judge_prompt_sha256") != policy.prompt_sha256
+            or comparison_revisions(raw) != (approved.get("harness_commit"), approved.get("builder_commit"))
+        ):
+            raise ValueError("paid workflow differs from the fixed offer")
+        return
     certificate = raw.get("panel_qualification_sha256")
     witness = raw.get("route_witness_sha256")
     priced_id = approved.get("batch_id", "")
@@ -551,7 +597,7 @@ def run_cohort(
     staged = False
     ceiling = dict(raw["budgets_microusd"])
     fees = dict.fromkeys(MODELS, 0)
-    if not judge_key:
+    if not judge_key and not raw.get("payment_rule"):
         raise ValueError("private verifier credential unavailable")
     if not policy.pilot:
         schedule = database.rpc("collection_reward_schedule_v1", {})
@@ -616,7 +662,7 @@ def run_cohort(
             a = assignment(job)
             manifest = process_job(
                 job=job,
-                assignment=judge.assign_judges(policy, [a])[a["run_id"]],
+                assignment=a if raw.get("payment_rule") else judge.assign_judges(policy, [a])[a["run_id"]],
                 policy=policy,
                 prompt=prompt,
                 intake=intake,
@@ -628,6 +674,7 @@ def run_cohort(
                 control_packet=controls.bind(job) if controls else None,
                 claim_pack=claim_pack,
                 prepare_launch=staged,
+                **({"payment_rule": raw["payment_rule"]} if "payment_rule" in raw else {}),
                 capture_version=raw.get("capture_version"),
                 split=splits.get(job["scenario_id"]),
                 claim_protocol=raw.get("claim_protocol", "collection.fresh-claims.v1"),
@@ -917,7 +964,7 @@ def _run_options(args, p, raw, *, before_claim=None):
                         "models": (
                             len({a["model"] for a in raw["arms"]})
                             if experiment
-                            else len(MODELS)
+                            else len(raw["budgets_microusd"])
                         ),
                         "scenarios": len(scenarios),
                         "champion": agent,
@@ -983,7 +1030,10 @@ def _run_options(args, p, raw, *, before_claim=None):
                     database=db,
                     objects=objects,
                     transport=transport,
-                    pricing=prices_for_assignment(raw["routes"], policy),
+                    pricing=(
+                        (lambda model: endpoint_prices(raw["routes"], models=[model]))
+                        if "payment_rule" in raw else prices_for_assignment(raw["routes"], policy)
+                    ),
                     epoch=lambda: chain.current_settlement_epoch(client, cutover),
                     sources=sources,
                     owner_lookup=lambda hk: resolve_finalized_owner(client, hk),

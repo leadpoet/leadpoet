@@ -101,7 +101,8 @@ def _review_paid_offer(published, args, cap):
     quotes = published.get("fixed_quotes")
     if not isinstance(offer_id, str) or not PAID_OFFER_ID.fullmatch(offer_id) or not isinstance(quotes, list) or not quotes:
         raise MinerSubmissionError("collection_comparison_prices_unavailable")
-    print("Fixed reward and maximum OpenRouter spend per assignment (USD)", file=sys.stderr)
+    print("Validator reward targets and maximum OpenRouter spend per assignment (USD)", file=sys.stderr)
+    print("Network votes and token prices determine the actual payout.", file=sys.stderr)
     seen = set()
     for quote in quotes:
         model = quote["model"]
@@ -109,7 +110,7 @@ def _review_paid_offer(published, args, cap):
         if (model not in MODELS or model in seen or quote["task_class"] != "P"
                 or any(type(v) is not int or not 0 < v <= MAX_MICROUSD for v in (fee, budget))):
             raise MinerSubmissionError("collection_comparison_prices_unavailable")
-        print(f"{model}  reward ${Decimal(fee).scaleb(-6):f}  spend cap ${Decimal(budget).scaleb(-6):f}", file=sys.stderr)
+        print(f"{model}  target ${Decimal(fee).scaleb(-6):f}  spend cap ${Decimal(budget).scaleb(-6):f}", file=sys.stderr)
         seen.add(model)
     print(f"Your rolling 24-hour cap is ${Decimal(cap).scaleb(-6):f}. "
           f"Maximum assignments per UTC day: {getattr(args, 'max_slots_per_day', None) or 1}.", file=sys.stderr)

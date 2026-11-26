@@ -214,6 +214,7 @@ def test_native_export_checks_settlement_and_keeps_only_model_visible_data(
     model = job["model"]
     job = dict(job, slot=0, attempt=1, status=args[2], artifact_sha256=args[4])
     tariffs = dict(
+        terms_sha256=raw["terms_sha256"],
         schema="leadpoet.collection.verified_p7_prices.v1",
         payment_rule=P7_PAYMENT_RULE,
         live_batch_id=policy.batch_id,

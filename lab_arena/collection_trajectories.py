@@ -28,6 +28,7 @@ def verified_grants(database, batch, jobs, *, mode, scope, digest, allow_pending
         permitted.add(intake.LEGACY_CORRECTION_TERMS_HASHES[mode])
     if digest not in permitted:
         raise ValueError("this enrollment did not grant training release rights")
+    intake.register_signatures()
     rows = database.rpc("collection_training_consents_v1", {"p_batch": batch})
     if not isinstance(rows, list):
         raise ValueError("invalid job consent readback")

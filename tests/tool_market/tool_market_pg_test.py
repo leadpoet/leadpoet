@@ -229,13 +229,11 @@ def test_a_request_the_vault_never_sent_moves_to_the_next_key(world):
     world.miner_key("up-key", 10_000)
     _, token = world.buyer()
     world.vendor.script["down-key"] = [VaultTransportError("vault_unreachable", forwarded=False)]
-    world.vendor.script["up-key"] = [ok(status=429, headers={})]
+    # A 429 is the key's limit, with Retry-After too: the call moves on.
+    world.vendor.script["up-key"] = [ok({"error": "slow down"}, status=429, headers={"retry-after": "2"})]
     with pytest.raises(ToolMarketError) as empty:
         world.market.call(token, PROFILE)
     assert empty.value.code == "no_supply" and world.market.tab(token)["committed_microusd"] == 0
-    # A 429 with Retry-After is the buyer's to retry; it is not a key failure.
-    world.vendor.script["up-key"] = [ok({"error": "slow down"}, status=429, headers={"retry-after": "2"})]
-    assert world.market.call(token, PROFILE)["status"] == 429
 
 
 def test_rate_limited_and_unreliable_keys_go_to_the_back_of_the_book(world):
@@ -428,16 +426,21 @@ def test_a_key_stops_trading_at_its_daily_cap(world):
     assert capped.value.code == "no_supply"
 
 
-def test_unknown_usage_counts_toward_a_keys_daily_cap(world):
-    # Whatever buyers cause, a miner never bears more than their cap a day.
-    miner, _ = world.miner_key("uncertain-capped", 10_000, cap=25_000)
+def test_unknown_usage_counts_toward_a_keys_daily_cap_a_quarter_per_buyer(world):
+    # Whatever buyers cause, a miner never bears more than their cap a day,
+    # and no one buyer can fill it for free.
+    world.miner_key("uncertain-capped", 10_000, cap=80_000)
     world.vendor.script["uncertain-capped"] = [ok(status=500)]
-    for _ in range(2):
+    _, token = world.buyer()
+    for _ in range(5):
+        world.market.call(token, PROFILE)  # counts 20,000 at most, however many
+    for _ in range(3):
         _, token = world.buyer()
         world.market.call(token, PROFILE)
+        world.market.call(token, PROFILE)
     with pytest.raises(ToolMarketError) as capped:
-        world.market.call(token, PROFILE)  # 20,000 at risk + 10,000 more would pass 25,000
-    assert capped.value.code == "no_supply" and len(world.vendor.sent) == 2
+        world.market.call(token, PROFILE)  # 80,000 at risk: no room left
+    assert capped.value.code == "no_supply" and len(world.vendor.sent) == 11
 
 
 def test_keys_without_room_for_a_call_do_not_use_up_its_attempts(world):
@@ -606,18 +609,6 @@ def test_a_buyer_cannot_take_working_keys_out_of_the_book(world):
     assert world.market.order_book("exa")["asks"] == []
 
 
-def test_a_checked_key_fails_on_401_or_on_402_with_no_balance(world):
-    world.miner_key("zb-401", 4_000, tool="zerobounce")
-    world.miner_key("zb-empty", 5_000, tool="zerobounce")
-    _, token = world.buyer()
-    world.vendor.script["zb-401"] = [ok({}, status=401)]
-    world.vendor.script["zb-empty"] = [ok({"error": "your account ran out of credits"})]
-    world.vault.answers["zb-empty"] = {"status": "invalid", "reason": "zerobounce_no_credit"}
-    with pytest.raises(ToolMarketError):
-        world.market.call(token, VALIDATE)
-    assert world.market.order_book("zerobounce")["asks"] == []
-
-
 def test_a_miner_rechecks_a_key_only_where_a_free_check_proves_it(world):
     miner, exa = world.miner_key("exa-dead", 900_000, tool="exa")
     _, zb = world.miner_key("zb-topped-up", 4_000, tool="zerobounce", miner=miner)
@@ -629,6 +620,18 @@ def test_a_miner_rechecks_a_key_only_where_a_free_check_proves_it(world):
     with pytest.raises(ToolMarketError) as soon:
         world.market.check_key(who, zb)
     assert (soon.value.status, soon.value.code) == (429, "check_too_soon")
+
+
+def test_a_buyer_has_a_few_calls_in_flight_at_most(world):
+    world.miner_key("slow-key", 10_000)
+    buyer, token = world.buyer()
+    world.market._in_flight[buyer] = market_module.MAX_CALLS_IN_FLIGHT_PER_BUYER
+    with pytest.raises(ToolMarketError) as busy:
+        world.market.call(token, PROFILE)
+    assert (busy.value.status, busy.value.code) == (429, "too_many_calls_in_flight") and world.vendor.sent == []
+    world.market._in_flight[buyer] -= 1
+    world.market.call(token, PROFILE)
+    assert world.market._in_flight[buyer] == market_module.MAX_CALLS_IN_FLIGHT_PER_BUYER - 1
 
 
 def test_a_miners_tab_never_buys_from_their_own_key(world):

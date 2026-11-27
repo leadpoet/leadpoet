@@ -56,7 +56,7 @@ def test_ask_bounds():
 def test_key_failures_and_rate_limits():
     assert book.key_failure(402) == "no_credit" and book.key_failure(401) and book.key_failure(403)
     assert book.key_failure(400) is None and book.key_failure(429) is None
-    assert book.rate_limited(429, {}) and not book.rate_limited(429, {"Retry-After": "3"})
+    assert book.rate_limited(429) and not book.rate_limited(402)
 
 
 def test_get_operations_send_only_listed_params():

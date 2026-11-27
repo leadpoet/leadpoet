@@ -125,22 +125,20 @@ Health events come from vault checks and from calls.
   key out of the book. A 401 (a bad key or a paused account) marks it
   `failed`. A 402 marks it `failed` only when the vendor's free check sees no
   balance; a tool with no check, or a key checked in the last minute, only
-  skips the key. A 403 only skips it; the miner sees refusals in their
-  statement.
-- A key goes to the back of its book, still in it, after a bare 429 in the
+  skips the key. A 403 only skips it.
+- A key goes to the back of its book, still in it, after a 429 in the
   last minute, a 402 that did not fail it in the last hour, or in the last
   hour a 403 or unknown usage for 3 different buyers. A buyer can cause
   those two, so one buyer cannot push a rival's key back.
-- A 429 with no `Retry-After` skips the key for this call only. Hunter's
-  403 is its rate limit, so it counts as a 429. A 429 with
-  `Retry-After` goes back to the buyer.
+- A 429, with or without `Retry-After`, moves the call to the next key:
+  the limit is the key's account, not the buyer's. Hunter's 403 is its rate
+  limit, so it counts as a 429.
 - A key is checked when it is listed and after a 402, at most once a minute
   per key in each gateway process. There is no scheduled re-check: a key
   that dies in between is found by its next call, which moves to the next
   key and costs the buyer nothing.
 - After topping up a failed key, the miner calls
-  `POST /tool-market/keys/{id}/check` to put it back in the book, at most
-  once a minute. Exa and HarvestAPI have no free check, so this is refused
+  `POST /tool-market/keys/{id}/check` to put it back in the book. Exa and HarvestAPI have no free check, so this is refused
   (`409 key_cannot_be_checked`): a key a call found dead there stays out,
   and the miner lists a new key (the 30-day limit applies).
 
@@ -204,14 +202,18 @@ All amounts are integer micro-USD.
 - **Unknown usage:** sometimes the usage is unknown, such as a 5xx answer,
   a timeout, or a 2xx with no cost in it. Then the buyer pays nothing and
   the miner is owed nothing. The miner bears that risk, at most the key's
-  daily cap a day.
+  daily cap a day. Each buyer's unknown usage counts toward the cap up to a
+  quarter of it, so one buyer cannot push a key out of the book for free.
   - A request that may have reached the vendor is never retried on another
     key, so it cannot be used twice.
   - A buyer shapes some of these, such as an answer too large to return.
     So a buyer has at most 20 calls to one tool, across all their tabs, that
     are in flight or ended with unknown usage in the last hour. Past that,
     calls to that tool are refused (`429 uncertain_limit`); other tools are
-    not affected. This also caps a buyer at 20 calls in flight per tool.
+    not affected.
+  - A buyer has at most 8 calls in flight at once in a gateway process
+    (`429 too_many_calls_in_flight`), and calls run on their own 32
+    threads, so slow free answers cannot hold up the rest of the gateway.
 - **Late answers:** a call still open after 10 minutes holds nothing and
   can no longer settle.
 
@@ -271,9 +273,10 @@ deployment, exactly as lead orders do.
   already running; its owner stops it.
 - **Exa's cost is an estimate.** Exa calls `costDollars` an estimate.
 - **Hunter's check reads no balance.** It proves the key only.
-- **Calls in flight hold a key's cap.** Up to 10 minutes each, so buyers
-  who open many calls and drop them can keep a key out of the book that
-  long; each buyer is held to 20 such calls per tool.
+- **Many buyers can still hold a key's cap or the call threads.** Four
+  buyers causing unknown usage can keep a key out of its book for a day,
+  and four buyers with slow calls can fill the call threads. Each needs its
+  own funded hotkey; rate limits per coldkey would close this.
 - **The book is read on every call.** It computes each key's last 24 h
   and last hour from the call ledger. That is fine at launch volumes;
   cache the public catalog and books before heavy anonymous traffic.

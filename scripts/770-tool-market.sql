@@ -98,7 +98,6 @@ CREATE TABLE public.tool_market_key_events (
   key_id UUID NOT NULL REFERENCES public.tool_market_keys(key_id),
   status TEXT NOT NULL CHECK(status IN ('valid','unchecked','invalid','failed')),
   reason TEXT CHECK(reason ~ '^[a-z_]{1,64}$'),
-  balance NUMERIC CHECK(balance IS NULL OR balance>0),
   recorded_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX tool_market_key_events_key ON public.tool_market_key_events(key_id,event_id DESC);
@@ -226,17 +225,23 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $open77
 $open770$;
 
 -- What a key has earned, held or may have spent over the last 24 h, in
--- owed (miner) terms: settled calls count what they owe; unknown usage and
--- young open calls the most they can owe. So the miner's daily cap also
--- bounds what unknown usage can cost them, however many buyers cause it.
+-- owed (miner) terms: settled calls count what they owe, young open calls
+-- the most they can owe, and unknown usage the most it could owe, up to a
+-- quarter of the cap per buyer. So the cap bounds what unknown usage costs
+-- a miner, and no one buyer can fill it for free.
 CREATE FUNCTION public.tool_market__key_day_v1(p_key_id UUID)
 RETURNS BIGINT LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $day770$
- SELECT coalesce(sum(CASE WHEN s.status='uncertain' THEN c.owed_cap_microusd
-   WHEN s.call_id IS NOT NULL THEN s.owed_microusd
-   WHEN c.opened_at>clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1())
-    THEN c.owed_cap_microusd ELSE 0 END),0)::BIGINT
- FROM public.tool_market_calls c LEFT JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
- WHERE c.key_id=p_key_id AND c.opened_at>clock_timestamp()-interval '24 hours';
+ SELECT coalesce(sum(known+least(unknown,k.daily_cap_microusd/4)),0)::BIGINT
+ FROM public.tool_market_keys k, LATERAL (
+  SELECT sum(CASE WHEN s.status='uncertain' THEN 0 WHEN s.call_id IS NOT NULL THEN s.owed_microusd
+    WHEN c.opened_at>clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1())
+     THEN c.owed_cap_microusd ELSE 0 END) known,
+   coalesce(sum(c.owed_cap_microusd) FILTER (WHERE s.status='uncertain'),0) unknown
+  FROM public.tool_market_calls c JOIN public.tool_market_tabs t ON t.tab_id=c.tab_id
+   LEFT JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
+  WHERE c.key_id=k.key_id AND c.opened_at>clock_timestamp()-interval '24 hours'
+  GROUP BY t.hotkey) per_buyer
+ WHERE k.key_id=p_key_id;
 $day770$;
 
 CREATE FUNCTION public.tool_market__key_active_v1(p_key_id UUID)
@@ -244,8 +249,8 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $active
  SELECT NOT EXISTS(SELECT 1 FROM public.tool_market_key_revocations r WHERE r.key_id=p_key_id);
 $active770$;
 
--- A key goes to the back of its book, and stays in it, after a bare rate
--- limit in the last minute, a 402 it was not failed for in the last hour,
+-- A key goes to the back of its book, and stays in it, after a rate limit
+-- in the last minute, a 402 it was not failed for in the last hour,
 -- or, in the last hour, a 403 or unknown usage (5xx, timeout, oversized
 -- answer) from 3 different buyers. A buyer can cause the last two, so no
 -- one buyer can push a rival's key back; a key that is really flaky, or
@@ -385,7 +390,7 @@ $close770$;
 -- registers at most one key per tool every 30 days, revoked keys included.
 -- A revoked key that never took a call does not count.
 CREATE FUNCTION public.tool_market_register_key_v1(p_key_id UUID,p_tool TEXT,p_hotkey TEXT,p_envelope TEXT,
- p_fingerprint TEXT,p_daily_cap BIGINT,p_status TEXT,p_balance NUMERIC,p_host TEXT,p_signed_at BIGINT,
+ p_fingerprint TEXT,p_daily_cap BIGINT,p_status TEXT,p_host TEXT,p_signed_at BIGINT,
  p_signed_body TEXT,p_signature TEXT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $register770$
 DECLARE next_at TIMESTAMPTZ;
@@ -408,7 +413,7 @@ BEGIN
  INSERT INTO public.tool_market_keys(key_id,tool,miner_hotkey,envelope,key_fingerprint,daily_cap_microusd,
   host,signed_at,signed_body,signature)
  VALUES(p_key_id,p_tool,p_hotkey,p_envelope,p_fingerprint,p_daily_cap,p_host,p_signed_at,p_signed_body,p_signature);
- INSERT INTO public.tool_market_key_events(key_id,status,balance) VALUES(p_key_id,p_status,p_balance);
+ INSERT INTO public.tool_market_key_events(key_id,status) VALUES(p_key_id,p_status);
  RETURN jsonb_build_object('status','registered','key_id',p_key_id);
 END;
 $register770$;
@@ -416,7 +421,7 @@ $register770$;
 CREATE FUNCTION public.tool_market_key_v1(p_key_id UUID)
 RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $key770$
  SELECT jsonb_build_object('key_id',k.key_id,'tool',k.tool,'miner_hotkey',k.miner_hotkey,'envelope',k.envelope,
-  'key_fingerprint',k.key_fingerprint,'active',public.tool_market__key_active_v1(k.key_id))
+  'active',public.tool_market__key_active_v1(k.key_id))
  FROM public.tool_market_keys k WHERE k.key_id=p_key_id;
 $key770$;
 
@@ -432,10 +437,10 @@ BEGIN
 END;
 $revoke770$;
 
-CREATE FUNCTION public.tool_market_record_key_event_v1(p_key_id UUID,p_status TEXT,p_reason TEXT,p_balance NUMERIC)
+CREATE FUNCTION public.tool_market_record_key_event_v1(p_key_id UUID,p_status TEXT,p_reason TEXT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $event770$
 BEGIN
- INSERT INTO public.tool_market_key_events(key_id,status,reason,balance) VALUES(p_key_id,p_status,p_reason,p_balance);
+ INSERT INTO public.tool_market_key_events(key_id,status,reason) VALUES(p_key_id,p_status,p_reason);
  RETURN jsonb_build_object('status','recorded');
 END;
 $event770$;

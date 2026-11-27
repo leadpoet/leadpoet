@@ -31,12 +31,12 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "tool_market_close_tab_v1": (("p_token_hash", _T),),
     "tool_market_register_key_v1": (
         ("p_key_id", _U), ("p_tool", _T), ("p_hotkey", _T), ("p_envelope", _T), ("p_fingerprint", _T),
-        ("p_daily_cap", _B), ("p_status", _T), ("p_balance", _N), ("p_host", _T), ("p_signed_at", _B),
+        ("p_daily_cap", _B), ("p_status", _T), ("p_host", _T), ("p_signed_at", _B),
         ("p_signed_body", _T), ("p_signature", _T),
     ),
     "tool_market_key_v1": (("p_key_id", _U),),
     "tool_market_revoke_key_v1": (("p_key_id", _U), ("p_hotkey", _T), ("p_reason", _T)),
-    "tool_market_record_key_event_v1": (("p_key_id", _U), ("p_status", _T), ("p_reason", _T), ("p_balance", _N)),
+    "tool_market_record_key_event_v1": (("p_key_id", _U), ("p_status", _T), ("p_reason", _T)),
     "tool_market_post_ask_v1": (("p_key_id", _U), ("p_hotkey", _T), ("p_ask", _B)),
     "tool_market_book_v1": (("p_tool", _T), ("p_terms_sha256", _T)),
     "tool_market_reserve_call_v1": (
@@ -61,10 +61,6 @@ def register_rpc_signatures() -> None:
             arena_store.FUNCTION_SIGNATURES[name] = signature
         elif tuple(existing) != tuple(signature):
             raise RuntimeError("tool market function signature conflicts: %s" % name)
-
-
-def _balance(value: Optional[float]) -> Optional[str]:
-    return None if value is None else str(value)
 
 
 class ToolMarketStore:
@@ -107,11 +103,11 @@ class ToolMarketStore:
 
     # Miners -----------------------------------------------------------------
     def register_key(self, *, key_id: str, tool: str, hotkey: str, envelope: str, fingerprint: str,
-                     daily_cap_microusd: int, status: str, balance: Optional[float], host: str, signed_at: int,
+                     daily_cap_microusd: int, status: str, host: str, signed_at: int,
                      signed_body: str, signature: str) -> Dict[str, Any]:
         return self._rpc("tool_market_register_key_v1", p_key_id=key_id, p_tool=tool, p_hotkey=hotkey,
                          p_envelope=envelope, p_fingerprint=fingerprint, p_daily_cap=int(daily_cap_microusd),
-                         p_status=status, p_balance=_balance(balance), p_host=host, p_signed_at=int(signed_at),
+                         p_status=status, p_host=host, p_signed_at=int(signed_at),
                          p_signed_body=signed_body, p_signature=signature)
 
     def key(self, key_id: str) -> Optional[Dict[str, Any]]:
@@ -120,10 +116,8 @@ class ToolMarketStore:
     def revoke_key(self, *, key_id: str, hotkey: str, reason: str) -> Dict[str, Any]:
         return self._rpc("tool_market_revoke_key_v1", p_key_id=key_id, p_hotkey=hotkey, p_reason=reason)
 
-    def record_key_event(self, *, key_id: str, status: str, reason: Optional[str] = None,
-                         balance: Optional[float] = None) -> None:
-        self._rpc("tool_market_record_key_event_v1", p_key_id=key_id, p_status=status, p_reason=reason,
-                  p_balance=_balance(balance))
+    def record_key_event(self, *, key_id: str, status: str, reason: Optional[str] = None) -> None:
+        self._rpc("tool_market_record_key_event_v1", p_key_id=key_id, p_status=status, p_reason=reason)
 
     def post_ask(self, *, key_id: str, hotkey: str, ask_microusd: Optional[int]) -> Dict[str, Any]:
         return self._rpc("tool_market_post_ask_v1", p_key_id=key_id, p_hotkey=hotkey,

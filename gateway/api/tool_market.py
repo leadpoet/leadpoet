@@ -30,6 +30,10 @@ MAX_BODY_BYTES = 64 * 1024
 # A failed build (the chain or the vault down) is not retried for this long,
 # so an outage does not queue every request behind the build lock.
 BUILD_RETRY_SECONDS = 30.0
+# Calls wait on vendors, so they get their own threads: slow calls cannot
+# queue the catalog, signed routes or the rest of the gateway behind them.
+CALL_THREADS = 32
+_call_threads = anyio.CapacityLimiter(CALL_THREADS)
 
 _lock = threading.Lock()
 _state: Optional[Tuple[Any, Any]] = None
@@ -71,12 +75,6 @@ def _error(status: int, code: str, **detail: Any) -> JSONResponse:
     return JSONResponse(status_code=status, content=dict(detail, error=code))
 
 
-class _Refusal(Exception):
-    def __init__(self, status: int, code: str) -> None:
-        self.status = status
-        self.code = code
-
-
 def _unique(pairs):
     document = dict(pairs)
     if len(document) != len(pairs):
@@ -89,9 +87,9 @@ def _json(body: bytes) -> Any:
         # A repeated member is refused: stored bodies must read one way only.
         document = json.loads(body.decode("utf-8"), object_pairs_hook=_unique) if body else {}
     except (UnicodeDecodeError, ValueError, RecursionError):
-        raise _Refusal(400, "invalid_json") from None
+        raise support.ToolMarketError(400, "invalid_json") from None
     if not isinstance(document, dict):
-        raise _Refusal(400, "invalid_json")
+        raise support.ToolMarketError(400, "invalid_json")
     return document
 
 
@@ -100,7 +98,8 @@ def _bearer(request: Request) -> str:
     return value[len("Bearer "):] if value.startswith("Bearer ") else ""
 
 
-async def _handle(request: Request, work: Callable[[Any, Any, bytes], Any], *, signed: bool) -> Response:
+async def _handle(request: Request, work: Callable[[Any, Any, bytes], Any], *, signed: bool,
+                  limiter: Optional[anyio.CapacityLimiter] = None) -> Response:
     """Shared route body: mode gate, signature, thread offload, errors."""
 
     try:
@@ -114,7 +113,7 @@ async def _handle(request: Request, work: Callable[[Any, Any, bytes], Any], *, s
     try:
         body = await request.body()
         if len(body) > MAX_BODY_BYTES:
-            raise _Refusal(413, "request_too_large")
+            raise support.ToolMarketError(413, "request_too_large")
         identity = None
         if signed:
             headers = request.headers
@@ -124,9 +123,7 @@ async def _handle(request: Request, work: Callable[[Any, Any, bytes], Any], *, s
                 signature=headers.get("x-signature"), verifier=_verifier or support.verify_hotkey_signature,
                 use_nonce=market.use_nonce,
             ))
-        result = await anyio.to_thread.run_sync(lambda: work(market, identity, body))
-    except _Refusal as exc:
-        return _error(exc.status, exc.code)
+        result = await anyio.to_thread.run_sync(lambda: work(market, identity, body), limiter=limiter)
     except support.ToolMarketError as exc:
         return _error(exc.status, exc.code, **exc.detail)
     except support.AuthError as exc:
@@ -153,7 +150,8 @@ async def order_book(tool: str, request: Request) -> Response:
 @router.post("/tool-market/call")
 async def call(request: Request) -> Response:
     token = _bearer(request)
-    return await _handle(request, lambda m, who, body: m.call(token, _json(body)), signed=False)
+    return await _handle(request, lambda m, who, body: m.call(token, _json(body)), signed=False,
+                         limiter=_call_threads)
 
 
 @router.get("/tool-market/tab")

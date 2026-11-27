@@ -14,9 +14,6 @@ from lab_arena.tool_market.catalog import Operation
 
 PPM = 1_000_000
 MARKUP_PPM = 100_000
-FAILURE_UNAUTHORIZED = "unauthorized"
-FAILURE_NO_CREDIT = "no_credit"
-FAILURE_FORBIDDEN = "forbidden"
 
 
 def _ceil_div(numerator: int, denominator: int) -> int:
@@ -77,17 +74,15 @@ def rank(asks: Iterable[Ask]) -> List[Ask]:
 def key_failure(status: int) -> Optional[str]:
     """A vendor answer that says the key itself is unusable, not the request."""
 
-    return {401: FAILURE_UNAUTHORIZED, 402: FAILURE_NO_CREDIT, 403: FAILURE_FORBIDDEN}.get(int(status))
+    return {401: "unauthorized", 402: "no_credit", 403: "forbidden"}.get(int(status))
 
 
-def rate_limited(status: int, headers: Mapping[str, str]) -> bool:
-    """A 429 with no Retry-After: this key is spent for now, try the next one.
+def rate_limited(status: int) -> bool:
+    """A 429: this key is spent for now, try the next one. With or without
+    Retry-After, the limit is the key's (its miner's account), not the
+    buyer's, so another key may serve."""
 
-    With Retry-After the buyer gets the 429 and decides when to retry.
-    """
-
-    lowered = {str(k).lower(): str(v) for k, v in headers.items()}
-    return int(status) == 429 and not lowered.get("retry-after", "").strip()
+    return int(status) == 429
 
 
 __all__ = [

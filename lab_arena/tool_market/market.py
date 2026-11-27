@@ -44,6 +44,9 @@ MAX_KEYS_PER_CALL = 3
 # Reserve attempts per call, refused ones included (an ask that just moved,
 # a key that just reached its cap), so one call cannot walk a whole book.
 MAX_ASKS_PER_CALL = 10
+# Calls one buyer has in flight in this process, so a few buyers cannot hold
+# every call thread with slow free answers (a no-match search, a timeout).
+MAX_CALLS_IN_FLIGHT_PER_BUYER = 8
 RECHECK_SPACING_SECONDS = 60
 MAX_USAGE_PAGE = 500
 CALL_TIMEOUT_SECONDS = 30.0
@@ -95,7 +98,8 @@ class ToolMarket:
         self._new_id = new_id
         self._new_token = new_token
         self._rechecked: Dict[str, float] = {}
-        self._recheck_lock = threading.Lock()
+        self._in_flight: Dict[str, int] = {}
+        self._lock = threading.Lock()
 
     # Terms and balance ------------------------------------------------------
     def accept_terms(self, identity: BuyerIdentity, body: Mapping[str, Any]) -> Dict[str, Any]:
@@ -206,7 +210,7 @@ class ToolMarket:
         result = self._store.register_key(
             key_id=self._new_id(), tool=tool, hotkey=identity.hotkey, envelope=envelope,
             fingerprint=checked["key_fingerprint"], daily_cap_microusd=cap, status=checked["status"],
-            balance=checked.get("balance"), host=identity.host, signed_at=identity.signed_at,
+            host=identity.host, signed_at=identity.signed_at,
             signed_body=signed_body.decode("utf-8"), signature=identity.signature.lower().removeprefix("0x"))
         if result["status"] == "duplicate":
             raise ToolMarketError(409, "key_already_listed")
@@ -315,6 +319,23 @@ class ToolMarket:
             raise ToolMarketError(401, "tab_unknown")
         if not opened["open"]:
             raise ToolMarketError(401, "tab_closed")
+        hotkey = opened["hotkey"]
+        with self._lock:
+            if self._in_flight.get(hotkey, 0) >= MAX_CALLS_IN_FLIGHT_PER_BUYER:
+                raise ToolMarketError(429, "too_many_calls_in_flight")
+            self._in_flight[hotkey] = self._in_flight.get(hotkey, 0) + 1
+        try:
+            return self._buy(tool, op, max_ask, private, tab, hotkey, url, headers, payload)
+        finally:
+            with self._lock:
+                left = self._in_flight.pop(hotkey) - 1
+                if left:
+                    self._in_flight[hotkey] = left
+
+    def _buy(self, tool: str, op: catalog.Operation, max_ask: int, private: bool, tab: str, hotkey: str,
+             url: str, headers: Mapping[str, str], payload: bytes) -> Dict[str, Any]:
+        """Reserve and send on the cheapest keys that fit, up to the per-call limits."""
+
         # Read before any vendor request, so a chain outage cannot strand a paid answer.
         try:
             epoch = int(self._epoch())
@@ -327,7 +348,7 @@ class ToolMarket:
                 break
             owed_cap = book.owed_microusd(op, op.max_units, ask.ask_microusd)
             if ask.ask_microusd > max_ask or (private and not self._private(tool, ask)) \
-                    or owed_cap > ask.remaining_microusd or ask.miner_hotkey == opened["hotkey"]:
+                    or owed_cap > ask.remaining_microusd or ask.miner_hotkey == hotkey:
                 continue  # known from the book: no reserve could succeed
             attempts += 1
             call_id = self._new_id()
@@ -375,7 +396,7 @@ class ToolMarket:
         document = json_document(response.body)
         status = op.status(response.status, document)
         failure = book.key_failure(status)
-        if failure is not None or book.rate_limited(status, response.headers):
+        if failure is not None or book.rate_limited(status):
             settle("skipped", status)  # the real status, also when a 2xx body reported it
             if failure is not None:
                 self._key_failed(op.tool, ask, status, failure)
@@ -411,8 +432,7 @@ class ToolMarket:
             return None
         if checked.get("status") not in ("valid", "unchecked", "invalid"):
             return None
-        self._store.record_key_event(key_id=key_id, status=checked["status"], reason=checked.get("reason"),
-                                     balance=checked.get("balance"))
+        self._store.record_key_event(key_id=key_id, status=checked["status"], reason=checked.get("reason"))
         return checked
 
     def _key_failed(self, tool: str, ask: book.Ask, status: int, failure: str) -> None:
@@ -451,7 +471,7 @@ class ToolMarket:
         burst of calls cannot hammer a miner's account."""
 
         now = time.monotonic()
-        with self._recheck_lock:
+        with self._lock:
             if now - self._rechecked.get(key_id, -RECHECK_SPACING_SECONDS) < RECHECK_SPACING_SECONDS:
                 return False
             self._rechecked[key_id] = now

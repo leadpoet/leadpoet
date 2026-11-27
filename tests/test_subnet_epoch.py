@@ -391,3 +391,42 @@ def test_reader_rejects_ambiguous_or_mismatched_exact_block() -> None:
 def test_invalid_snapshots_fail_closed(updates, error) -> None:
     with pytest.raises(SubnetEpochError, match=error):
         _snapshot(**updates)
+
+
+def _count_genesis_reads(substrate) -> list:
+    reads: list = []
+    original = substrate.get_block_hash
+
+    def counted(block):
+        if block == 0:
+            reads.append(block)
+        return original(block)
+
+    substrate.get_block_hash = counted
+    return reads
+
+
+def test_genesis_hash_is_read_once_per_substrate_client() -> None:
+    subtensor = _Subtensor()
+    reads = _count_genesis_reads(subtensor.substrate)
+
+    first = read_subnet_epoch_snapshot(subtensor, netuid=71, observed_at="2026-07-16T22:45:00Z")
+    second = read_subnet_epoch_snapshot(subtensor, netuid=71, observed_at="2026-07-16T22:45:00Z")
+
+    assert first.network_genesis_hash == GENESIS
+    assert second.network_genesis_hash == GENESIS
+    assert len(reads) == 1
+
+
+def test_genesis_hash_cache_does_not_cross_substrate_clients() -> None:
+    first_subtensor = _Subtensor()
+    first_reads = _count_genesis_reads(first_subtensor.substrate)
+    read_subnet_epoch_snapshot(first_subtensor, netuid=71, observed_at="2026-07-16T22:45:00Z")
+
+    second_subtensor = _Subtensor()
+    second_reads = _count_genesis_reads(second_subtensor.substrate)
+    state = read_subnet_epoch_snapshot(second_subtensor, netuid=71, observed_at="2026-07-16T22:45:00Z")
+
+    assert state.network_genesis_hash == GENESIS
+    assert len(first_reads) == 1
+    assert len(second_reads) == 1

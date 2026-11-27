@@ -29,12 +29,10 @@ def _required(name: str, env: Mapping[str, str]) -> str:
 
 
 def build_from_environment(environ: Optional[Mapping[str, str]] = None):
-    """Return ``(config, market)``; ``(config, None)`` when off."""
+    """Return ``(config, market)`` for live mode (``gateway_support`` checks the mode)."""
 
     env = os.environ if environ is None else environ
     config = load_config(env)
-    if not config.enabled:
-        return config, None
     store = ToolMarketStore(PostgrestTransport(
         _required("LAB_ARENA_SUPABASE_URL", env), service_key=_required("LAB_ARENA_SERVICE_KEY", env),
     ))

@@ -145,6 +145,7 @@ CREATE TABLE public.tool_market_calls (
   opened_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX tool_market_calls_tab ON public.tool_market_calls(tab_id,sequence);
+CREATE INDEX tool_market_calls_tab_tool ON public.tool_market_calls(tab_id,tool,opened_at);
 CREATE INDEX tool_market_calls_key ON public.tool_market_calls(key_id,opened_at);
 
 -- settled: the vendor answered and its usage is known. uncertain: it may
@@ -244,14 +245,16 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $active
 $active770$;
 
 -- A key goes to the back of its book, and stays in it, after a bare rate
--- limit in the last minute, or in the last hour a 402 it was not failed for
--- or 3 answers of unknown usage (5xx, timeouts).
+-- limit or a 403 in the last minute (Hunter's rate limit is a 403; a key
+-- whose plan lacks the route is retried once a minute at most), or in the
+-- last hour a 402 it was not failed for or 3 vendor 5xx answers. Timeouts and oversized answers do not
+-- count: a buyer can cause those, and could push a rival's key back.
 CREATE FUNCTION public.tool_market__key_demoted_v1(p_key_id UUID)
 RETURNS BOOLEAN LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $demoted770$
- SELECT count(*) FILTER (WHERE s.status='skipped' AND s.http_status=429
+ SELECT count(*) FILTER (WHERE s.status='skipped' AND s.http_status IN (403,429)
    AND s.settled_at>clock_timestamp()-interval '1 minute')>0
   OR count(*) FILTER (WHERE s.status='skipped' AND s.http_status=402)>0
-  OR count(*) FILTER (WHERE s.status='uncertain')>=3
+  OR count(*) FILTER (WHERE s.status='uncertain' AND s.http_status>=500)>=3
  FROM public.tool_market_calls c JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
  WHERE c.key_id=p_key_id AND c.opened_at>clock_timestamp()-interval '1 hour';
 $demoted770$;
@@ -510,7 +513,9 @@ END;
 $reserve770$;
 
 -- Settle once, within the open window. A settlement may not charge more
--- than the call reserved.
+-- than the call reserved. It takes the buyer and key locks, as a reserve
+-- does, so a reserve never sees a call that has just aged out of the window
+-- before its settlement commits.
 CREATE FUNCTION public.tool_market_settle_call_v1(p_call_id UUID,p_status TEXT,p_http_status INTEGER,p_units BIGINT,
  p_owed BIGINT,p_charge BIGINT,p_epoch BIGINT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $settle770$
@@ -518,6 +523,8 @@ DECLARE c public.tool_market_calls;
 BEGIN
  SELECT * INTO c FROM public.tool_market_calls WHERE call_id=p_call_id;
  IF c.call_id IS NULL THEN RETURN jsonb_build_object('status','not_found'); END IF;
+ PERFORM public.tool_market__lock_v1('buyer',(SELECT t.hotkey FROM public.tool_market_tabs t WHERE t.tab_id=c.tab_id));
+ PERFORM public.tool_market__lock_v1('key',c.key_id::TEXT);
  IF c.opened_at<=clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1()) THEN
   RETURN jsonb_build_object('status','expired');
  END IF;

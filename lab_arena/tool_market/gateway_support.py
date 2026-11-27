@@ -12,6 +12,7 @@ from typing import Any, Tuple
 
 from lab_arena.chain import verify_hotkey_signature
 from lab_arena.lead_orders.auth import AuthError, verify_buyer_request
+from lab_arena.store import ArenaStoreError
 from lab_arena.tool_market.config import ToolMarketConfigError, load_config
 from lab_arena.tool_market.market import ToolMarketError
 
@@ -28,6 +29,7 @@ def build_state() -> Tuple[Any, Any]:
 
 
 __all__ = [
+    "ArenaStoreError",
     "AuthError",
     "ToolMarketConfigError",
     "ToolMarketError",

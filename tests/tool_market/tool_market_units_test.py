@@ -63,7 +63,8 @@ def test_get_operations_send_only_listed_params():
     parts = urlsplit(url)
     assert parts.path == "/v2/validate" and parse_qs(parts.query) == {"email": ["ada@acme.com"], "ip_address": ["1.2.3.4"]}
     assert body == b"" and headers == {"accept": "application/json"}  # the vault adds the key
-    for params in ({}, {"email": "x", "api_key": "k"}, {"email": 5}, {"email": ""}, {"email": "x" * 321}, "x"):
+    for params in ({}, {"email": "x", "api_key": "k"}, {"email": 5}, {"email": ""}, {"email": "x" * 321}, "x",
+                   {"email": "\U0001d51e" * 320}):  # 320 characters, but past the vault's 2000 once encoded
         with pytest.raises(catalog.CatalogError):
             ZB.build(params)
     with pytest.raises(catalog.CatalogError):
@@ -115,7 +116,7 @@ def test_units_count_only_what_the_vendor_charges():
     assert EXA.units(200, {"costDollars": {"total": "0.0000001"}}) == 1  # rounded up to a micro-USD
     assert EXA.units(200, {"costDollars": {"total": 1000}}) == EXA.max_units
     for answer in (None, {}, {"costDollars": None}, {"costDollars": {"total": -1}}, {"costDollars": {"total": "NaN"}},
-                   {"costDollars": {"total": True}}, [1]):
+                   {"costDollars": {"total": True}}, {"costDollars": {"total": "1e999999"}}, [1]):
         assert EXA.units(200, answer) is None  # unknown usage: nobody pays
 
 
@@ -127,6 +128,8 @@ def test_every_operation_fits_its_vault_route():
         assert tools.TOOLS[op.tool].route(op.method, parts.path, parts.query), (op.tool, op.name)
         assert not tools.TOOLS[op.tool].caller_sets_key(parts.query)
     assert set(catalog.TOOLS) <= set(tools.TOOLS)
+    # The vault allows only the routes the catalog prices.
+    assert not tools.TOOLS["harvestapi"].route("GET", "/linkedin/profile-search", "search=a")
 
 
 def _sample(param):

@@ -253,6 +253,57 @@ def test_rate_limited_and_unreliable_keys_go_to_the_back_of_the_book(world):
     assert [s[0] for s in world.vendor.sent] == ["steady-key"]
 
 
+def test_only_vendor_errors_push_a_key_back_not_what_a_buyer_can_cause(world):
+    world.miner_key("pushback-cheap", 8_000)
+    world.miner_key("pushback-other", 10_000)
+    _, token = world.buyer()
+    # An oversized answer is unknown usage a buyer can cause: the miner
+    # bears it, but the key keeps its place.
+    world.vendor.script["pushback-cheap"] = [VaultTransportError("response_too_large", forwarded=True)] * 3 + [ok()]
+    for _ in range(3):
+        with pytest.raises(ToolMarketError):
+            world.market.call(token, PROFILE)
+    world.market.call(token, PROFILE)
+    assert world.market.order_book("harvestapi")["asks"][0]["ask_microusd"] == 8_000
+    # A 403 (a plan without the route, or a rate limit) pushes it back for a minute.
+    world.vendor.script["pushback-cheap"] = [ok(status=403)]
+    world.market.call(token, PROFILE)
+    world.vendor.sent.clear()
+    world.market.call(token, PROFILE)
+    assert [s[0] for s in world.vendor.sent] == ["pushback-other"]
+
+
+def test_a_tab_short_for_one_key_still_buys_from_a_cheaper_one(world):
+    world.miner_key("short-pricey", 200_000)
+    world.miner_key("short-cheap", 10_000)
+    _, token = world.buyer(budget=50_000)
+    world.vendor.script["short-cheap"] = [ok(status=500), ok(status=500), ok(status=500), ok()]
+    for _ in range(3):
+        world.market.call(token, PROFILE)  # 5xx: the cheap key goes to the back
+    assert world.market.order_book("harvestapi")["asks"][0]["ask_microusd"] == 200_000
+    assert world.market.call(token, PROFILE)["charge_microusd"] == 11_000
+    assert world.vendor.sent[-1][0] == "short-cheap"  # the 220,000 reserve would not fit
+    world.vendor.script["short-cheap"] = [ok(status=403)]
+    with pytest.raises(ToolMarketError) as short:
+        world.market.call(token, PROFILE)
+    assert (short.value.status, short.value.code) == (402, "tab_budget")
+
+
+def test_a_bad_token_reads_neither_the_chain_nor_the_book(world):
+    _, closed = world.buyer()
+    world.market.close_tab(closed)
+
+    def chain_read():
+        raise AssertionError("the chain was read")
+
+    world.market._epoch = chain_read
+    world.market._supply = lambda tool: chain_read()
+    for token in ("tmt_nope", closed):
+        with pytest.raises(ToolMarketError) as refused:
+            world.market.call(token, PROFILE)
+        assert refused.value.status == 401
+
+
 def test_the_catalog_lists_each_tool_its_operations_and_best_price(world):
     world.miner_key("cat-cheap", 9_000)
     world.miner_key("cat-dear", 12_000)
@@ -333,7 +384,7 @@ def test_tabs_need_terms_balance_and_budget(world):
             world.market.open_tab(world.who(broke), bad)
     with pytest.raises(ToolMarketError) as unknown:
         world.market.call("tmt_nope", PROFILE)
-    assert unknown.value.code == "tab_closed"
+    assert unknown.value.code == "tab_unknown"
 
 
 def test_listing_rules(world):
@@ -543,6 +594,19 @@ def test_a_checked_key_fails_on_401_or_on_402_with_no_balance(world):
     with pytest.raises(ToolMarketError):
         world.market.call(token, VALIDATE)
     assert world.market.order_book("zerobounce")["asks"] == []
+
+
+def test_a_miner_rechecks_a_key_only_where_a_free_check_proves_it(world):
+    miner, exa = world.miner_key("exa-dead", 900_000, tool="exa")
+    _, zb = world.miner_key("zb-topped-up", 4_000, tool="zerobounce", miner=miner)
+    who = world.who(miner)
+    with pytest.raises(ToolMarketError) as refused:
+        world.market.check_key(who, exa)  # "unchecked" would put a dead key back
+    assert (refused.value.status, refused.value.code) == (409, "key_cannot_be_checked")
+    assert world.market.check_key(who, zb)["tradeable"] is True
+    with pytest.raises(ToolMarketError) as soon:
+        world.market.check_key(who, zb)
+    assert (soon.value.status, soon.value.code) == (429, "check_too_soon")
 
 
 def test_a_miners_tab_never_buys_from_their_own_key(world):

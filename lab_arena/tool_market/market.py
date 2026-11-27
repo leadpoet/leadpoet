@@ -41,6 +41,9 @@ from lead_order_vault import tools as vault_tools
 TOKEN_PREFIX = "tmt_"
 # Keys tried for one call before the buyer is told there is no supply.
 MAX_KEYS_PER_CALL = 3
+# Reserve attempts per call, refused ones included (a key at its cap, an ask
+# that just moved), so one call cannot walk a whole book.
+MAX_ASKS_PER_CALL = 10
 RECHECK_SPACING_SECONDS = 60
 MAX_USAGE_PAGE = 500
 CALL_TIMEOUT_SECONDS = 30.0
@@ -200,9 +203,17 @@ class ToolMarket:
         return dict(result, health=checked["status"])
 
     def check_key(self, identity: BuyerIdentity, key_id: Any) -> Dict[str, Any]:
-        """Check a key again, e.g. after topping up a key that ran out."""
+        """Check a key again, e.g. after topping up a key that ran out.
+
+        A tool with no free check is refused: its vault answer (``unchecked``)
+        proves nothing, so it cannot put back a key a call found dead.
+        """
 
         key = self._own_key(identity, key_id)
+        if vault_tools.TOOLS[key["tool"]].balance_url is None:
+            raise ToolMarketError(409, "key_cannot_be_checked")
+        if not self._recheck_due(key["key_id"]):
+            raise ToolMarketError(429, "check_too_soon", retry_after_seconds=RECHECK_SPACING_SECONDS)
         checked = self._recheck(key["key_id"], key["tool"], key["envelope"])
         return {"key_id": key["key_id"], "tradeable": checked is not None and checked["status"] != "invalid"}
 
@@ -286,17 +297,25 @@ class ToolMarket:
         if not token:
             raise ToolMarketError(401, "tab_unknown")
         tab = token_hash(token)
+        # Before the chain and the book are read, so a bad token costs one lookup.
+        opened = self._store.tab(tab)
+        if opened is None:
+            raise ToolMarketError(401, "tab_unknown")
+        if not opened["open"]:
+            raise ToolMarketError(401, "tab_closed")
         # Read before any vendor request, so a chain outage cannot strand a paid answer.
         try:
             epoch = int(self._epoch())
         except ArenaChainError:
             raise ToolMarketError(503, "chain_unavailable") from None
-        tried = 0
+        tried = attempts = 0
+        short = False
         for ask in book.rank(book.Ask.from_row(row) for row in self._supply(tool)):
-            if tried >= MAX_KEYS_PER_CALL:
+            if tried >= MAX_KEYS_PER_CALL or attempts >= MAX_ASKS_PER_CALL:
                 break
             if ask.ask_microusd > max_ask or (private and not self._private(tool, ask)):
                 continue
+            attempts += 1
             call_id = self._new_id()
             status = self._store.reserve_call(
                 call_id=call_id, token_hash=tab, tool=tool, operation=op.name, key_id=ask.key_id,
@@ -305,7 +324,8 @@ class ToolMarket:
             if status == "tab_closed":
                 raise ToolMarketError(401, "tab_closed")
             if status == "tab_budget":
-                raise ToolMarketError(402, "tab_budget")
+                short = True  # a cheaper key further down may still fit
+                continue
             if status == "uncertain_limit":
                 raise ToolMarketError(429, "uncertain_limit")
             if status != "reserved":
@@ -314,6 +334,8 @@ class ToolMarket:
             outcome = self._send(op, ask, call_id, epoch, url, headers, payload)
             if outcome is not None:
                 return outcome
+        if short:
+            raise ToolMarketError(402, "tab_budget")
         raise ToolMarketError(503, "no_supply")
 
     def _send(self, op: catalog.Operation, ask: book.Ask, call_id: str, epoch: int, url: str,

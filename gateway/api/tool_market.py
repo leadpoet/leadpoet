@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from typing import Any, Callable, Optional, Tuple
 
 import anyio
@@ -26,30 +27,41 @@ from lab_arena.tool_market import gateway_support as support
 router = APIRouter(tags=["tool-market"])
 
 MAX_BODY_BYTES = 64 * 1024
+# A failed build (the chain or the vault down) is not retried for this long,
+# so an outage does not queue every request behind the build lock.
+BUILD_RETRY_SECONDS = 30.0
 
 _lock = threading.Lock()
 _state: Optional[Tuple[Any, Any]] = None
 _builder: Optional[Callable[[], Tuple[Any, Any]]] = None
 _verifier: Optional[Callable[[str, str, str], bool]] = None
+_failed: Optional[Tuple[float, Exception]] = None
 
 
 def configure(*, builder: Optional[Callable[[], Tuple[Any, Any]]] = None,
               verifier: Optional[Callable[[str, str, str], bool]] = None) -> None:
     """Test and deployment hook: replace how state is built and signatures are checked."""
 
-    global _state, _builder, _verifier
+    global _state, _builder, _verifier, _failed
     with _lock:
-        _state = None
+        _state = _failed = None
         _builder = builder
         _verifier = verifier
 
 
 def _get_state() -> Tuple[Any, Any]:
-    global _state
+    global _state, _failed
     with _lock:
         if _state is not None:
             return _state
-        built = _builder() if _builder is not None else support.build_state()
+        if _failed is not None and time.monotonic() - _failed[0] < BUILD_RETRY_SECONDS:
+            raise _failed[1]
+        try:
+            built = _builder() if _builder is not None else support.build_state()
+        except Exception as error:
+            _failed = (time.monotonic(), error)
+            raise
+        _failed = None
         if built[1] is not None:
             _state = built  # off builds nothing and caches nothing
         return built
@@ -119,6 +131,8 @@ async def _handle(request: Request, work: Callable[[Any, Any, bytes], Any], *, s
         return _error(exc.status, exc.code, **exc.detail)
     except support.AuthError as exc:
         return _error(exc.status, exc.code)
+    except support.ArenaStoreError:
+        return _error(503, "store_unavailable")
     return JSONResponse(status_code=200, content=result)
 
 

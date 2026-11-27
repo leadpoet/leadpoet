@@ -125,9 +125,10 @@ Health events come from vault checks and from calls.
   balance; a tool with no check, or a key checked in the last minute, only
   skips the key. A 403 only skips it; the miner sees refusals in their
   statement.
-- A key goes to the back of its book, still in it, after a bare 429 in the
-  last minute, or in the last hour a 402 that did not fail it or 3 calls of
-  unknown usage (see Money).
+- A key goes to the back of its book, still in it, after a bare 429 or a
+  403 in the last minute, or in the last hour a 402 that did not fail it or
+  3 vendor 5xx answers. Timeouts and oversized answers do not count, since a
+  buyer can cause them to push a rival's key back.
 - A 429 with no `Retry-After` skips the key for this call only. Hunter's
   403 is its rate limit, so it counts as a 429. A 429 with
   `Retry-After` goes back to the buyer.
@@ -136,7 +137,10 @@ Health events come from vault checks and from calls.
   that dies in between is found by its next call, which moves to the next
   key and costs the buyer nothing.
 - After topping up a failed key, the miner calls
-  `POST /tool-market/keys/{id}/check` to put it back in the book.
+  `POST /tool-market/keys/{id}/check` to put it back in the book, at most
+  once a minute. Exa and HarvestAPI have no free check, so this is refused
+  (`409 key_cannot_be_checked`): a key a call found dead there stays out,
+  and the miner lists a new key (the 30-day limit applies).
 
 A miner's own tab never buys from their own keys. For security, a hotkey
 registers at most one key per tool every 30 days, revoked keys included. A
@@ -148,7 +152,8 @@ no key asking more serves it.
 
 `GET /tool-market/catalog` lists every tool that trades: its operations,
 one line on what each does, their parameters, its price ceiling, and the
-cheapest ask with what a buyer pays for it. An agent can pick a tool by the
+first ask a call tries (the cheapest key not at the back) with what a buyer
+pays for it. An agent can pick a tool by the
 job it needs done. A request with a bad parameter is refused before any
 charge.
 

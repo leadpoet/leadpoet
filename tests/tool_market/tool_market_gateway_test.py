@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from gateway.api import tool_market as routes
 from lab_arena.chain import wallet_signature_verifier
+from lab_arena.store import ArenaStoreError
 from lab_arena.tool_market.config import ToolMarketConfig
 from lab_arena.tool_market.market import ToolMarketError
 
@@ -96,6 +97,34 @@ def test_misconfigured_live_mode_answers_503(client, monkeypatch):
     routes.configure()
     response = client.get("/tool-market/books/exa")
     assert response.status_code == 503 and response.json() == {"error": "tool_market_misconfigured"}
+
+
+def test_a_failed_build_is_not_retried_on_every_request(client, monkeypatch):
+    builds = []
+
+    def chain_down():
+        builds.append(1)
+        raise RuntimeError("chain unavailable")
+
+    routes.configure(builder=chain_down)
+    for _ in range(3):
+        assert client.get("/tool-market/catalog").json() == {"error": "tool_market_unavailable"}
+    assert len(builds) == 1
+    monkeypatch.setattr(routes, "BUILD_RETRY_SECONDS", 0)
+    client.get("/tool-market/catalog")
+    assert len(builds) == 2
+
+
+def test_a_store_outage_answers_503(client):
+    market = enable()
+
+    def store_down(token, body):
+        raise ArenaStoreError("store unavailable")
+
+    market.call = store_down
+    answer = client.post("/tool-market/call", json={"tool": "exa", "operation": "search"},
+                         headers={"authorization": "Bearer tmt_good"})
+    assert answer.status_code == 503 and answer.json() == {"error": "store_unavailable"}
 
 
 def test_signed_routes_take_one_use_of_a_signature(client):

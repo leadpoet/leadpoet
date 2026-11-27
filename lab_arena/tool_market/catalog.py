@@ -8,9 +8,9 @@ this table is narrower, so a buyer reaches only the listed operations.
 Usage units:
 
 - ``call``: the vendor charges credits per request. A miner asks a price in
-  micro-USD per credit. A 2xx answer counts ``call_units`` credits, or what
-  the operation's ``cost`` reader finds the vendor charged (no email found
-  is often free).
+  micro-USD per credit. A 2xx answer counts 1 credit, or what the
+  operation's ``cost`` reader finds the vendor charged (no email found is
+  often free).
 - ``vendor_usd``: the vendor reports the request's own cost in its answer.
   A miner asks a price in micro-USD per vendor USD (``900000`` sells at 90%
   of the vendor's price), and the call counts the reported micro-USD.
@@ -28,7 +28,7 @@ import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
-from urllib.parse import urlencode
+from urllib.parse import quote_plus, urlencode
 
 UNIT_CALL = "call"
 UNIT_VENDOR_USD = "vendor_usd"
@@ -36,6 +36,8 @@ UNIT_SCALE = {UNIT_CALL: 1, UNIT_VENDOR_USD: 1_000_000}
 # The highest ask a miner may post. Per credit: above every launch vendor's
 # own list price. Per vendor USD: the vendor's own price.
 MAX_ASK = {UNIT_CALL: 250_000, UNIT_VENDOR_USD: 1_000_000}
+# The vault refuses a query value longer than this once URL-encoded.
+MAX_ENCODED_QUERY_VALUE = 2000
 
 
 class CatalogError(ValueError):
@@ -82,23 +84,18 @@ class Param:
         raise AssertionError(self.kind)
 
 
-def _usd_field(*path: Any) -> Callable[[Any], Optional[int]]:
+def _usd_field(*path: str) -> Callable[[Any], Optional[int]]:
     """Read a vendor-reported USD cost and round it up to micro-USD."""
 
     def read(document: Any) -> Optional[int]:
-        value = document
-        for step in path:
-            if isinstance(step, int):
-                value = value[step] if isinstance(value, list) and len(value) > step else None
-            else:
-                value = value.get(step) if isinstance(value, dict) else None
+        value = _get(document, *path)
         if isinstance(value, bool) or not isinstance(value, (int, float, str)):
             return None
         try:
             usd = Decimal(str(value))
         except InvalidOperation:
             return None
-        if not usd.is_finite() or usd < 0:
+        if not usd.is_finite() or usd < 0 or usd > 1_000_000:  # also keeps the product finite
             return None
         return int(math.ceil(usd * 1_000_000))
 
@@ -115,8 +112,7 @@ class Operation:
     # Upper bound on the units one call may count; the reserve is priced on it.
     max_units: int
     params: Mapping[str, Param]
-    # Units a 2xx answer counts: ``cost(document)`` when set, else ``call_units``.
-    call_units: int = 1
+    # Units a 2xx answer counts: ``cost(document)`` when set, else 1.
     cost: Optional[Callable[[Any], Optional[int]]] = field(default=None, compare=False)
     # How the checked params become the vendor's JSON body (default: as is).
     wrap: Optional[Callable[[Dict[str, Any]], Any]] = field(default=None, compare=False)
@@ -141,6 +137,8 @@ class Operation:
         values = {name: self.params[name].read(value) for name, value in params.items()}
         headers = {"accept": "application/json"}
         if self.method == "GET":
+            if any(len(quote_plus(str(v))) > MAX_ENCODED_QUERY_VALUE for v in values.values()):
+                raise CatalogError("param_invalid")
             return self.url + ("?" + urlencode(sorted(values.items())) if values else ""), headers, b""
         headers["content-type"] = "application/json"
         document = self.wrap(values) if self.wrap is not None else values
@@ -159,7 +157,7 @@ class Operation:
         if not 200 <= status < 300:
             return None
         if self.cost is None:
-            return self.call_units
+            return 1
         reported = self.cost(document)
         return None if reported is None else min(reported, self.max_units)
 

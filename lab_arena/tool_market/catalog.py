@@ -217,13 +217,27 @@ def _prospeo_status(status: int, document: Any) -> int:
 def _prospeo_cost(document: Any) -> Optional[int]:
     if _get(document, "error") is not False:
         return None
-    return 0 if _get(document, "free_enrichment") is True else 1
+    free = _get(document, "free_enrichment")
+    return int(not free) if isinstance(free, bool) else None
 
 
-def _found_email(*path: str) -> Callable[[Any], Optional[int]]:
+def _found_email(container: str) -> Callable[[Any], Optional[int]]:
     """One credit when the answer holds an email at ``path``; finding none is free."""
 
-    return lambda document: 1 if _get(document, *path) else 0
+    def read(document: Any) -> Optional[int]:
+        if not isinstance(document, dict) or container not in document:
+            return None
+        result = document[container]
+        if result is None:
+            return 0
+        if not isinstance(result, dict) or "email" not in result:
+            return None
+        email = result["email"]
+        if email is None:
+            return 0
+        return int(bool(email.strip())) if isinstance(email, str) else None
+
+    return read
 
 
 def _prospeo_body(values: Dict[str, Any]) -> Dict[str, Any]:
@@ -263,11 +277,11 @@ _OPERATIONS: Sequence[Operation] = (
               wrap=_prospeo_body, does="Find a person's work email and profile from a name, company or LinkedIn URL."),
     # Findymail: one credit per email found. 423 is a paused account, which no free check sees, so it counts as a bad key.
     Operation("findymail", "find_from_linkedin", "POST", "https://app.findymail.com/api/search/business-profile",
-              UNIT_CALL, 1, {"linkedin_url": _URL}, cost=_found_email("contact", "email"),
+              UNIT_CALL, 1, {"linkedin_url": _URL}, cost=_found_email("contact"),
               real_status=_findymail_status, does="Find a person's work email from their LinkedIn URL."),
     Operation("findymail", "find_from_name", "POST", "https://app.findymail.com/api/search/name", UNIT_CALL, 1,
               {"name": Param("str", required=True, max_length=200), "domain": Param("str", required=True, max_length=253)},
-              cost=_found_email("contact", "email"), real_status=_findymail_status,
+              cost=_found_email("contact"), real_status=_findymail_status,
               does="Find a person's work email from their name and company domain."),
     # Hunter: one search per email found. Its 403 is a rate limit and its
     # 429 an empty account.
@@ -275,7 +289,7 @@ _OPERATIONS: Sequence[Operation] = (
               {"domain": Param("str", max_length=253), "company": _NAME, "linkedin_handle": _NAME,
                "first_name": _NAME, "last_name": _NAME, "full_name": _NAME,
                "max_duration": Param("int", low=3, high=20)},
-              cost=_found_email("data", "email"), real_status=_hunter_status,
+              cost=_found_email("data"), real_status=_hunter_status,
               does="Find a person's work email from their name and company."),
     # Exa: each answer carries ``costDollars.total``, which Exa calls an estimate.
     Operation("exa", "search", "POST", _EXA + "/search", UNIT_VENDOR_USD, 50_000,

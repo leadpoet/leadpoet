@@ -20,3 +20,14 @@ def test_harvest_maps_market_url_to_vendor_query_and_requires_a_result(name, slu
 def test_unrecognized_zero_bounce_verdict_does_not_create_a_charge():
     op = operation("zerobounce", "validate")
     assert op.units(200, {"status": "processing"}) is None
+
+
+@pytest.mark.parametrize("tool,name,document", [
+    ("prospeo", "enrich_person", {"error": False, "person": {"first_name": "Ada"}}),
+    ("prospeo", "enrich_person", {"error": False, "free_enrichment": "false", "person": {}}),
+    ("hunter", "email_finder", {"data": {"email": ["ada@example.com"]}}),
+    ("hunter", "email_finder", {"error": "temporarily unavailable"}),
+    ("findymail", "find_from_name", {"contact": {"email": True}}),
+])
+def test_charge_needs_a_typed_usage_signal(tool, name, document):
+    assert operation(tool, name).units(200, document) is None

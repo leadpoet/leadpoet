@@ -344,15 +344,18 @@ def write_dataset(
                 incomplete = not job.get("artifact_sha256") and not event_hashes
                 journal = WorkflowJournal(objects, batch, rid)
                 replies = []
-                for idx, (event, _) in enumerate(
-                    journal.read(None if incomplete else event_hashes)
-                ):
-                    if full_trajectories:
-                        observed_event = json.loads(event)
-                        if observed_event["kind"] == "reply":
-                            replies.append({k: observed_event.get(k) for k in ("kind", "receipt", "model", "usage")})
-                    if not trained:
-                        z.writestr(f"{rid}/events/{idx:05d}.json", event)
+                # Native replay already checked the full journal and bound each generator
+                # event to its original wire reply. Do not re-download the entire event stream.
+                if native is None:
+                    for idx, (event, _) in enumerate(
+                        journal.read(None if incomplete else event_hashes)
+                    ):
+                        if full_trajectories:
+                            observed_event = json.loads(event)
+                            if observed_event["kind"] == "reply":
+                                replies.append({k: observed_event.get(k) for k in ("kind", "receipt", "model", "usage")})
+                        if not trained:
+                            z.writestr(f"{rid}/events/{idx:05d}.json", event)
                 if job["status"] == "failed" or not job.get("artifact_sha256"):
                     if job["status"] not in {"failed", "running"}:
                         raise ValueError("completed experiment missing archive")
@@ -474,7 +477,8 @@ def write_dataset(
                 split = read("split", manifest["split"])
                 calls = read("generation-receipts", manifest["calls"])
                 if full_trajectories:
-                    calls = trajectories.experiment_calls(calls, replies)
+                    usage_events = row["evidence"]["events"] if native is not None else replies
+                    calls = trajectories.experiment_calls(calls, usage_events)
                 settings = read("settings", manifest["settings"])
                 if (
                     row["run"] != rid
@@ -606,9 +610,8 @@ def write_dataset(
                         or packet["checks"].get("training_split") is not True
                     ):
                         hold = "privacy_or_split_not_cleared"
-                    journal.transcript_hashes(
-                        manifest["events"], model=job["model"], generator=row
-                    )
+                    if native is None:
+                        journal.transcript_hashes(manifest["events"], model=job["model"], generator=row)
                     full.write(
                         project(
                             None if hold else row,

@@ -150,9 +150,19 @@ def experiment_calls(calls, events):
             for key, value in (original.get("usage") or {}).items():
                 if key not in ("prompt_tokens", "completion_tokens", "total_tokens", "completion_tokens_details"):
                     continue
-                if key in usage and usage[key] != value:
-                    raise ValueError("original generation usage mismatch")
-                usage[key] = value
+                if key == "completion_tokens_details":
+                    # The experiment meter deliberately retains only numeric reasoning tokens.
+                    detail = value.get("reasoning_tokens") if isinstance(value, dict) else None
+                    if type(detail) is not int or detail < 0:
+                        continue
+                    recorded = (usage.get(key) or {}).get("reasoning_tokens")
+                    if recorded is not None and recorded != detail:
+                        raise ValueError("original generation usage mismatch")
+                    usage[key] = {"reasoning_tokens": detail}
+                else:
+                    if key in usage and usage[key] != value:
+                        raise ValueError("original generation usage mismatch")
+                    usage[key] = value
         result.append({**call, "usage": usage})
     return result
 

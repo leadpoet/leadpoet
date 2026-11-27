@@ -409,10 +409,11 @@ def test_experiment_counts_read_original_reply_usage_without_conflating_prefixes
     from lab_arena.collection_trajectories import experiment_calls, trajectory_row
 
     kw = examples()
-    calls = [{"provider_id": "gen-one", "model":"test/model", "usage": {"completion_tokens":3}},
+    calls = [{"provider_id": "gen-one", "model":"test/model", "usage": {
+                 "completion_tokens":3,"completion_tokens_details":{"reasoning_tokens":2}}},
              {"provider_id": "gen-two", "model":"test/model", "usage": {"completion_tokens":2}}]
     replies = [{"kind":"reply","receipt":"gen-one","model":"test/model","usage":{"prompt_tokens":7,"completion_tokens":3,
-                  "completion_tokens_details":{"reasoning_tokens":2}}},
+                  "completion_tokens_details":{"reasoning_tokens":2,"image_tokens":0}}},
                {"kind":"reply","receipt":"gen-two","model":"test/model","usage":{"prompt_tokens":13,"completion_tokens":2,
                   "completion_tokens_details":{"reasoning_tokens":0}}}]
     kw["calls"] = experiment_calls(calls,replies)

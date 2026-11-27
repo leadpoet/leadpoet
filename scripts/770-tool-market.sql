@@ -550,8 +550,9 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
 $statement770$;
 
 -- A buyer's own calls, oldest first, after a watermark (a call sequence).
--- Only finished calls are listed: settled, or open past the late-answer
--- window, which can no longer settle. The page stops before the buyer's
+-- Only finished calls are listed: settled, or open a minute past the
+-- late-answer window, so a settle that passed its check just in time has
+-- committed. The page stops before the buyer's
 -- oldest call still open, so a watermark never passes a call that may still
 -- settle. Usage only, never the vendor's answer.
 CREATE FUNCTION public.tool_market_usage_v1(p_hotkey TEXT,p_after BIGINT,p_limit INTEGER)
@@ -563,7 +564,7 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
   WHERE t.hotkey=p_hotkey AND c.sequence>p_after),
  open_from AS (
   SELECT min(sequence) seq FROM mine WHERE settled IS NULL
-   AND opened_at>clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1())),
+   AND opened_at>clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1()+60)),
  page AS (
   SELECT * FROM mine WHERE sequence<coalesce((SELECT seq FROM open_from),9223372036854775807)
   ORDER BY sequence LIMIT greatest(1,least(p_limit,500)))

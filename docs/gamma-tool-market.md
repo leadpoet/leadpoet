@@ -111,8 +111,9 @@ A key is in its tool's book only while all of these hold:
 - its latest health event is `valid` or `unchecked`;
 - what it earned in the last 24 h, with unknown usage and calls in flight
   at the most they could owe, is under its daily cap. A miner picks the
-  cap, at most $20 a day per key at launch. A call skips a key without
-  room for it.
+  cap, at most $20 a day per key at launch, and it must hold 4 of the
+  key's largest calls at its ask (`400 ask_too_high_for_cap`). A call
+  skips a key without room for it.
 
 Health events come from vault checks and from calls.
 
@@ -128,7 +129,7 @@ Health events come from vault checks and from calls.
   skips the key. A 403 only skips it.
 - A key goes to the back of its book, still in it, after a 429 in the
   last minute, or in the last hour a 402 that did not fail it, a 403 or
-  unknown usage for 3 different buyers. A buyer can shape each of those,
+  unknown usage, each for 3 different buyers. A buyer can shape each of those,
   so one buyer cannot push a rival's key back.
 - A 429, with or without `Retry-After`, moves the call to the next key:
   the limit is the key's account, not the buyer's. Hunter's 403 is its rate
@@ -201,9 +202,9 @@ All amounts are integer micro-USD.
 - **Unknown usage:** sometimes the usage is unknown, such as a 5xx answer,
   a timeout, or a 2xx with no cost in it. Then the buyer pays nothing and
   the miner is owed nothing. The miner bears that risk, at most the key's
-  daily cap a day. A buyer whose unknown usage on a key passes a quarter
-  of its cap skips that key for the day, so one buyer cannot push a key out
-  of the book for free.
+  daily cap a day. A buyer whose unknown usage and calls in flight on a
+  key pass a quarter of its cap skips that key, so one buyer cannot push a
+  key out of the book for free.
   - A request that may have reached the vendor is never retried on another
     key, so it cannot be used twice.
   - A buyer shapes some of these, such as an answer too large to return.

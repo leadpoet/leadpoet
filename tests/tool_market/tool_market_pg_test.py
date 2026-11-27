@@ -247,11 +247,15 @@ def test_rate_limited_and_unreliable_keys_go_to_the_back_of_the_book(world):
         _, token = world.buyer()
         assert world.market.call(token, PROFILE)["status"] == 500
     world.vendor.script["limited-key"] = [ok(status=429, headers={})]
-    world.market.call(token, PROFILE)
+    for n in range(3):
+        _, token = world.buyer()
+        world.market.call(token, PROFILE)
+        if n < 2:  # one or two buyers' 429s leave the key where it is
+            assert world.market.order_book("harvestapi")["asks"][0]["ask_microusd"] == 9_000
     world.vendor.sent.clear()
     world.market.call(token, PROFILE)
     # The flaky key (3 buyers saw unknown usage this hour) and the limited
-    # key (a bare 429 this minute) are tried after the steady one.
+    # key (3 buyers saw a 429 this minute) are tried after the steady one.
     assert [s[0] for s in world.vendor.sent] == ["steady-key"]
 
 
@@ -277,10 +281,12 @@ def test_only_vendor_errors_push_a_key_back_not_what_a_buyer_can_cause(world):
 def test_a_tab_short_for_one_key_still_buys_from_a_cheaper_one(world):
     world.miner_key("short-pricey", 200_000)
     world.miner_key("short-cheap", 10_000)
+    world.vendor.script["short-cheap"] = [ok(status=429, headers={})] * 3 + [ok()]
+    for _ in range(3):  # 429s for 3 buyers: the cheap key goes to the back
+        _, other = world.buyer()
+        with pytest.raises(ToolMarketError):
+            world.market.call(other, PROFILE)
     _, token = world.buyer(budget=50_000)
-    world.vendor.script["short-cheap"] = [ok(status=429, headers={}), ok()]
-    with pytest.raises(ToolMarketError):
-        world.market.call(token, PROFILE)  # a bare 429: the cheap key goes to the back
     assert world.market.order_book("harvestapi")["asks"][0]["ask_microusd"] == 200_000
     assert world.market.call(token, PROFILE)["charge_microusd"] == 11_000
     assert world.vendor.sent[-1][0] == "short-cheap"  # the 220,000 reserve would not fit
@@ -419,39 +425,61 @@ def test_listing_rules(world):
 
 
 def test_a_key_stops_trading_at_its_daily_cap(world):
-    world.miner_key("capped-key", 10_000, cap=25_000)
+    miner, key_id = world.miner_key("capped-key", 10_000, cap=45_000)
+    with pytest.raises(ToolMarketError) as dear:
+        world.market.post_ask(world.who(miner), {"key_id": key_id, "ask_microusd": 11_250 + 1})
+    assert dear.value.code == "ask_too_high_for_cap"  # the cap must hold 4 calls
     _, token = world.buyer()
-    world.market.call(token, PROFILE)
-    world.market.call(token, PROFILE)
+    for _ in range(4):
+        world.market.call(token, PROFILE)
     with pytest.raises(ToolMarketError) as capped:
-        world.market.call(token, PROFILE)  # 20,000 earned + 10,000 more would pass 25,000
+        world.market.call(token, PROFILE)  # 40,000 earned + 10,000 more would pass 45,000
     assert capped.value.code == "no_supply"
 
 
 def test_unknown_usage_counts_toward_a_keys_daily_cap_a_quarter_per_buyer(world):
     # Whatever buyers cause, a miner never bears more than their cap a day,
     # and no one buyer can fill it for free.
-    world.miner_key("uncertain-capped", 10_000, cap=60_000)
+    world.miner_key("uncertain-capped", 10_000, cap=40_000)
     world.vendor.script["uncertain-capped"] = [ok(status=500)]
     _, token = world.buyer()
-    for _ in range(2):
-        world.market.call(token, PROFILE)  # 20,000 at risk: past a quarter of the cap
+    world.market.call(token, PROFILE)  # 10,000 at risk: a quarter of the cap
     with pytest.raises(ToolMarketError) as share:
         world.market.call(token, PROFILE)
-    assert share.value.code == "no_supply" and len(world.vendor.sent) == 2
-    for _ in range(2):
+    assert share.value.code == "no_supply" and len(world.vendor.sent) == 1
+    for _ in range(3):
         _, token = world.buyer()
-        world.market.call(token, PROFILE)
         world.market.call(token, PROFILE)
     _, token = world.buyer()
     with pytest.raises(ToolMarketError) as capped:
-        world.market.call(token, PROFILE)  # 60,000 at risk: the cap holds for everyone
-    assert capped.value.code == "no_supply" and len(world.vendor.sent) == 6
+        world.market.call(token, PROFILE)  # 40,000 at risk: the cap holds for everyone
+    assert capped.value.code == "no_supply" and len(world.vendor.sent) == 4
+
+
+def test_a_buyers_calls_in_flight_count_toward_their_quarter(world):
+    world.miner_key("parallel-key", 10_000, cap=40_000)
+    world.miner_key("parallel-spare", 12_000)
+    _, token = world.buyer()
+    tab = market_module.token_hash(token)
+    cheap = min(world.store.book(tool="harvestapi", terms_sha256=world.terms), key=lambda r: r["ask_microusd"])
+
+    def reserve():
+        return world.store.reserve_call(call_id=str(uuid.uuid4()), token_hash=tab, tool="harvestapi",
+                                        operation="linkedin_profile", key_id=cheap["key_id"], ask_microusd=10_000,
+                                        reserve_microusd=11_000, owed_cap_microusd=10_000)
+
+    assert [reserve(), reserve()] == ["reserved", "key_cap"]  # the first is still in flight
 
 
 def test_keys_without_room_for_a_call_do_not_use_up_its_attempts(world):
     for n in range(market_module.MAX_ASKS_PER_CALL + 2):
-        world.miner_key(f"tiny-cap-{n}", 1_000, cap=1)
+        # Keys whose cap has less room left than a call (the store, as the
+        # market refuses such an ask for a fresh key).
+        miner = hotkey()
+        world.accept(miner, "miner")
+        key_id = world.register(miner, {"tool": "harvestapi", "daily_cap_microusd": 1,
+                                        "envelope": world.vault.seal("harvestapi", miner, f"tiny-cap-{n}")})["key_id"]
+        world.store.post_ask(key_id=key_id, hotkey=miner, ask_microusd=1_000)
     world.miner_key("roomy-key", 10_000)
     _, token = world.buyer()
     assert world.market.call(token, PROFILE)["charge_microusd"] == 11_000

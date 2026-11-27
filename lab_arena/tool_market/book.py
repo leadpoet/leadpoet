@@ -33,12 +33,6 @@ def charge_microusd(owed: int) -> int:
     return _ceil_div(int(owed) * (PPM + MARKUP_PPM), PPM)
 
 
-def reserve_microusd(operation: Operation, ask_microusd: int) -> int:
-    """The most one call can charge, held against the tab until it settles."""
-
-    return charge_microusd(_ceil_div(operation.max_units * int(ask_microusd), operation.unit_scale))
-
-
 def valid_ask(ask_microusd: object, ceiling: int) -> bool:
     return isinstance(ask_microusd, int) and not isinstance(ask_microusd, bool) \
         and 0 < ask_microusd <= ceiling
@@ -84,6 +78,5 @@ __all__ = [
     "key_failure",
     "owed_microusd",
     "rank",
-    "reserve_microusd",
     "valid_ask",
 ]

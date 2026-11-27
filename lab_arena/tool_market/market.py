@@ -247,6 +247,11 @@ class ToolMarket:
         ceiling = catalog.MAX_ASK[catalog.TOOLS[key["tool"]]]
         if ask is not None and not book.valid_ask(ask, ceiling):
             raise ToolMarketError(400, "ask_invalid", max_ask_microusd=ceiling)
+        # A key's cap holds at least 4 of its largest calls, so each buyer's
+        # quarter of it (unknown usage and calls in flight) fits one call.
+        if ask is not None and any(4 * book.owed_microusd(op, op.max_units, ask) > key["daily_cap_microusd"]
+                                   for op in catalog.OPERATIONS.values() if op.tool == key["tool"]):
+            raise ToolMarketError(400, "ask_too_high_for_cap")
         result = self._store.post_ask(key_id=key["key_id"], hotkey=identity.hotkey, ask_microusd=ask)
         if result["status"] == "not_found":
             raise ToolMarketError(404, "key_unknown")
@@ -354,7 +359,7 @@ class ToolMarket:
             call_id = self._new_id()
             status = self._store.reserve_call(
                 call_id=call_id, token_hash=tab, tool=tool, operation=op.name, key_id=ask.key_id,
-                ask_microusd=ask.ask_microusd, reserve_microusd=book.reserve_microusd(op, ask.ask_microusd),
+                ask_microusd=ask.ask_microusd, reserve_microusd=book.charge_microusd(owed_cap),
                 owed_cap_microusd=owed_cap)
             if status == "tab_closed":
                 raise ToolMarketError(401, "tab_closed")

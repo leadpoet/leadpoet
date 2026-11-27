@@ -24,7 +24,6 @@ EXA = catalog.operation("exa", "search")
 def test_a_one_cent_call_costs_the_buyer_one_point_one_cents():
     owed = book.owed_microusd(ZB, 1, 10_000)
     assert owed == 10_000 and book.charge_microusd(owed) == 11_000
-    assert book.reserve_microusd(ZB, 10_000) == 11_000
 
 
 def test_a_vendor_usd_ask_is_a_share_of_the_reported_cost():
@@ -32,7 +31,7 @@ def test_a_vendor_usd_ask_is_a_share_of_the_reported_cost():
     assert book.owed_microusd(EXA, 2_000, 900_000) == 1_800
     assert book.charge_microusd(1_800) == 1_980
     # The reserve covers the operation's maximum: $0.05 x 90% x 1.1.
-    assert book.reserve_microusd(EXA, 900_000) == 49_500
+    assert book.charge_microusd(book.owed_microusd(EXA, EXA.max_units, 900_000)) == 49_500
     # Usage beyond the maximum is not counted, so a charge never passes the reserve.
     assert book.owed_microusd(EXA, 10**9, 900_000) == 45_000
 

@@ -556,7 +556,7 @@ class ToolMarket:
                     return self._store.settle_call(**args) in ("settled", "exists")
                 except ArenaStoreError:  # any failure: a commit may hide behind it
                     pass
-            # Charged or not is unknown: usage shows it under this call_id.
+            # Charged or not is unknown: usage shows it under this call_id after 11 minutes.
             raise ToolMarketError(503, "store_unavailable", call_id=call_id)
 
         try:

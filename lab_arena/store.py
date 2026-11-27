@@ -508,6 +508,16 @@ STORE_TRANSPORT_ERRORS = frozenset({
 })
 
 
+# A refusal raised by our own SQL names itself: every RAISE EXCEPTION in
+# scripts/ uses a bare lowercase identifier (lab_arena_slot_policy_invalid,
+# lab_arena_reward_current_achievement_invalid, ...). PostgREST returns that
+# literal as `message`. Anything else that reaches `message` -- a built-in
+# Postgres sentence, a prompt, a key, a URL, a round or hotkey id -- carries a
+# space, a capital, a dash or a dot and is refused by this pattern, so the
+# field is simply absent rather than carrying free text.
+STORE_REFUSAL_RE = re.compile(r"[a-z][a-z0-9_]{2,63}")
+
+
 def safe_store_error_metadata(value: Any) -> Dict[str, Any]:
     """Project only a known store operation and bounded machine diagnostics."""
     if not isinstance(value, Mapping):
@@ -524,6 +534,9 @@ def safe_store_error_metadata(value: Any) -> Dict[str, Any]:
         result["code"] = code
     if isinstance(transport_error, str) and transport_error in STORE_TRANSPORT_ERRORS:
         result["transport_error"] = transport_error
+    refusal = value.get("refusal")
+    if isinstance(refusal, str) and STORE_REFUSAL_RE.fullmatch(refusal):
+        result["refusal"] = refusal
     return result
 
 
@@ -531,11 +544,12 @@ class ArenaStoreError(RuntimeError):
     """A durable-state operation failed. Messages never carry credentials."""
 
     def __init__(self, message: str, *, operation=None, resource=None,
-                 http_status=None, code=None, transport_error=None) -> None:
+                 http_status=None, code=None, transport_error=None,
+                 refusal=None) -> None:
         super().__init__(message)
         metadata = safe_store_error_metadata({
             "operation": operation, "resource": resource, "http_status": http_status,
-            "code": code, "transport_error": transport_error,
+            "code": code, "transport_error": transport_error, "refusal": refusal,
         })
         if metadata:
             self.store_error = metadata
@@ -685,10 +699,12 @@ class PostgrestTransport(StoreTransport):
             return
         detail = ""
         code = None
+        refusal = None
         try:
             body = response.json()
             if isinstance(body, dict):
                 code = body.get("code")
+                refusal = body.get("message")
                 detail = " code=%s message=%s" % (body.get("code"), str(body.get("message") or "")[:200])
         except ValueError:
             detail = ""
@@ -697,11 +713,12 @@ class PostgrestTransport(StoreTransport):
                 "%s failed: HTTP %d%s" % (context, response.status_code, detail),
                 transaction_rolled_back=True,
                 operation=operation, resource=resource,
-                http_status=response.status_code, code=code,
+                http_status=response.status_code, code=code, refusal=refusal,
             )
         raise ArenaStoreError("%s failed: HTTP %d%s" % (context, response.status_code, detail),
                               operation=operation, resource=resource,
-                              http_status=response.status_code, code=code)
+                              http_status=response.status_code, code=code,
+                              refusal=refusal)
 
     def rpc(self, function: str, params: Mapping[str, Any]) -> Any:
         if function not in FUNCTION_SIGNATURES:

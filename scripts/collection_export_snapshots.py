@@ -67,7 +67,7 @@ def _reason(exc):
 
 def _pack(raw, prompt, source, objects, directory, scenario, members, previous):
     """A missing or unsafe attempt must not hide its independently verified siblings."""
-    ready = {rid for rid, row in members.items() if row["state"] == "settled"}
+    ready = {rid for rid, row in members.items() if row["state"] in {"settled", "partial_billing_pending"}}
     held = {}
     result = {"members": members, "held": held, "export_version": 2}
     if not ready:
@@ -225,6 +225,8 @@ def observe(private_root, directory, db, objects, previous=None, *, max_groups=3
                     if j["status"] not in TERMINAL
                     else ("billing_pending" if auth["unresolved"] else "settled")
                 )
+                if experiment and state == "billing_pending" and j["status"] == "failed":
+                    state = "partial_billing_pending"
                 by_case[j["scenario_id"]][rid] = {
                     "state": state,
                     "job_status": j["status"],
@@ -244,9 +246,11 @@ def observe(private_root, directory, db, objects, previous=None, *, max_groups=3
                 if same and exists:
                     groups[case] = prior_group
                 else:
-                    # An old archive may remain discoverable for an append-only change.
+                    # A change to a queued attempt cannot invalidate its published siblings.
+                    # Check all prior released or held members, including billing evidence.
                     before = prior_group.get("members", {})
-                    kept = exists and all(members.get(i) == row for i, row in before.items())
+                    published = set(prior_group.get("released", ())) | set(prior_group.get("held", {}))
+                    kept = exists and all(i in before and members.get(i) == before[i] for i in published)
                     groups[case] = {**(prior_group if kept else {}), "members": members, "queued": True}
                 old_partial = any(m["job_status"] == "failed" for m in members.values())
                 if groups[case].get("queued"):

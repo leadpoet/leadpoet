@@ -392,7 +392,7 @@ def create_app(service: ArenaService) -> FastAPI:
         return await no_store_public_call(service.public_collection_status)
 
     @app.get("/arena/v1/collection/terms")
-    async def collection_terms(task_scope: str = "synthetic_workflows", offer_id: Optional[str] = None) -> Any:
+    async def collection_terms(task_scope: Optional[str] = None, offer_id: Optional[str] = None) -> Any:
         args = (task_scope, offer_id) if offer_id is not None else (task_scope,)
         return await no_store_public_call(service.collection_terms, *args)
 

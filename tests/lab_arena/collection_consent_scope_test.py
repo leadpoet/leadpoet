@@ -89,6 +89,8 @@ def test_live_comparison_terms_publish_only_approved_synthetic_quotes(staged):
         schedule['staged'] = True
 
     def rpc(name, args):
+        if name == 'collection_pool_active_v1':
+            return False
         assert (name, args) == ('collection_reward_schedule_v1', {})
         return schedule
 

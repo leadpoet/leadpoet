@@ -2753,7 +2753,7 @@ class ArenaService:
 
     def public_collection_status(self) -> Dict[str, Any]:
         """Only aggregate paid work is public. Never forward private participation records."""
-        from lab_arena.collection_intake import PAID_OFFER_ID
+        from lab_arena.collection_intake import PAID_OFFER_ID, POOL_TERMS_HASH
 
         mode = self.collection_mode()
         if mode == "off":
@@ -2783,8 +2783,8 @@ class ArenaService:
             offer = self.collection_terms() if mode == "live" else {}
             epoch = self._config.chain.current_settlement_epoch()
             result = {
-                "paid_enrollment_open": bool(offer.get("fixed_quotes") and
-                                             PAID_OFFER_ID.fullmatch(offer.get("offer_id") or "")),
+                "paid_enrollment_open": offer.get("terms_sha256") == POOL_TERMS_HASH or bool(
+                    offer.get("fixed_quotes") and PAID_OFFER_ID.fullmatch(offer.get("offer_id") or "")),
                 "champion_rewards_off": self._collection_reward_active(int(epoch)),
                 "running_runs": running,
                 "verified_runs": verified,
@@ -2793,12 +2793,21 @@ class ArenaService:
             self._collection_status_cache = (time.monotonic() + 30, mode, result)
             return result
 
-    def collection_terms(self, task_scope: str = "synthetic_workflows", offer_id: Optional[str] = None) -> Dict[str, Any]:
+    def collection_terms(self, task_scope: Optional[str] = None, offer_id: Optional[str] = None) -> Dict[str, Any]:
         from lab_arena import collection_intake
         mode = self.collection_mode()
         if mode == "off":
             raise ServiceError("collection_inactive", 404)
         try:
+            if mode == "live" and offer_id is None and task_scope in (None, collection_intake.POOL_SCOPE):
+                activated = self._store._transport.rpc("collection_pool_active_v1", {})
+                if activated is True:
+                    return collection_intake.terms(mode, collection_intake.POOL_SCOPE)
+                if activated is not False:
+                    raise ArenaStoreUnavailable("collection pool readiness unavailable")
+                if task_scope == collection_intake.POOL_SCOPE:
+                    raise ServiceError("collection_inactive", 404)
+            task_scope = task_scope or collection_intake.TASK_SCOPE
             if offer_id is not None and (mode != "live" or task_scope != collection_intake.TASK_SCOPE):
                 raise ServiceError("collection_offer_unknown", 404)
             document = collection_intake.terms(mode, task_scope)

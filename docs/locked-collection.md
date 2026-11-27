@@ -6,26 +6,28 @@ Miners enroll an OpenRouter funding key for operator-run synthetic sales workflo
 
 1. Use your registered Finney SN71 hotkey and the [miner CLI](../README.md#install-and-register). If you already installed the miner runtime, update the checkout and run `python -m pip install --no-deps -e .` in its environment.
 2. Create a dedicated, funded [OpenRouter API key](https://openrouter.ai/settings/keys) and a [read-only management key](https://openrouter.ai/blog/announcements/scoped-management-keys/) in the same workspace. Disable prompt and output logging, sharing and external trace broadcast. Only the encrypted runtime key is stored. The management key verifies that you control it.
-3. Choose a rolling 24-hour cap. For example, to allow up to **$0.30**, run the command below with your wallet name. Add `--hotkey-name NAME` if your hotkey is not named `default`.
+3. Set the **total** amount of OpenRouter spending you authorize for the sales sandbox. The CLI shows the terms, prompts privately for the keys and asks you to sign with your miner hotkey.
 
-   ```bash
-   leadpoet collection-register --mode live --wallet-name miner --daily-cap-usd 0.30
-   ```
+```bash
+leadpoet collection-register --wallet-name miner --spend-limit-usd 5
+```
 
-   The CLI displays the reward and maximum spend for each assignment, the spending limit, and the terms. If you accept, enter both keys at the hidden prompts. Your hotkey signs the offer and funding limits. The worker picks up eligible enrollments automatically. The default is one new assignment per UTC day. To allow more, add `--max-slots-per-day N` (1–6). Save your registration ID.
+This example lets the sandbox spend up to $5 across experiments. Spending authority does not refill at midnight. Calls already sent and pending provider bills count against available funds. Normal funders have priority 1 by default. Reserve funders choose `--priority 0`. For a given assignment the worker tries eligible normal keys first, then reserves. Within each group it uses the largest available budget, then the earliest enrollment. A run must fit its authorized budget.
 
-**Rewards.** A paid sales workflow earns the fixed quote shown before enrollment when its result passes the native task checks and we verify its complete trace, original provider reasoning and settled charges. The quote is 1.25× the measured reference cost for that model and task. Validators convert it to weights. After those weights reveal, network consensus determines the miner’s actual alpha payment. Other validators’ votes, weight rounding, and the token price can change its dollar value. Actual spend can vary. Failed or partial calls may cost credits. The miner pays for the agent’s calls and Leadpoet covers verification. If total quotes exceed available emissions, every quote scales by the same proportion. An unpaid difference does not carry forward. `leadpoet collection-terms` shows the gateway's current offer. An empty price list means paid enrollment is unavailable.
+**Rewards.** A complete, verifiable run earns a dollar target of 1.25× its settled, authorized generator charges. Correct answers and mistakes both qualify. The worker checks the original provider receipts, task execution and trace. Interrupted runs and unverifiable or unauthorized charges earn no target. Leadpoet pays for private verification. If the epoch pool is insufficient, all targets scale proportionally. Network votes and token prices affect actual payouts.
 
-**Check or stop funding.** Use the same wallet and hotkey. Your statement lists jobs, charges, unresolved reservations and reward targets. Revoking stops new calls. Calls already dispatched may still be billed.
+**Check or withdraw funding.**
 
 ```bash
 leadpoet collection-statement --mode live --wallet-name miner
 leadpoet collection-revoke --mode live --wallet-name miner --registration-id REGISTRATION_ID
 ```
 
-**Returning pilot miners.** Pilot work stays unpaid. To reuse your pilot key, use the two commands above with `--mode pilot` to find and revoke the original registration. Then enroll in live mode. A paid signature never authorizes Deepline research. Correction experiments use a separate scope and appear only when their own offer is available.
+For unattended registration, read `leadpoet collection-terms` and pass the displayed `--accept-terms DIGEST` with your limit. The CLI reads `OPENROUTER_API_KEY` and `OPENROUTER_MANAGEMENT_KEY` from the process environment or prompts privately. A previous offer signature covers only its original work. To switch an existing active registration, revoke it and sign the new sandbox terms. Historical charges and finalized payments stay on the miner’s statement. The pool covers synthetic OpenRouter experiments; live web and Deepline have separate permission requirements.
 
-For unattended enrollment, read `collection-terms` and supply its exact `--accept-terms DIGEST` and `--accept-offer OFFER_ID` along with the cap. Use `OPENROUTER_API_KEY` and `OPENROUTER_MANAGEMENT_KEY` in the process environment. Submit keys only through the local CLI.
+## Historical offers and operator reference
+
+The following sections document earlier fixed-price cohorts, pilots and their evidence. Their manifests and original signatures remain necessary to reproduce historical work.
 
 ## Comparison and calibration packs
 

@@ -15,6 +15,7 @@ from lab_arena.collection_intake import (
     CORRECTION_SCOPE, MAX_DAILY_SLOTS, MAX_MICROUSD, MODELS, PAID_OFFER_ID, PAID_WORKFLOW_TERMS,
     PAID_WORKFLOW_TERMS_HASH, SCOPE, TASK_SCOPE, TERMS, TERMS_HASH, scope_id,
 )
+from lab_arena.collection_pool import POOL_SCOPE, POOL_TERMS, POOL_TERMS_HASH
 from lab_arena.credentials import OPENROUTER_FUNDING_FIELDS
 from lab_arena.miner_submit import (
     MinerSubmissionError,
@@ -29,6 +30,9 @@ from lab_arena.miner_submit import (
 
 # Only display local guidance. Intake failures may contain echoed credentials.
 _ERROR_GUIDANCE = {
+    "collection_pool_options_invalid": "Use --spend-limit-usd for a lifetime limit across sandbox experiments. This enrollment has no offer or daily slot limit.",
+    "collection_standing_consent_required": "Register with --spend-limit-usd to authorize the live sales sandbox.",
+    "collection_pool_inactive": "The live sales sandbox is not accepting standing keys.",
     "registration_conflict": "If this key is already enrolled in the pilot, check collection-statement --mode pilot and revoke it before enrolling for paid work.",
     "collection_prices_unavailable": "Paid enrollment needs a published fixed price. Check collection-terms.",
     "collection_comparison_prices_unavailable": "The gateway has no usable fixed-price offer. Check collection-terms.",
@@ -58,10 +62,10 @@ def add_commands(commands, common_options):
         parser = commands.add_parser("collection-" + action, help=help_text)
         common_options(parser)
         parser.add_argument(
-            "--mode", choices=("pilot", "live"), required=action != "terms"
+            "--mode", choices=("pilot", "live"), default="live" if action == "register" else None, required=action in ("statement", "revoke")
         )
         if action in ("terms", "register"):
-            parser.add_argument("--task-scope", choices=(TASK_SCOPE, CORRECTION_SCOPE), default=TASK_SCOPE)
+            parser.add_argument("--task-scope", choices=(TASK_SCOPE, CORRECTION_SCOPE, POOL_SCOPE))
         if action == "terms":
             parser.add_argument("--offer", help="Read prices for a specific published offer")
         if action == "register":
@@ -69,11 +73,10 @@ def add_commands(commands, common_options):
                 "--max-slots-per-day", type=int, choices=range(1, MAX_DAILY_SLOTS + 1),
                 help="maximum distinct funded assignments per UTC day (default 1)",
             )
-            parser.add_argument(
-                "--daily-cap-usd",
-                required=True,
-                help="Maximum rolling 24h spend on your OpenRouter key",
-            )
+            limits = parser.add_mutually_exclusive_group(required=True)
+            limits.add_argument("--spend-limit-usd", help="Total USD this enrollment may spend across sandbox experiments")
+            limits.add_argument("--daily-cap-usd", help="Rolling 24h cap for legacy or pilot enrollment")
+            parser.add_argument("--priority", type=int, choices=(0, 1), help="Standing key priority: 1 normal (default), 0 reserve")
             parser.add_argument(
                 "--accept-terms",
                 metavar="SHA256",
@@ -135,12 +138,22 @@ def run(args, wallet, *, session=requests):
     action = args.command.removeprefix("collection-")
     try:
         base = _api_base_url(args.api_base_url) + "/arena/v1/collection/"
-        task_scope = getattr(args, "task_scope", TASK_SCOPE)
+        requested_scope = getattr(args, "task_scope", None)
+        standing = getattr(args, "spend_limit_usd", None) is not None
+        priority = getattr(args, "priority", None)
+        task_scope = requested_scope or (POOL_SCOPE if standing else TASK_SCOPE)
+        if action == "register" and (
+            standing != (task_scope == POOL_SCOPE)
+            or (not standing and priority is not None)
+            or (standing and (args.mode != "live" or getattr(args, "accept_offer", None)
+                              or getattr(args, "max_slots_per_day", None) is not None))
+        ):
+            raise MinerSubmissionError("collection_pool_options_invalid")
         expected = TERMS_HASH
         text = TERMS
         offer_id = None
         if action in ("terms", "register"):
-            url = base + "terms" + ("?task_scope=" + CORRECTION_SCOPE if task_scope == CORRECTION_SCOPE else "")
+            url = base + "terms" + ("?task_scope=" + task_scope if task_scope in (CORRECTION_SCOPE, POOL_SCOPE) else "")
             selected = getattr(args, "offer", None) if action == "terms" else getattr(args, "accept_offer", None)
             if selected:
                 if task_scope != TASK_SCOPE or not PAID_OFFER_ID.fullmatch(selected):
@@ -155,7 +168,11 @@ def run(args, wallet, *, session=requests):
                     "max_selectable_slots_per_utc_day"
                 ) != MAX_DAILY_SLOTS:
                     raise MinerSubmissionError("collection_slot_opt_in_unavailable")
-                if args.mode == "live" and task_scope == TASK_SCOPE and "offer_id" in published:
+                if standing:
+                    expected, text = POOL_TERMS_HASH, POOL_TERMS
+                elif published.get("task_scope") == POOL_SCOPE:
+                    raise MinerSubmissionError("collection_standing_consent_required")
+                elif args.mode == "live" and task_scope == TASK_SCOPE and "offer_id" in published:
                     expected, text = PAID_WORKFLOW_TERMS_HASH, PAID_WORKFLOW_TERMS
                 if (published.get("mode") != args.mode or published.get("task_scope") != task_scope
                         or published.get("terms_sha256") != expected or published.get("terms") != text):
@@ -163,8 +180,8 @@ def run(args, wallet, *, session=requests):
         if action != "terms":
             creds, body = None, {}
             if action == "register":
-                cap = daily_cap(args.daily_cap_usd)
-                if args.mode == "live" and not published.get("fixed_quotes"):
+                cap = daily_cap(args.spend_limit_usd if standing else args.daily_cap_usd)
+                if args.mode == "live" and not standing and not published.get("fixed_quotes"):
                     raise MinerSubmissionError("collection_prices_unavailable")
                 if expected == PAID_WORKFLOW_TERMS_HASH:
                     offer_id = _review_paid_offer(published, args, cap)
@@ -177,6 +194,9 @@ def run(args, wallet, *, session=requests):
                     if not sys.stdin.isatty():
                         raise MinerSubmissionError("review_collection_terms_and_supply_published_accept_flags")
                     print(text, file=sys.stderr)
+                    if standing:
+                        print(f"Total spending limit: ${Decimal(cap).scaleb(-6):f}. "
+                              f"Priority: {1 if priority is None else priority}.", file=sys.stderr)
                     if input("Sign this enrollment and spending cap? Type yes to continue: ").strip().lower() != "yes":
                         raise MinerSubmissionError("collection_enrollment_cancelled")
                 creds = {}
@@ -197,11 +217,14 @@ def run(args, wallet, *, session=requests):
                         "openrouter_funding_credentials_required"
                     )
                 body = {
-                    "daily_cap_microusd": cap,
                     "terms_sha256": expected,
                     "task_scope": task_scope,
                     "credentials_sha256": contracts.document_hash(creds),
                 }
+                if standing:
+                    body.update(spend_limit_microusd=cap, priority=1 if priority is None else priority)
+                else:
+                    body["daily_cap_microusd"] = cap
                 if offer_id:
                     body["offer_id"] = offer_id
                 # Omitting the option preserves compatibility with older gateways and signatures.

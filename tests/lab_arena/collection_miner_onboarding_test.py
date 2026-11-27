@@ -132,7 +132,7 @@ def paid_schedule():
 def test_paid_registration_displays_offer_and_signs_only_after_consent(monkeypatch, capsys):
     from lab_arena.service import ArenaService
     service = SimpleNamespace(collection_mode=lambda: 'live', _store=SimpleNamespace(
-        _transport=SimpleNamespace(rpc=lambda *args: paid_schedule())))
+        _transport=SimpleNamespace(rpc=lambda name, _: False if name == "collection_pool_active_v1" else paid_schedule())))
     offer = ArenaService.collection_terms(service)
     assert offer['offer_id'] == OFFER_ID
     assert offer['fixed_quotes'] == [{'model': MODEL, 'task_class': 'P', 'quote_microusd': 2822, 'cap_microusd': 30000}]
@@ -225,7 +225,7 @@ def test_paid_allocator_uses_only_the_signed_p7_model_roster():
 def test_paid_registration_requires_unattended_offer_pin(monkeypatch):
     from lab_arena.service import ArenaService
     service = SimpleNamespace(collection_mode=lambda: 'live', _store=SimpleNamespace(
-        _transport=SimpleNamespace(rpc=lambda *args: paid_schedule())))
+        _transport=SimpleNamespace(rpc=lambda name, _: False if name == "collection_pool_active_v1" else paid_schedule())))
     offer = ArenaService.collection_terms(service)
     args = miner_cli.build_parser().parse_args(['collection-register', '--mode', 'live',
             '--daily-cap-usd', '0.30', '--accept-terms', offer['terms_sha256']])

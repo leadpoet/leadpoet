@@ -284,7 +284,7 @@ class ToolMarket:
         status = op.status(response.status, document)
         failure = book.key_failure(status)
         if failure is not None or book.rate_limited(status, response.headers):
-            settle("skipped", response.status)
+            settle("skipped", status)  # the real status, also when a 2xx body reported it
             if failure is not None:
                 self._store.record_key_event(key_id=ask.key_id, status="failed", reason=failure)
             return None

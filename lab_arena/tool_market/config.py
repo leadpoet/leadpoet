@@ -1,7 +1,7 @@
 """Tool-market configuration from the environment. Off unless set otherwise.
 
 When live, every catalog tool trades. ``LEADPOET_TOOL_MARKET_TOOLS_OFF``
-turns single tools off, e.g. ``exa,deepline``; a new catalog tool is on
+turns single tools off, e.g. ``exa,hunter``; a new catalog tool is on
 unless it is named there.
 """
 

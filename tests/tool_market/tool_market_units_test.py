@@ -9,28 +9,30 @@ import pytest
 
 from lab_arena.tool_market import book, catalog
 from lab_arena.tool_market.config import ToolMarketConfigError, load_config
-from lead_order_vault import vault
+from lead_order_vault import tools
 
 ALICE = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
-SCRAPE = catalog.operation("scrapecreators", "linkedin_profile")
-SERP = catalog.operation("dataforseo", "google_organic_serp")
+ZB = catalog.operation("zerobounce", "validate")
+PROSPEO = catalog.operation("prospeo", "enrich_person")
+HUNTER = catalog.operation("hunter", "email_finder")
+FINDYMAIL = catalog.operation("findymail", "find_from_name")
 EXA = catalog.operation("exa", "search")
 
 
 def test_a_one_cent_call_costs_the_buyer_one_point_one_cents():
-    owed = book.owed_microusd(SCRAPE, 1, 10_000)
+    owed = book.owed_microusd(ZB, 1, 10_000)
     assert owed == 10_000 and book.charge_microusd(owed) == 11_000
-    assert book.reserve_microusd(SCRAPE, 10_000) == 11_000
+    assert book.reserve_microusd(ZB, 10_000) == 11_000
 
 
 def test_a_vendor_usd_ask_is_a_share_of_the_reported_cost():
     # $0.002 reported, sold at 90% of the vendor's price: owed $0.0018, buyer $0.00198.
-    assert book.owed_microusd(SERP, 2_000, 900_000) == 1_800
+    assert book.owed_microusd(EXA, 2_000, 900_000) == 1_800
     assert book.charge_microusd(1_800) == 1_980
     # The reserve covers the operation's maximum: $0.05 x 90% x 1.1.
-    assert book.reserve_microusd(SERP, 900_000) == 49_500
+    assert book.reserve_microusd(EXA, 900_000) == 49_500
     # Usage beyond the maximum is not counted, so a charge never passes the reserve.
-    assert book.owed_microusd(SERP, 10**9, 900_000) == 45_000
+    assert book.owed_microusd(EXA, 10**9, 900_000) == 45_000
 
 
 def test_markup_rounds_up_and_never_charges_less_than_owed():
@@ -55,53 +57,71 @@ def test_key_failures_and_rate_limits():
 
 
 def test_get_operations_send_only_listed_params():
-    url, headers, body = catalog.operation("scrapecreators", "google_search").build(
-        {"query": "payroll software", "page": 2})
+    url, headers, body = ZB.build({"email": "ada@acme.com", "ip_address": "1.2.3.4"})
     parts = urlsplit(url)
-    assert parts.path == "/v1/google/search" and parse_qs(parts.query) == {"page": ["2"], "query": ["payroll software"]}
-    assert body == b"" and "authorization" not in headers
-    for params in ({}, {"url": "x", "extra": 1}, {"url": 5}, {"url": ""}, {"url": "x" * 301}, "x"):
+    assert parts.path == "/v2/validate" and parse_qs(parts.query) == {"email": ["ada@acme.com"], "ip_address": ["1.2.3.4"]}
+    assert body == b"" and headers == {"accept": "application/json"}  # the vault adds the key
+    for params in ({}, {"email": "x", "api_key": "k"}, {"email": 5}, {"email": ""}, {"email": "x" * 321}, "x"):
         with pytest.raises(catalog.CatalogError):
-            SCRAPE.build(params)
+            ZB.build(params)
     with pytest.raises(catalog.CatalogError):
-        catalog.operation("scrapecreators", "google_search").build({"query": "q", "page": 12})
+        HUNTER.build({"domain": "acme.com", "max_duration": 21})
 
 
-def test_dataforseo_gets_exactly_one_task():
-    _, headers, body = SERP.build({"keyword": "payroll", "location_code": 2840})
-    assert json.loads(body) == [{"keyword": "payroll", "location_code": 2840}]
+def test_prospeo_gets_its_person_inside_data():
+    _, headers, body = PROSPEO.build({"full_name": "Ada Lovelace", "company_website": "acme.com",
+                                      "only_verified_email": True})
+    assert json.loads(body) == {"data": {"full_name": "Ada Lovelace", "company_website": "acme.com"},
+                                "only_verified_email": True}
     assert headers["content-type"] == "application/json"
+    assert json.loads(PROSPEO.build({"linkedin_url": "https://www.linkedin.com/in/ada"})[2]) \
+        == {"data": {"linkedin_url": "https://www.linkedin.com/in/ada"}}
 
 
-def test_a_2xx_body_error_is_read_as_its_real_status():
-    assert SERP.status(200, {"status_code": 40200}) == 402 and SERP.status(200, {"status_code": 20000}) == 200
-    assert SERP.status(500, {"status_code": 40200}) == 500
-    deepline = catalog.operation("deepline", "zerobounce_validate")
-    assert deepline.status(200, {"billing": {"kind": "insufficient_credits"}}) == 402
-    assert deepline.units(200, {"billing": {"credits_charged": 0.28}}) == 28_000
-    assert deepline.units(200, {"result": {}}) is None
-    _, headers, _ = deepline.build({"email": "ada@acme.com"})
-    assert headers["x-deepline-execute-response-intent"] == "raw"
+# Answers as the vendors document them.
+ZB_VALID = {"address": "ada@acme.com", "status": "valid", "sub_status": "", "free_email": False}
+ZB_DEAD_KEY = {"error": "Invalid API Key or your account ran out of credits"}
+PROSPEO_MATCH = {"error": False, "free_enrichment": False, "person": {"email": {"email": "ada@acme.com"}}}
 
 
-def test_units_come_from_the_vendor_answer():
-    assert SCRAPE.units(200, None) == 1
-    assert SCRAPE.units(404, None) == 0 and SCRAPE.units(500, None) is None
-    assert SERP.units(200, {"cost": 0.0021}) == 2_100
-    assert SERP.units(200, {"cost": "0.0000001"}) == 1  # rounded up to a micro-USD
+def test_each_vendor_status_is_read_as_what_it_means():
+    # ZeroBounce answers 200 for a dead key or an empty account.
+    assert ZB.status(200, ZB_DEAD_KEY) == 402 and ZB.status(200, ZB_VALID) == 200
+    assert PROSPEO.status(400, {"error": True, "error_code": "INSUFFICIENT_CREDITS"}) == 402
+    assert PROSPEO.status(400, {"error": True, "error_code": "INVALID_API_KEY"}) == 401
+    assert PROSPEO.status(400, {"error": True, "error_code": "NO_MATCH"}) == 400
+    # Hunter's 403 is a rate limit and its 429 an empty account.
+    assert HUNTER.status(403, {}) == 429 and HUNTER.status(429, {}) == 402 and HUNTER.status(451, {}) == 451
+    assert FINDYMAIL.status(423, {}) == 402 and FINDYMAIL.status(402, {}) == 402
+
+
+def test_units_count_only_what_the_vendor_charges():
+    assert ZB.units(200, ZB_VALID) == 1 and ZB.units(200, dict(ZB_VALID, status="catch-all")) == 1
+    assert ZB.units(200, dict(ZB_VALID, status="unknown")) == 0  # ZeroBounce does not charge unknowns
+    assert ZB.units(200, {}) is None and ZB.units(500, None) is None and ZB.units(400, None) == 0
+    assert PROSPEO.units(200, PROSPEO_MATCH) == 1
+    assert PROSPEO.units(200, dict(PROSPEO_MATCH, free_enrichment=True)) == 0
+    assert PROSPEO.units(400, {"error": True, "error_code": "NO_MATCH"}) == 0
+    assert HUNTER.units(200, {"data": {"email": "ada@acme.com", "score": 97}}) == 1
+    assert HUNTER.units(200, {"data": {"email": None}}) == 0
+    assert FINDYMAIL.units(200, {"contact": {"name": "Ada", "email": "ada@acme.com"}}) == 1
+    assert FINDYMAIL.units(200, {"contact": None}) == 0
     assert EXA.units(200, {"costDollars": {"total": 0.005}}) == 5_000
+    assert EXA.units(200, {"costDollars": {"total": "0.0000001"}}) == 1  # rounded up to a micro-USD
     assert EXA.units(200, {"costDollars": {"total": 1000}}) == EXA.max_units
-    for answer in (None, {}, {"cost": None}, {"cost": -1}, {"cost": "NaN"}, {"cost": True}, [1]):
-        assert SERP.units(200, answer) is None  # unknown usage: nobody pays
+    for answer in (None, {}, {"costDollars": None}, {"costDollars": {"total": -1}}, {"costDollars": {"total": "NaN"}},
+                   {"costDollars": {"total": True}}, [1]):
+        assert EXA.units(200, answer) is None  # unknown usage: nobody pays
 
 
 def test_every_operation_fits_its_vault_route():
     for op in catalog.OPERATIONS.values():
         url, headers, body = op.build({name: _sample(p) for name, p in op.params.items() if p.required})
         parts = urlsplit(url)
-        assert vault.HOSTS[parts.hostname] == op.tool
-        assert vault.TOOLS[op.tool].route(op.method, parts.path, parts.query), (op.tool, op.name)
-    assert set(catalog.TOOLS) <= set(vault.TOOLS)
+        assert tools.HOSTS[parts.hostname] == op.tool
+        assert tools.TOOLS[op.tool].route(op.method, parts.path, parts.query), (op.tool, op.name)
+        assert not tools.TOOLS[op.tool].caller_sets_key(parts.query)
+    assert set(catalog.TOOLS) <= set(tools.TOOLS)
 
 
 def _sample(param):
@@ -117,10 +137,10 @@ def test_config_is_off_by_default_and_strict_when_live():
     config = load_config(live)
     # Live means every catalog tool trades; one switch turns single tools off.
     assert config.enabled and config.tools == set(catalog.TOOLS) and config.public_host == "gw.example"
-    assert "deepline" in config.tools
-    assert load_config(dict(live, LEADPOET_TOOL_MARKET_TOOLS_OFF="exa, deepline")).tools \
-        == set(catalog.TOOLS) - {"exa", "deepline"}
-    for bad in ({"LEADPOET_TOOL_MARKET_TOOLS_OFF": "openrouter"},
+    assert "zerobounce" in config.tools
+    assert load_config(dict(live, LEADPOET_TOOL_MARKET_TOOLS_OFF="exa, hunter")).tools \
+        == set(catalog.TOOLS) - {"exa", "hunter"}
+    for bad in ({"LEADPOET_TOOL_MARKET_TOOLS_OFF": "deepline"},
                 {"LEADPOET_LEAD_ORDERS_GAMMA_SERVICE": ALICE}, {"LEADPOET_TOOL_MARKET_TERMS_SHA256": "x"},
                 {"LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL": "http://gw.example"},
                 {"LEADPOET_TOOL_MARKET_GAMMA_SERVICE": "71"}, {"LEADPOET_TOOL_MARKET_BUYER_HOTKEYS": "nope"},

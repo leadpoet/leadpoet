@@ -31,10 +31,11 @@ MIGRATIONS = ("179-lab-arena-v1.sql", "770-tool-market.sql")
 B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 USD = 1_000_000
 VAULT_KEY = vault_envelope.compressed(ec.generate_private_key(ec.SECP256K1()).public_key()).hex()
-PROFILE = {"tool": "scrapecreators", "operation": "linkedin_profile",
+PROFILE = {"tool": "harvestapi", "operation": "linkedin_profile",
            "params": {"url": "https://www.linkedin.com/in/someone"}}
-SERP = {"tool": "dataforseo", "operation": "google_organic_serp", "params": {"keyword": "payroll"}}
-VALIDATE = {"tool": "deepline", "operation": "zerobounce_validate", "params": {"email": "ada@acme.com"}}
+SEARCH = {"tool": "exa", "operation": "search", "params": {"query": "payroll"}}
+VALIDATE = {"tool": "zerobounce", "operation": "validate", "params": {"email": "ada@acme.com"}}
+FIND = {"tool": "hunter", "operation": "email_finder", "params": {"domain": "acme.com", "full_name": "Ada Lovelace"}}
 
 
 def hotkey() -> str:
@@ -118,7 +119,7 @@ class FakeGamma:
 class World:
     def __init__(self, store):
         self.terms = uuid.uuid4().hex + uuid.uuid4().hex
-        self.config = ToolMarketConfig(mode="live", tools=frozenset({"scrapecreators", "dataforseo", "exa", "deepline"}),
+        self.config = ToolMarketConfig(mode="live", tools=frozenset({"harvestapi", "exa", "zerobounce", "hunter"}),
                                        gamma_service=hotkey(), terms_version="v1", terms_sha256=self.terms,
                                        public_base_url="https://gw.example")
         self.vault = FakeVault()
@@ -135,7 +136,7 @@ class World:
     def accept(self, hk, role):
         self.market.accept_terms(self.who(hk), {"role": role, "terms_version": "v1", "terms_sha256": self.terms})
 
-    def miner_key(self, secret, ask, *, tool="scrapecreators", cap=10 * USD, miner=None):
+    def miner_key(self, secret, ask, *, tool="harvestapi", cap=10 * USD, miner=None):
         miner = miner or hotkey()
         self.accept(miner, "miner")
         listed = self.register(miner, {"tool": tool, "envelope": self.vault.seal(tool, miner, secret),
@@ -165,14 +166,14 @@ def test_a_call_goes_to_the_cheapest_key_and_pays_its_ask_plus_ten_percent(world
     dear, _ = world.miner_key("dear-key", 12_000)
     cheap, cheap_key = world.miner_key("cheap-key", 10_000)
     buyer, token = world.buyer(usd=1, budget=100_000)
-    assert world.market.order_book("scrapecreators")["asks"] == [
+    assert world.market.order_book("harvestapi")["asks"] == [
         {"ask_microusd": 10_000, "buyer_pays_microusd": 11_000},
         {"ask_microusd": 12_000, "buyer_pays_microusd": 13_200}]
     result = world.market.call(token, PROFILE)
     assert result["status"] == 200 and result["charge_microusd"] == 11_000 and result["body"] == {"ok": True}
     secret, method, url, _ = world.vendor.sent[0]
     assert secret == "cheap-key" and method == "GET"
-    assert url == "https://api.scrapecreators.com/v1/linkedin/profile?url=https%3A%2F%2Fwww.linkedin.com%2Fin%2Fsomeone"
+    assert url == "https://api.harvestapi.io/linkedin/profile?url=https%3A%2F%2Fwww.linkedin.com%2Fin%2Fsomeone"
     assert world.market.tab(token)["committed_microusd"] == 11_000
     earned = world.market.statement(cheap)["keys"][0]
     assert earned["key_id"] == cheap_key and earned["owed_microusd"] == 10_000 and earned["calls"] == 1
@@ -194,29 +195,30 @@ def test_a_key_that_ran_out_fails_over_and_leaves_the_book_until_checked(world):
     result = world.market.call(token, PROFILE)
     assert [s[0] for s in world.vendor.sent] == ["empty-key", "full-key"] and result["charge_microusd"] == 11_000
     assert world.market.tab(token)["committed_microusd"] == 11_000  # the failed try costs nothing
-    assert [a["ask_microusd"] for a in world.market.order_book("scrapecreators")["asks"]] == [10_000]
+    assert [a["ask_microusd"] for a in world.market.order_book("harvestapi")["asks"]] == [10_000]
     health = world.market.statement(miner)["keys"][0]["health"]
     assert health["status"] == "failed" and health["reason"] == "no_credit"
     # Topped up: the miner asks for a check and the key trades again.
     assert world.market.check_key(world.who(miner), empty_key) == {"key_id": empty_key, "tradeable": True}
-    assert [a["ask_microusd"] for a in world.market.order_book("scrapecreators")["asks"]] == [9_000, 10_000]
+    assert [a["ask_microusd"] for a in world.market.order_book("harvestapi")["asks"]] == [9_000, 10_000]
 
 
 def test_unknown_usage_charges_the_buyer_nothing_and_the_miner_bears_it(world):
-    miner, _ = world.miner_key("seo-key", 900_000, tool="dataforseo")
+    miner, _ = world.miner_key("exa-key", 900_000, tool="exa")
     _, token = world.buyer()
-    world.vendor.script["seo-key"] = [ok({"cost": 0.002}), ok({"tasks": []}), ok({"cost": 1}, status=500),
+    world.vendor.script["exa-key"] = [ok({"costDollars": {"total": 0.002}}), ok({"results": []}),
+                                      ok({"costDollars": {"total": 1}}, status=500),
                                       VaultTransportError("provider_unreachable", forwarded=None)]
-    assert world.market.call(token, SERP)["charge_microusd"] == 1_980  # $0.002 x 90% x 1.1
-    assert world.market.call(token, SERP)["charge_microusd"] == 0  # 2xx without a cost
-    assert world.market.call(token, SERP)["charge_microusd"] == 0  # vendor error
+    assert world.market.call(token, SEARCH)["charge_microusd"] == 1_980  # $0.002 x 90% x 1.1
+    assert world.market.call(token, SEARCH)["charge_microusd"] == 0  # 2xx without a cost
+    assert world.market.call(token, SEARCH)["charge_microusd"] == 0  # vendor error
     with pytest.raises(ToolMarketError) as unreachable:
-        world.market.call(token, SERP)
+        world.market.call(token, SEARCH)
     assert unreachable.value.status == 502 and len(world.vendor.sent) == 4  # never retried on another key
     assert world.market.tab(token)["committed_microusd"] == 1_980
     key = world.market.statement(miner)["keys"][0]
     assert key["owed_microusd"] == 1_800 and key["uncertain_calls"] == 3
-    assert json.loads(world.vendor.sent[0][3]) == [{"keyword": "payroll"}]
+    assert json.loads(world.vendor.sent[0][3]) == {"query": "payroll"}
 
 
 def test_a_request_the_vault_never_sent_moves_to_the_next_key(world):
@@ -264,14 +266,14 @@ def test_listing_rules(world):
     world.accept(other, "miner")
     # The same vendor key, sealed again by anyone, is refused while listed.
     with pytest.raises(ToolMarketError) as twice:
-        world.register(other, {"tool": "scrapecreators", "daily_cap_microusd": USD,
-                               "envelope": world.vault.seal("scrapecreators", other, "listed-key")})
+        world.register(other, {"tool": "harvestapi", "daily_cap_microusd": USD,
+                               "envelope": world.vault.seal("harvestapi", other, "listed-key")})
     assert twice.value.code == "key_already_listed"
     # An envelope sealed for another miner or tool is refused before the vault is asked.
     checks = world.vault.checks
-    for envelope in (world.vault.seal("scrapecreators", miner, "k2"), world.vault.seal("exa", other, "k3")):
+    for envelope in (world.vault.seal("harvestapi", miner, "k2"), world.vault.seal("exa", other, "k3")):
         with pytest.raises(ToolMarketError):
-            world.register(other, {"tool": "scrapecreators", "envelope": envelope, "daily_cap_microusd": USD})
+            world.register(other, {"tool": "harvestapi", "envelope": envelope, "daily_cap_microusd": USD})
     assert world.vault.checks == checks
     # Only the owner may price, check or revoke a key.
     for act in (lambda: world.market.post_ask(world.who(other), {"key_id": key_id, "ask_microusd": 1}),
@@ -279,13 +281,13 @@ def test_listing_rules(world):
         with pytest.raises(ToolMarketError):
             act()
     world.market.post_ask(world.who(miner), {"key_id": key_id, "ask_microusd": None})
-    assert world.market.order_book("scrapecreators")["asks"] == []
+    assert world.market.order_book("harvestapi")["asks"] == []
     world.market.post_ask(world.who(miner), {"key_id": key_id, "ask_microusd": 10_000})
     world.market.revoke_key(world.who(miner), key_id)
-    assert world.market.order_book("scrapecreators")["asks"] == []
+    assert world.market.order_book("harvestapi")["asks"] == []
     # Revoked, the key may be listed again.
     world.miner_key("listed-key", 10_000, miner=other)
-    assert len(world.market.order_book("scrapecreators")["asks"]) == 1
+    assert len(world.market.order_book("harvestapi")["asks"]) == 1
 
 
 def test_a_key_stops_trading_at_its_daily_cap(world):
@@ -303,7 +305,7 @@ def test_a_stale_check_is_repeated_before_the_key_is_used(world, monkeypatch):
     world.miner_key("stale-key", 9_000)
     world.miner_key("fresh-key", 10_000)
     _, token = world.buyer()
-    world.vault.answers["stale-key"] = {"status": "invalid", "reason": "scrapecreators_api_key_no_credit"}
+    world.vault.answers["stale-key"] = {"status": "invalid", "reason": "harvestapi_api_key_no_credit"}
     assert world.market.call(token, PROFILE)["charge_microusd"] == 11_000
     assert [s[0] for s in world.vendor.sent] == ["fresh-key"]
 
@@ -314,16 +316,16 @@ def test_a_settlement_cannot_charge_more_than_its_reserve_or_settle_twice(world)
     call_id = world.market.call(token, PROFILE)["call_id"]
     assert world.store.settle_call(call_id=call_id, status="settled", http_status=200, units=1, owed_microusd=1,
                                    charge_microusd=1, epoch=7) == "exists"
-    reserve = world.store.book(tool="scrapecreators", terms_sha256=world.terms, check_max_age_seconds=3600)[0]
+    reserve = world.store.book(tool="harvestapi", terms_sha256=world.terms, check_max_age_seconds=3600)[0]
     other = str(uuid.uuid4())
-    assert world.store.reserve_call(call_id=other, token_hash=market_module.token_hash(token), tool="scrapecreators",
+    assert world.store.reserve_call(call_id=other, token_hash=market_module.token_hash(token), tool="harvestapi",
                                     operation="linkedin_profile", key_id=reserve["key_id"], ask_microusd=10_000,
                                     reserve_microusd=11_000, owed_cap_microusd=10_000) == "reserved"
     with pytest.raises(ArenaStoreError):
         world.store.settle_call(call_id=other, status="settled", http_status=200, units=1, owed_microusd=10_000,
                                 charge_microusd=11_001, epoch=7)
     assert world.store.reserve_call(call_id=str(uuid.uuid4()), token_hash=market_module.token_hash(token),
-                                    tool="scrapecreators", operation="linkedin_profile", key_id=reserve["key_id"],
+                                    tool="harvestapi", operation="linkedin_profile", key_id=reserve["key_id"],
                                     ask_microusd=9_999, reserve_microusd=11_000, owed_cap_microusd=10_000) \
         == "ask_changed"
 
@@ -331,7 +333,7 @@ def test_a_settlement_cannot_charge_more_than_its_reserve_or_settle_twice(world)
 def test_a_key_is_listed_only_with_its_miners_signed_attestation(world, database):
     miner = hotkey()
     world.accept(miner, "miner")
-    body = {"tool": "scrapecreators", "envelope": world.vault.seal("scrapecreators", miner, "attested-key"),
+    body = {"tool": "harvestapi", "envelope": world.vault.seal("harvestapi", miner, "attested-key"),
             "daily_cap_microusd": USD}
     for attestation in (None, "yes", ATTESTATION + " "):
         with pytest.raises(ToolMarketError) as refused:
@@ -352,30 +354,39 @@ def test_a_key_is_listed_only_with_its_miners_signed_attestation(world, database
     assert (signature, host, signed_at) == ("ab" * 64, "gw.example", 1)
 
 
-def test_deepline_bills_its_reported_credits_and_a_body_error_fails_the_key_over(world):
-    miner, _ = world.miner_key("deepline-dry", 900_000, tool="deepline")
-    world.miner_key("deepline-full", 1_000_000, tool="deepline")
-    _, token = world.buyer(budget=500_000)  # one call reserves $0.20 x 1.1
-    world.vendor.script["deepline-dry"] = [ok({"billing": {"kind": "insufficient_credits"}})]
-    world.vendor.script["deepline-full"] = [ok({"result": {"status": "valid"}, "billing": {"credits_charged": 0.28}})]
-    result = world.market.call(token, VALIDATE)
-    # 0.28 credits x $0.10 at 100% of Deepline's price, plus 10%.
-    assert result["charge_microusd"] == 30_800 and [s[0] for s in world.vendor.sent] == ["deepline-dry", "deepline-full"]
-    assert world.market.statement(miner)["keys"][0]["health"]["reason"] == "no_credit"
-    _, method, url, body = world.vendor.sent[1]
-    assert url == "https://code.deepline.com/api/v2/integrations/zerobounce_validate/execute"
-    assert json.loads(body) == {"provider": "zerobounce", "operation": "zerobounce_validate",
-                                "payload": {"email": "ada@acme.com"}}
-
-
-def test_a_dataforseo_out_of_funds_answer_inside_a_200_fails_the_key(world):
-    miner, _ = world.miner_key("seo-dry", 900_000, tool="dataforseo")
+def test_zerobounce_charges_a_check_but_not_an_unknown_and_a_dead_key_fails_over(world):
+    miner, _ = world.miner_key("zb-dead", 4_000, tool="zerobounce")
+    world.miner_key("zb-live", 5_000, tool="zerobounce")
     _, token = world.buyer()
-    world.vendor.script["seo-dry"] = [ok({"status_code": 40200, "status_message": "Payment Required.", "cost": 0})]
-    with pytest.raises(ToolMarketError) as empty:
-        world.market.call(token, SERP)
-    assert empty.value.code == "no_supply"
-    assert world.market.statement(miner)["keys"][0]["health"]["status"] == "failed"
+    # A dead key and an empty account both answer 200 with only an error.
+    world.vendor.script["zb-dead"] = [ok({"error": "Invalid API Key or your account ran out of credits"})]
+    world.vendor.script["zb-live"] = [ok({"address": "ada@acme.com", "status": "valid", "sub_status": ""}),
+                                      ok({"address": "ada@acme.com", "status": "unknown", "sub_status": "timeout_exceeded"})]
+    assert world.market.call(token, VALIDATE)["charge_microusd"] == 5_500
+    assert [s[0] for s in world.vendor.sent] == ["zb-dead", "zb-live"]
+    assert world.market.statement(miner)["keys"][0]["health"]["reason"] == "no_credit"
+    assert world.market.call(token, VALIDATE)["charge_microusd"] == 0  # ZeroBounce does not charge unknowns
+    _, method, url, _ = world.vendor.sent[1]
+    # The vault, not the market, puts the key in the query.
+    assert method == "GET" and url == "https://api.zerobounce.net/v2/validate?email=ada%40acme.com"
+
+
+def test_hunter_rate_limits_skip_a_key_and_an_empty_account_fails_it(world):
+    slow, _ = world.miner_key("hunter-slow", 8_000, tool="hunter")
+    empty, _ = world.miner_key("hunter-empty", 9_000, tool="hunter")
+    world.miner_key("hunter-ok", 10_000, tool="hunter")
+    _, token = world.buyer()
+    world.vendor.script["hunter-slow"] = [ok({"errors": [{"id": "too_many_requests"}]}, status=403)]
+    world.vendor.script["hunter-empty"] = [ok({"errors": [{"id": "too_many_requests"}]}, status=429)]
+    world.vendor.script["hunter-ok"] = [ok({"data": {"email": "ada@acme.com", "score": 97}}),
+                                        ok({"data": {"email": None, "score": None}})]
+    assert world.market.call(token, FIND)["charge_microusd"] == 11_000
+    assert [s[0] for s in world.vendor.sent] == ["hunter-slow", "hunter-empty", "hunter-ok"]
+    # Hunter's 403 is a rate limit: skipped for this call only.
+    assert world.market.statement(slow)["keys"][0]["health"]["status"] != "failed"
+    assert world.market.statement(empty)["keys"][0]["health"]["reason"] == "no_credit"
+    world.vendor.script["hunter-slow"] = [ok({"data": {"email": None}})]
+    assert world.market.call(token, FIND)["charge_microusd"] == 0  # no email found: free
 
 
 def test_the_epoch_is_read_before_any_vendor_request(world):

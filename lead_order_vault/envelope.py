@@ -31,13 +31,11 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from .tools import HOSTS, TOOLS
+
 PREFIX = "lov1."
-# Lead orders use OpenRouter and Deepline. The tool market
-# (docs/gamma-tool-market.md) adds the GTM tools after them.
-PROVIDERS = ("openrouter", "deepline", "scrapecreators", "dataforseo", "exa", "harvestapi")
-HOSTS = {"openrouter.ai": "openrouter", "code.deepline.com": "deepline",
-         "api.scrapecreators.com": "scrapecreators", "api.dataforseo.com": "dataforseo",
-         "api.exa.ai": "exa", "api.harvestapi.io": "harvestapi"}
+# One entry per tool in tools.py; lead orders use OpenRouter and Deepline.
+PROVIDERS = tuple(TOOLS)
 ENCRYPTION_DOMAIN = "leadpoet/lead-order-vault/encryption/v1"
 RECEIPTS_DOMAIN = "leadpoet/lead-order-vault/receipts/v1"
 KEY_ALGORITHM = "secp256k1"

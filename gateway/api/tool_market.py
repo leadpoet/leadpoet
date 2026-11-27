@@ -65,9 +65,17 @@ class _Refusal(Exception):
         self.code = code
 
 
+def _unique(pairs):
+    document = dict(pairs)
+    if len(document) != len(pairs):
+        raise ValueError("duplicate member")
+    return document
+
+
 def _json(body: bytes) -> Any:
     try:
-        document = json.loads(body.decode("utf-8")) if body else {}
+        # A repeated member is refused: stored bodies must read one way only.
+        document = json.loads(body.decode("utf-8"), object_pairs_hook=_unique) if body else {}
     except (UnicodeDecodeError, ValueError, RecursionError):
         raise _Refusal(400, "invalid_json") from None
     if not isinstance(document, dict):

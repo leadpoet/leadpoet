@@ -28,7 +28,7 @@ Each update is a new build plus one public approval on Base.
   `lead_order_vault/deployment.json`, then read Base themselves: the KMS
   contract must hold that root key and list the app, and the app must have
   approved the build the vault reports.
-- The code is `lead_order_vault/envelope.py` and `vault.py`, about 900 lines,
+- The code is `lead_order_vault/envelope.py`, `tools.py` and `vault.py`, about 900 lines,
   with `cryptography` as the only dependency.
 
 ## Rules in the vault

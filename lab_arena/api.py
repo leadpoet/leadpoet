@@ -381,6 +381,12 @@ def create_app(service: ArenaService) -> FastAPI:
 
     # -- miner --------------------------------------------------------------
 
+    @app.get("/arena/v1/collection/miners")
+    async def collection_miners(after: Optional[str] = Query(None, min_length=46, max_length=48,
+                                                            pattern=r"^[1-9A-HJ-NP-Za-km-z]+$")) -> JSONResponse:
+        return await no_store_public_call(service.public_collection_miners, after,
+                                          _worker_limiter=_public_object_read_limiter())
+
     @app.get("/arena/v1/collection/status")
     async def collection_status() -> JSONResponse:
         return await no_store_public_call(service.public_collection_status)

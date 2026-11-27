@@ -255,6 +255,7 @@ def stack(tmp_path_factory):
                     "754-funding-aware-collection-pricing.sql",
                     "755-verified-p7-collection-prices.sql",
                     "756-versioned-collection-offers.sql",
+                    "757-public-miner-contributions.sql",
                 ):
                     cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / migration).read_text())
             # Install additive current readers before PostgREST takes its

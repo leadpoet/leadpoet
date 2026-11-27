@@ -381,6 +381,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "collection_reward_start_v1": (),
     "collection_reward_schedule_v1": (),
     "collection_batch_jobs_v1": (("p_batch", "text"),),
+    "collection_public_miners_v1": (("p_after", "text"),),
     "collection_offer_schedule_v1": (("p_offer", "text"),),
     "collection_offer_samples_v1": (("p_source", "text"), ("p_through_slot", "bigint")),
     "collection_pilot_costs_v1": (("p_batch", "text"),),

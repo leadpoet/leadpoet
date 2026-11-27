@@ -49,6 +49,7 @@ def db():
         754,
         755,
         756,
+        757,
     ]
     yield from database_with_lab_arena_migration(
         (
@@ -247,6 +248,14 @@ def test_paid_offer_through_first_epoch(db):
         }
         assert rpc("collection_reward_quotes_v1", 102)["job_count"] == 0
         assert rpc("collection_reward_start_v1") == {"first_epoch": 101}
+        # Provider and verifier receipts must not multiply either the job count or the fee.
+        q.execute("SAVEPOINT contributor_check")
+        bill(live_job, live_key, 100, request="second-funded-call")
+        bill(live_job, None, 900, provider="judge", request="owner-judge")
+        [row] = rpc("collection_public_miners_v1", None)
+        assert row["hotkey"] == MINER and row["funded_runs"] == 1
+        assert row["last_funded_at"] and row["epochs"] == {"101": 8172}
+        q.execute("ROLLBACK TO contributor_check")
         conn.commit()
         exercise_successor_offers(
             db,
@@ -517,3 +526,31 @@ def exercise_successor_offers(
             (research,),
         )
     q.execute("ROLLBACK TO immutability")
+
+
+def test_public_miner_cursor_preserves_new_and_returning_miners(db):
+    pg, dsn = db
+    keys = ["5" + char * 47 for char in "123456789ABCDEFGHJKLMNPQRSTUVWXYZ"]
+    with pg.connect(**dsn) as conn, conn.cursor() as q:
+        def enroll(key, mode, date, revoked=False):
+            q.execute("""INSERT INTO public.collection_registrations
+                (registration_id,miner_hotkey,owner_coldkey,mode,consent,created_at,revoked_at)
+                VALUES (%s,%s,%s,%s,'{}',%s,CASE WHEN %s THEN now() END)""",
+                (str(uuid4()), key, key, mode, date, revoked))
+        for key in keys:
+            enroll(key, "live", "2026-01-02", revoked=True)
+        enroll(keys[0], "live", "2026-02-01")
+        enroll("5" + "a" * 47, "pilot", "2026-03-01")
+        q.execute("SET LOCAL ROLE lab_arena_service")
+        def page(after):
+            q.execute("SELECT public.collection_public_miners_v1(%s)", (after,))
+            return q.fetchone()[0]
+        first = page(None)
+        assert len(first) == 26
+        joined = first[:25] + page(first[24]["hotkey"])
+        assert [r["hotkey"] for r in joined] == sorted(keys, reverse=True)
+        assert all(r["funded_runs"] == 0 and r["last_funded_at"] is None and not r["epochs"] for r in joined)
+        assert joined[-1]["joined_at"].startswith("2026-01-02")
+        assert not page(keys[0])
+        q.execute("SELECT has_function_privilege('anon', 'public.collection_public_miners_v1(text)', 'execute')")
+        assert q.fetchone() == (False,)

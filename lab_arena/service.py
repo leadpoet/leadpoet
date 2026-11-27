@@ -2743,6 +2743,14 @@ class ArenaService:
         except collection_intake.IntakeError as exc:
             raise ServiceError(exc.code, exc.status) from None
 
+    def public_collection_miners(self, after: Optional[str] = None) -> Dict[str, Any]:
+        from lab_arena.collection_contributors import public_page
+
+        if self._config.mode != "live" or self._chain_scope() != ("finney", 71) or self._pinned_round_id():
+            raise ServiceError("collection_inactive", 404)
+        rows = self._store._transport.rpc("collection_public_miners_v1", {"p_after": after})
+        return public_page(rows, Path.home() / ".local/share/leadpoet/collection/watch")
+
     def public_collection_status(self) -> Dict[str, Any]:
         """Only aggregate paid work is public. Never forward private participation records."""
         from lab_arena.collection_intake import PAID_OFFER_ID

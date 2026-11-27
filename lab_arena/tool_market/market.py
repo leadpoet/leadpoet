@@ -439,14 +439,14 @@ class ToolMarket:
 
     def _signed_call(self, hotkey: str, tool: str, op: catalog.Operation, max_ask: int, private: bool,
                      url: str, headers: Mapping[str, str], payload: bytes) -> Dict[str, Any]:
-        """A call on a tab of its own, closed when the call ends, so it holds
-        at most what this call can cost and leaves its charge on the balance.
+        """A call on a tab of its own, closed when the call ends, that holds
+        what the keys it may try can cost, so concurrent calls share a small
+        balance and a call still fails over to a pricier key it can afford.
         Gamma spent since the last reading is credited only when the stored
         balance falls short, so most calls read no chain."""
 
         if not self._config.may_buy(hotkey):
             raise ToolMarketError(403, "buyer_not_allowed")
-        most = book.charge_microusd(book.owed_microusd(op, op.max_units, max_ask))
         tab = token_hash(self._new_token())
 
         def open_for(budget: int) -> Dict[str, Any]:
@@ -454,19 +454,17 @@ class ToolMarket:
                                         seconds=CALL_TAB_SECONDS, terms_sha256=None)
 
         with self._slot(hotkey, MAX_CALLS_IN_FLIGHT_PER_BUYER, "too_many_calls_in_flight"):
-            asks = None
-            opened = open_for(most)
+            asks = list(self._asks(tool, op, max_ask, private, hotkey))[:MAX_ASKS_PER_CALL]
+            if not asks:
+                raise ToolMarketError(503, "no_supply")
+            needs = [book.charge_microusd(owed_cap) for _, owed_cap in asks]
+            opened = open_for(max(needs))
             if opened["status"] == "insufficient_balance":
-                # Hold what the keys this call may try can need, no more, so
-                # concurrent calls share a small balance and a call still
-                # fails over to a pricier key it can afford.
-                asks = list(self._asks(tool, op, max_ask, private, hotkey))[:MAX_ASKS_PER_CALL]
-                if not asks:
-                    raise ToolMarketError(503, "no_supply")
-                needs = [book.charge_microusd(owed_cap) for _, owed_cap in asks]
                 have = int(opened["balance"].get("balance_microusd") or 0)
-                if min(needs) > have:  # only then credit Gamma spent since the last reading
+                try:  # credit Gamma spent since the last reading
                     have = int(self.balance(hotkey).get("balance_microusd") or 0)
+                except ToolMarketError:
+                    pass  # the chain is busy or down: the stored balance still counts
                 if min(needs) <= have:
                     opened = open_for(min(max(needs), have))
             if opened["status"] != "opened":

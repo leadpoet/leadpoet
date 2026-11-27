@@ -305,7 +305,7 @@ All tool-market data is in `scripts/770-tool-market.sql`.
 | `LEADPOET_TOOL_MARKET_BUYER_HOTKEYS` | optional allowlist of buyer hotkeys, for a staff rollout |
 | `LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS` | hotkeys of miners with a private-supply agreement; serve private calls |
 | `LEADPOET_TOOL_MARKET_GAMMA_SERVICE` | the tool market's Gamma service SS58 hotkey; must differ from lead orders' |
-| `LEADPOET_TOOL_MARKET_TERMS_VERSION`, `LEADPOET_TOOL_MARKET_TERMS_SHA256` | the terms both sides sign: `tool-market-terms-v1` and the SHA-256 of `docs/tool-market-terms.md`'s exact bytes (`PUBLISHED_TERMS` in `config.py`); live mode refuses any other pair |
+| `LEADPOET_TOOL_MARKET_TERMS_VERSION` | the terms both sides sign: `tool-market-terms-v1`, whose SHA-256 of `docs/tool-market-terms.md`'s exact bytes is in `PUBLISHED_TERMS` in `config.py`; live mode refuses any other version |
 | `LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL` | the https host every signed request names |
 
 It reuses the Arena store and chain settings, and the key vault
@@ -324,11 +324,9 @@ deployment, exactly as lead orders do.
   10-minute answer window after that block has passed (a settlement carries
   the epoch its call started in); and publish each epoch's settlements so
   validators can check them.
-- **The vendor's answer sets the usage.** Leadpoet counts a credit when the
-  answer shows one was spent: a ZeroBounce result other than `unknown`, a
-  Prospeo match that is not a free re-enrichment, an email from Findymail
-  or Hunter, a successful HarvestAPI profile or company result. Prospeo's rule is read from its docs, not
-  from a bill; check it against a miner's statement before scaling.
+- **The vendor's answer sets the usage.** Prospeo's free-match rule is
+  read from its docs, not a bill; check it against a miner's statement
+  before scaling.
 - **One hotkey per miner is assumed.** The own-key rule, the daily caps
   and the 30-day registration limit are per hotkey. A miner with several
   hotkeys can buy from themselves; with the 10% margin that loses money
@@ -339,7 +337,7 @@ deployment, exactly as lead orders do.
   vault's keys against the KMS on each connect, and only an approved build
   gets those keys. Removing an approval on Base does not stop a vault
   already running; its owner stops it.
-- **Exa's cost is an estimate.** Exa calls `costDollars` an estimate.
+- **Exa's cost is an estimate**, in Exa's own word for `costDollars`.
 - **Many buyers can still hold a key's cap or the call threads.** Four
   buyers causing unknown usage can keep a key out of its book for a day,
   and four buyers with slow calls can fill the call threads. Each needs its

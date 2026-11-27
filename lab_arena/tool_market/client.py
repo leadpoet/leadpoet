@@ -2,16 +2,9 @@
 
 The hotkey signs three things once: the terms, a balance read and an API
 key (a tab). Everything after that uses only the API key, which is capped
-by its budget and expires, so an agent never holds the hotkey.
-
-    python -m lab_arena.tool_market.client terms
-    python -m lab_arena.tool_market.client balance
-    python -m lab_arena.tool_market.client key --budget 20 --days 30
-    export SUBNET71_API_KEY=...
-    python -m lab_arena.tool_market.client tools
-    python -m lab_arena.tool_market.client call hunter email_finder domain=acme.com full_name="Ada Lee"
-    python -m lab_arena.tool_market.client call exa search query="crm vendors" numResults:=5
-    python -m lab_arena.tool_market.client mcp        # stdio MCP server for agents
+by its budget and expires, so an agent never holds the hotkey. Usage is
+in "For buyers" in docs/gamma-tool-market.md; ``mcp`` runs a stdio MCP
+server for agents.
 
 ``SUBNET71_URL`` (or ``--url``) is the gateway's public origin, with no path:
 https, or http only to this machine. ``name=value`` sends text and

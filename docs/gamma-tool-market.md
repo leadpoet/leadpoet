@@ -249,7 +249,7 @@ carries its charge.
 
 ## Money
 
-The database binds buyer credit to one Gamma service, genesis, subnet and subnet registration block. Repointing that ledger requires explicit reconciliation.
+The database binds buyer credit to one Gamma service, genesis, subnet and subnet registration block when the gateway starts. A restart can still correct a wrong binding until the first balance reading; after that, repointing the ledger requires explicit reconciliation.
 
 All amounts are integer micro-USD.
 
@@ -295,7 +295,7 @@ All tool-market data is in `scripts/770-tool-market.sql`.
 | Variable | Meaning |
 | --- | --- |
 | `LEADPOET_TOOL_MARKET_MODE` | `off` (default) or `live` |
-| `LEADPOET_TOOL_MARKET_APPROVED_SUPPLIERS` | comma-separated `tool:miner_hotkey` pairs reviewed for third-party resale. Empty by default. Remove the pair and reload gateway configuration to stop new routing; calls in flight can still settle. Private supply also requires separate privacy approval. |
+| `LEADPOET_TOOL_MARKET_APPROVED_SUPPLIERS` | comma-separated `tool:miner_hotkey` pairs reviewed for third-party resale. Empty by default. Remove the pair and restart every gateway process to stop new routing; calls in flight can still settle. Private supply also requires separate privacy approval. |
 | `LEADPOET_TOOL_MARKET_TOOLS_OFF` | comma-separated tools turned off; empty by default, so all trade |
 | `LEADPOET_TOOL_MARKET_BUYER_HOTKEYS` | optional allowlist of buyer hotkeys, for a staff rollout |
 | `LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS` | hotkeys of miners with a private-supply agreement; serve private calls |

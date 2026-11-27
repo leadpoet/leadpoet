@@ -1,7 +1,4 @@
 """Deployment identity is independent of the buyer and their cumulative spend."""
-from concurrent.futures import ThreadPoolExecutor
-import threading
-
 import pytest
 
 from lab_arena.store import ArenaStoreError, PsycopgTransport
@@ -15,26 +12,21 @@ def pg():
     yield from database_with_lab_arena_migration(MIGRATIONS)
 
 
-def test_only_one_concurrent_gamma_identity_can_own_the_ledger(pg):
+def test_one_gamma_identity_owns_the_ledger_once_credit_depends_on_it(pg):
     psycopg2, dsn = pg
-    store = ToolMarketStore(PsycopgTransport(lambda: psycopg2.connect(**dsn), role="lab_arena_service"))
-    identities = [dict(genesis="0x" + "10" * 32, netuid=71, service=hotkey(), registered_at=740) for _ in range(2)]
-    barrier = threading.Barrier(2)
 
-    def bind(scope):
-        barrier.wait(timeout=5)
-        try:
-            store.bind_gamma_source(**scope)
-            return scope
-        except ArenaStoreError:
-            return None
+    def connect():
+        return ToolMarketStore(PsycopgTransport(lambda: psycopg2.connect(**dsn), role="lab_arena_service"))
 
-    with ThreadPoolExecutor(2) as pool:
-        winners = [s for s in pool.map(bind, identities) if s is not None]
-    assert len(winners) == 1
-    winner = winners[0]
+    store, stale = connect(), connect()
+    mistyped, winner = (dict(genesis="0x" + "10" * 32, netuid=71, service=hotkey(), registered_at=740)
+                        for _ in range(2))
+    stale.bind_gamma_source(**mistyped)
+    store.bind_gamma_source(**winner)  # an empty ledger can be repointed
     store.bind_gamma_source(**winner)
     reading = dict(hotkey=hotkey(), block_number=900, block_hash="0x" + "ab" * 32, spent_units=10**9, available=True)
+    with pytest.raises(ArenaStoreError):  # a process still bound to the old source reads nothing
+        stale.record_gamma_reading(**reading)
     assert store.record_gamma_reading(**reading)["credit_microusd"] == 1_000_000
     for change in (dict(genesis="0x" + "11" * 32), dict(netuid=72), dict(service=hotkey()), dict(registered_at=800)):
         with pytest.raises(ArenaStoreError):
@@ -44,7 +36,10 @@ def test_only_one_concurrent_gamma_identity_can_own_the_ledger(pg):
                    p_block_hash="0x" + "cd" * 32, p_units=str(2 * 10**9), p_available=True,
                    p_genesis=winner["genesis"], p_netuid=71, p_service=hotkey(), p_registered_at=740)
     assert store.record_gamma_reading(**reading)["credit_microusd"] == 1_000_000
+    with pytest.raises(ArenaStoreError):  # credit now depends on it
+        stale.bind_gamma_source(**mistyped)
     store._t.close()
+    stale._t.close()
 
 
 def test_old_unbound_credit_must_be_reconciled(pg):

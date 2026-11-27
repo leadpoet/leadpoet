@@ -237,7 +237,7 @@ class ToolMarket:
         probe = "register:%s:%s" % (identity.hotkey, tool)
         with self._slot("check:" + identity.hotkey, 1, "check_in_flight"):
             if not self._recheck_due(probe):
-                raise ToolMarketError(429, "key_registration_too_soon", retry_after_seconds=RECHECK_SPACING_SECONDS)
+                raise ToolMarketError(429, "check_too_soon", retry_after_seconds=RECHECK_SPACING_SECONDS)
             checked = self._check(tool, envelope)
         if checked.get("status") not in ("valid", "unchecked"):
             raise ToolMarketError(422, str(checked.get("reason") or "key_invalid"))

@@ -131,10 +131,11 @@ Health events come from vault checks and from calls.
 Only a hotkey registered on the subnet lists keys (`403
 miner_not_registered`). A miner's own tab never buys from their own keys.
 For security, a hotkey registers at most one key per tool every 30 days,
-revoked keys included. A revoked key that never took a call does not count,
-once: a hotkey registers at most 2 keys per tool in 30 days.
+revoked keys included (`429 key_registration_too_soon` with `next_at`). A
+key revoked before it took a call does not count, but a hotkey still
+registers at most 2 keys per tool in any 30 days.
 A listing that is refused is not checked with the vendor again, for that
-hotkey and tool, for a minute.
+hotkey and tool, for a minute (`429 check_too_soon`).
 
 `GET /tool-market/catalog` lists every tool that trades: its operations,
 one line on what each does, their parameters, its price ceiling, and the

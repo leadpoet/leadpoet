@@ -752,7 +752,7 @@ def test_a_hotkey_registers_one_key_per_tool_every_30_days(world):
     with pytest.raises(ToolMarketError) as again:  # a refused listing re-posted is not checked again
         world.register(miner, {"tool": "exa", "daily_cap_microusd": USD,
                                "envelope": world.vault.seal("exa", miner, "exa-stack-2")})
-    assert again.value.code == "key_registration_too_soon" and world.vault.checks == checks
+    assert again.value.code == "check_too_soon" and world.vault.checks == checks
     # A key revoked before any call is a one-off retry, not a loop.
     for tag in ("zb-loop-1", "zb-loop-2"):
         looped = world.register(miner, {"tool": "zerobounce", "daily_cap_microusd": USD,

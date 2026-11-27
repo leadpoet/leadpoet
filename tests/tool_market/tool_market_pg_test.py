@@ -1046,7 +1046,7 @@ def test_a_busy_chain_mid_failover_says_retry_not_top_up(world):
 
 
 def test_a_settlement_whose_answer_is_lost_is_read_back_or_named(world, monkeypatch):
-    from lab_arena.store import ArenaStoreUnavailable
+    from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable
 
     world.miner_key("lost-key", 10_000)
     buyer, token = world.buyer()
@@ -1056,7 +1056,7 @@ def test_a_settlement_whose_answer_is_lost_is_read_back_or_named(world, monkeypa
         result = settle(**kwargs)
         if kwargs["status"] == "settled" and not lost:
             lost.append(result)
-            raise ArenaStoreUnavailable("read timeout")
+            raise ArenaStoreError("HTTP 504 from the proxy", http_status=504)
         return result
 
     monkeypatch.setattr(world.store, "settle_call", commit_then_lose)

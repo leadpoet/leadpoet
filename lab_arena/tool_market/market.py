@@ -30,7 +30,7 @@ from lab_arena.lead_orders.keys import json_document
 from lab_arena.lead_orders.vault_client import VaultTransportError, VaultUnavailable
 from lab_arena.tool_market import book, catalog, discovery
 from lab_arena.chain import ArenaChainError
-from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable
+from lab_arena.store import ArenaStoreError
 from lab_arena.tool_market.config import ToolMarketConfig
 from lab_arena.tool_market.store import ToolMarketStore
 from lead_order_vault import envelope as vault_envelope
@@ -545,15 +545,13 @@ class ToolMarket:
         def settle(status: str, http_status: Optional[int], *, units: int = 0, owed: int = 0, charge: int = 0) -> bool:
             args = dict(call_id=call_id, status=status, http_status=http_status, units=units,
                         owed_microusd=owed, charge_microusd=charge, epoch=epoch)
-            try:
-                return self._store.settle_call(**args) in ("settled", "exists")
-            except ArenaStoreUnavailable:
-                pass  # its answer may be lost after it committed; the same settlement again is "exists"
-            try:
-                return self._store.settle_call(**args) in ("settled", "exists")
-            except ArenaStoreUnavailable:
-                # Charged or not is unknown: usage shows it under this call_id.
-                raise ToolMarketError(503, "store_unavailable", call_id=call_id) from None
+            for _ in range(2):  # a settlement already written comes back as "exists"
+                try:
+                    return self._store.settle_call(**args) in ("settled", "exists")
+                except ArenaStoreError:  # any failure: a commit may hide behind it
+                    pass
+            # Charged or not is unknown: usage shows it under this call_id.
+            raise ToolMarketError(503, "store_unavailable", call_id=call_id)
 
         try:
             response = self._transport.send(

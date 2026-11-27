@@ -229,6 +229,19 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $active
   AND NOT EXISTS(SELECT 1 FROM public.tool_market_key_revocations r WHERE r.key_id=p_key_id);
 $active770$;
 
+-- A key whose last 3 calls since its latest health event were all refused
+-- (403), for at least two buyers, leaves the book until its miner asks for a
+-- check. One buyer alone cannot bench a key.
+CREATE FUNCTION public.tool_market__key_refused_v1(p_key_id UUID,p_since TIMESTAMPTZ)
+RETURNS BOOLEAN LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $refused770$
+ WITH recent AS (
+  SELECT s.http_status,t.hotkey FROM public.tool_market_calls c
+   JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
+   JOIN public.tool_market_tabs t ON t.tab_id=c.tab_id
+  WHERE c.key_id=p_key_id AND c.opened_at>p_since ORDER BY c.sequence DESC LIMIT 3)
+ SELECT count(*)=3 AND bool_and(http_status=403) AND count(DISTINCT hotkey)>=2 FROM recent;
+$refused770$;
+
 CREATE FUNCTION public.tool_market__lock_v1(p_kind TEXT,p_value TEXT)
 RETURNS VOID LANGUAGE sql SET search_path=pg_catalog,public AS $lock770$
  SELECT pg_advisory_xact_lock(hashtextextended('tool_market:'||p_kind||':'||p_value,0));
@@ -342,8 +355,8 @@ $close770$;
 
 -- One active listing per key: the same vendor key sealed twice, by one miner
 -- or two, is refused while the first is listed. For security, a hotkey
--- registers at most one key per tool every 30 days after a key that served a
--- call, revoked keys included. A key that never served one does not count.
+-- registers at most one key per tool every 30 days, revoked keys included.
+-- A revoked key that never served a call does not count.
 CREATE FUNCTION public.tool_market_register_key_v1(p_key_id UUID,p_tool TEXT,p_hotkey TEXT,p_envelope TEXT,
  p_fingerprint TEXT,p_daily_cap BIGINT,p_status TEXT,p_balance NUMERIC,p_host TEXT,p_signed_at BIGINT,
  p_signed_body TEXT,p_signature TEXT)
@@ -355,9 +368,9 @@ BEGIN
  END IF;
  PERFORM public.tool_market__lock_v1('miner_tool',p_hotkey||':'||p_tool);
  SELECT max(k.registered_at)+interval '30 days' INTO next_at FROM public.tool_market_keys k
-  WHERE k.miner_hotkey=p_hotkey AND k.tool=p_tool AND EXISTS(
+  WHERE k.miner_hotkey=p_hotkey AND k.tool=p_tool AND (public.tool_market__key_active_v1(k.key_id) OR EXISTS(
    SELECT 1 FROM public.tool_market_calls c JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
-    WHERE c.key_id=k.key_id AND s.status='settled');
+    WHERE c.key_id=k.key_id AND s.status='settled'));
  IF next_at>clock_timestamp() THEN
   RETURN jsonb_build_object('status','too_soon','next_at',next_at);
  END IF;
@@ -437,7 +450,8 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
    ORDER BY (ask).ask_microusd,(ask).ask_sequence),'[]'::JSONB)
  FROM keyed
  WHERE (ask).ask_microusd IS NOT NULL AND (event).status IN ('valid','unchecked')
-  AND public.tool_market__key_day_v1(key_id)<daily_cap_microusd;
+  AND public.tool_market__key_day_v1(key_id)<daily_cap_microusd
+  AND NOT public.tool_market__key_refused_v1(key_id,(event).recorded_at);
 $book770$;
 
 -- ---------------------------------------------------------------------------

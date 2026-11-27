@@ -397,29 +397,52 @@ def test_a_buyer_cannot_take_working_keys_out_of_the_book(world):
     world.miner_key("zb-a", 4_000, tool="zerobounce")
     world.miner_key("exa-a", 900_000, tool="exa")
     _, token = world.buyer()
-    # A 403 the request caused: the vault's check says the key still works.
+    checks = world.vault.checks
+    # A 403 only skips the key, with no check.
     world.vendor.script["zb-a"] = [ok({}, status=403)]
     with pytest.raises(ToolMarketError):
         world.market.call(token, VALIDATE)
-    assert len(world.market.order_book("zerobounce")["asks"]) == 1
-    # Out of credit, the answer says; the check still sees a balance. Within the
-    # minute after a check none runs again, and the key stays.
-    checks = world.vault.checks
+    assert world.vault.checks == checks and len(world.market.order_book("zerobounce")["asks"]) == 1
+    # Out of credit, the answer says; the check still sees a balance. Within
+    # the minute after it, no check runs again and the key stays.
     world.vendor.script["zb-a"] = [ok({"error": "your account ran out of credits"})]
-    for _ in range(2):
+    for _ in range(3):
         with pytest.raises(ToolMarketError):
             world.market.call(token, VALIDATE)
-    assert world.vault.checks == checks and len(world.market.order_book("zerobounce")["asks"]) == 1
-    # Exa has no free check, so its 403 only skips the key for this call.
-    world.vendor.script["exa-a"] = [ok({}, status=403)]
-    with pytest.raises(ToolMarketError):
-        world.market.call(token, SEARCH)
-    assert len(world.market.order_book("exa")["asks"]) == 1
-    # A 401 only the key's account can cause still fails it.
-    world.vendor.script["exa-a"] = [ok({}, status=401)]
+    assert world.vault.checks == checks + 1 and len(world.market.order_book("zerobounce")["asks"]) == 1
+    # Exa has no free check: a 401 or 402 fails it.
+    world.vendor.script["exa-a"] = [ok({}, status=402)]
     with pytest.raises(ToolMarketError):
         world.market.call(token, SEARCH)
     assert world.market.order_book("exa")["asks"] == []
+
+
+def test_a_checked_key_fails_on_401_or_on_402_with_no_balance(world):
+    world.miner_key("zb-401", 4_000, tool="zerobounce")
+    world.miner_key("zb-empty", 5_000, tool="zerobounce")
+    _, token = world.buyer()
+    world.vendor.script["zb-401"] = [ok({}, status=401)]
+    world.vendor.script["zb-empty"] = [ok({"error": "your account ran out of credits"})]
+    world.vault.answers["zb-empty"] = {"status": "invalid", "reason": "zerobounce_no_credit"}
+    with pytest.raises(ToolMarketError):
+        world.market.call(token, VALIDATE)
+    assert world.market.order_book("zerobounce")["asks"] == []
+
+
+def test_a_key_refused_for_several_buyers_leaves_the_book_until_checked(world):
+    miner, key_id = world.miner_key("exa-blocked", 900_000, tool="exa")
+    world.vendor.script["exa-blocked"] = [ok({}, status=403)]
+    _, one = world.buyer()
+    for _ in range(3):  # one buyer alone cannot bench it
+        with pytest.raises(ToolMarketError):
+            world.market.call(one, SEARCH)
+    assert len(world.market.order_book("exa")["asks"]) == 1
+    _, two = world.buyer()
+    with pytest.raises(ToolMarketError):
+        world.market.call(two, SEARCH)
+    assert world.market.order_book("exa")["asks"] == []
+    world.market.check_key(world.who(miner), key_id)
+    assert len(world.market.order_book("exa")["asks"]) == 1
 
 
 def test_a_miners_tab_never_buys_from_their_own_key(world):
@@ -446,9 +469,16 @@ def test_a_hotkey_registers_one_key_per_tool_every_30_days(world):
         world.register(miner, {"tool": "harvestapi", "daily_cap_microusd": USD,
                                "envelope": world.vault.seal("harvestapi", miner, "second-key")})
     assert soon.value.status == 429 and soon.value.code == "key_registration_too_soon"
-    # Another tool is its own 30 days.
+    # Listed keys count even before they serve, so keys cannot be stacked.
     world.register(miner, {"tool": "exa", "daily_cap_microusd": USD,
-                           "envelope": world.vault.seal("exa", miner, "exa-thirty-day-key")})
+                           "envelope": world.vault.seal("exa", miner, "exa-stack-1")})
+    with pytest.raises(ToolMarketError) as stacked:
+        world.register(miner, {"tool": "exa", "daily_cap_microusd": USD,
+                               "envelope": world.vault.seal("exa", miner, "exa-stack-2")})
+    assert stacked.value.code == "key_registration_too_soon"
+    # Another tool is its own 30 days.
+    world.register(miner, {"tool": "zerobounce", "daily_cap_microusd": USD,
+                           "envelope": world.vault.seal("zerobounce", miner, "zb-thirty-day-key")})
 
 
 def test_asks_have_a_ceiling_and_a_buyer_can_cap_what_they_pay(world):

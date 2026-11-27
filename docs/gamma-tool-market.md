@@ -118,9 +118,10 @@ Health events come from vault checks and from calls.
 - A buyer shapes the request, so that answer alone does not always take a
   key out of the book. A 401 (a bad key or a paused account) marks it
   `failed`. A 402 marks it `failed` unless the vendor's free check still sees
-  a positive balance. A 403 only skips it, unless the free check says the key
-  is invalid. The vault runs that check at most once a minute per key;
-  without one due, only a 401 fails a key.
+  a positive balance; the check runs at most once a minute per key, and
+  without one due a 402 only skips the key. A 403 only skips it.
+- A key whose last 3 calls were all refused (403), for at least two buyers,
+  leaves the book until its miner asks for a check.
 - A 429 with no `Retry-After` skips the key for this call only. Hunter's
   403 is its rate limit, so it counts as a 429. A 429 with
   `Retry-After` goes back to the buyer.
@@ -130,8 +131,8 @@ Health events come from vault checks and from calls.
   `POST /tool-market/keys/{id}/check` to put it back in the book.
 
 A miner's own tab never buys from their own keys. For security, a hotkey
-registers at most one key per tool every 30 days after a key that served a
-call, revoked keys included.
+registers at most one key per tool every 30 days, revoked keys included. A
+revoked key that never served a call does not count.
 
 An ask may be at most $0.25 per credit, or 100% of the vendor's own price
 for a vendor-USD tool. A buyer can send `max_ask_microusd` with a call, and

@@ -351,21 +351,23 @@ class ToolMarket:
 
         - 401 (a bad key or account) always fails it;
         - 402 (no credit) fails it unless the vendor's free check sees a
-          positive balance;
-        - 403 fails it only when the free check says the key is invalid.
-
-        Without a check due (one a minute per key), only a 401 fails it.
+          positive balance; without a check due (one a minute per key), it
+          only skips the key;
+        - 403 only skips it. The book benches a key refused this way for
+          several buyers in a row (``tool_market__key_refused_v1``).
         """
 
+        if status == 403:
+            return
         if vault_tools.TOOLS[tool].balance_url is None:
-            confirmed = status in (401, 402)
+            confirmed = True
         elif not self._recheck_due(ask.key_id):
             confirmed = status == 401
         else:
             checked = self._recheck_answer(ask.key_id, tool, ask.envelope)
             if checked is None or checked["status"] == "invalid":
                 return  # unknown, or already recorded as invalid
-            confirmed = status == 401 or (status == 402 and checked.get("balance") is None)
+            confirmed = status == 401 or checked.get("balance") is None
         if confirmed:
             self._store.record_key_event(key_id=ask.key_id, status="failed", reason=failure)
 

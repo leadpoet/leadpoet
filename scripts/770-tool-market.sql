@@ -200,7 +200,8 @@ RETURNS BIGINT LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $committ
 $committed770$;
 
 -- A buyer's calls to one tool in the last hour that the miner may bear:
--- settled with unknown usage, or still in flight (each may end that way).
+-- settled with unknown usage, or never settled (in flight, or cut off by a
+-- restart; each may end that way).
 -- A buyer can cause unknown usage (a timeout, an oversized answer), so at 20
 -- the buyer's next call to that tool is refused. Counting calls in flight
 -- keeps a burst of parallel calls inside the limit. Per tool, so one
@@ -212,8 +213,7 @@ RETURNS BIGINT LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $uncerta
   LEFT JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
  WHERE t.hotkey=p_hotkey AND t.opened_at>clock_timestamp()-interval '25 hours' AND c.tool=p_tool
   AND c.opened_at>clock_timestamp()-interval '1 hour'
-  AND (s.status='uncertain' OR (s.call_id IS NULL
-   AND c.opened_at>clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1())));
+  AND (s.status='uncertain' OR s.call_id IS NULL);
 $uncertain770$;
 
 CREATE FUNCTION public.tool_market__tab_open_v1(p_tab public.tool_market_tabs)
@@ -223,8 +223,8 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $open77
 $open770$;
 
 -- One scan of a key's last 24 h of calls, in owed (miner) terms:
--- * ``day``: settled calls count what they owe; unknown usage and young open
---   calls the most they can owe. So the daily cap bounds what unknown usage
+-- * ``day``: settled calls count what they owe; unknown usage and calls
+--   never settled (in flight, or cut off by a restart) the most they can owe. So the daily cap bounds what unknown usage
 --   can cost a miner, however many buyers cause it.
 -- * ``buyer_unknown``: the same for ``p_hotkey``'s unknown usage and open
 --   calls. Past a quarter of the cap, that buyer's calls skip the key, so
@@ -240,12 +240,12 @@ CREATE FUNCTION public.tool_market__key_ledger_v1(p_key_id UUID,p_hotkey TEXT,
 LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $ledger770$
  WITH calls AS (
   SELECT t.hotkey,s.status,s.http_status,s.settled_at,s.owed_microusd,c.owed_cap_microusd cap,c.opened_at,
-   s.call_id IS NULL AND c.opened_at>clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1()) young
+   s.call_id IS NULL OR s.status='uncertain' unknown
   FROM public.tool_market_calls c JOIN public.tool_market_tabs t ON t.tab_id=c.tab_id
    LEFT JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
   WHERE c.key_id=p_key_id AND c.opened_at>clock_timestamp()-interval '24 hours')
- SELECT coalesce(sum(CASE WHEN status='uncertain' OR young THEN cap ELSE coalesce(owed_microusd,0) END),0)::BIGINT,
-  coalesce(sum(cap) FILTER (WHERE hotkey=p_hotkey AND (status='uncertain' OR young)),0)::BIGINT,
+ SELECT coalesce(sum(CASE WHEN unknown THEN cap ELSE owed_microusd END),0)::BIGINT,
+  coalesce(sum(cap) FILTER (WHERE hotkey=p_hotkey AND unknown),0)::BIGINT,
   count(DISTINCT hotkey) FILTER (WHERE status='skipped' AND http_status=429
     AND settled_at>clock_timestamp()-interval '1 minute')>=3
    OR count(DISTINCT hotkey) FILTER (WHERE opened_at>clock_timestamp()-interval '1 hour'
@@ -294,6 +294,10 @@ BEGIN
  IF p_available AND prior.reading_id IS NOT NULL AND p_block_number>=prior.block_number
   AND p_units<prior.spent_units THEN
   RETURN jsonb_build_object('status','counter_backwards');
+ END IF;
+ -- The same reading again (a client polling its balance) adds no row.
+ IF p_available AND prior.block_number IS NOT DISTINCT FROM p_block_number AND prior.spent_units=p_units THEN
+  RETURN public.tool_market__balance_v1(p_hotkey);
  END IF;
  INSERT INTO public.tool_market_gamma_readings(hotkey,block_number,block_hash,spent_units,available)
  VALUES(p_hotkey,p_block_number,lower(p_block_hash),CASE WHEN p_available THEN p_units ELSE 0 END,p_available);
@@ -570,7 +574,7 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
    'calls',u.calls,'uncertain_calls',u.uncertain,'owed_microusd',u.owed)
    ORDER BY k.registered_at,k.key_id),'[]'::JSONB))
  FROM public.tool_market_keys k, LATERAL (
-  SELECT count(*) calls,count(*) FILTER (WHERE s.status='uncertain') uncertain,
+  SELECT count(*) calls,count(*) FILTER (WHERE s.status='uncertain' OR s.call_id IS NULL) uncertain,
    coalesce(sum(s.owed_microusd),0) owed
   FROM public.tool_market_calls c LEFT JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
   WHERE c.key_id=k.key_id) u

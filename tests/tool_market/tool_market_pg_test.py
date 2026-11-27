@@ -323,6 +323,20 @@ def test_the_catalog_lists_each_tool_its_operations_and_best_price(world):
     assert tools["exa"]["best_ask_microusd"] is None  # nobody sells it yet
 
 
+def test_polling_a_balance_adds_a_reading_only_when_it_changes(world, database):
+    buyer = hotkey()
+    read = dict(hotkey=buyer, block_number=7, block_hash="0x" + "07" * 32, spent_units=5, available=True)
+    for _ in range(3):
+        world.store.record_gamma_reading(**read)
+    world.store.record_gamma_reading(**dict(read, block_number=8, block_hash="0x" + "08" * 32))
+    psycopg2, dsn = database
+    connection = psycopg2.connect(**dsn)
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT count(*) FROM public.tool_market_gamma_readings WHERE hotkey=%s", (buyer,))
+        assert cursor.fetchone()[0] == 2
+    connection.close()
+
+
 def test_a_buyer_pages_their_own_finished_calls_by_watermark(world, database):
     world.miner_key("usage-key", 10_000)
     buyer, token = world.buyer()
@@ -481,7 +495,7 @@ def test_unknown_usage_counts_toward_a_keys_daily_cap_a_quarter_per_buyer(world)
     assert capped.value.code == "no_supply" and len(world.vendor.sent) == 4
 
 
-def test_a_buyers_calls_in_flight_count_toward_their_quarter(world):
+def test_a_buyers_calls_in_flight_count_toward_their_quarter(world, database):
     world.miner_key("parallel-key", 10_000, cap=40_000)
     world.miner_key("parallel-spare", 12_000)
     _, token = world.buyer()
@@ -494,6 +508,14 @@ def test_a_buyers_calls_in_flight_count_toward_their_quarter(world):
                                         reserve_microusd=11_000, owed_cap_microusd=10_000)
 
     assert [reserve(), reserve()] == ["reserved", "key_cap"]  # the first is still in flight
+    psycopg2, dsn = database
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    with connection.cursor() as cursor:  # a restart cut it off: it never settles
+        cursor.execute("SET session_replication_role=replica")
+        cursor.execute("UPDATE public.tool_market_calls SET opened_at=opened_at-interval '11 minutes'")
+    connection.close()
+    assert reserve() == "key_cap"
 
 
 def test_keys_without_room_for_a_call_do_not_use_up_its_attempts(world):

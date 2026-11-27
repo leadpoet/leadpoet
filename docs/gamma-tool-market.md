@@ -121,8 +121,8 @@ A key is in its tool's book only while all of these hold:
 - its miner accepted the current terms;
 - its latest ask is a price, not a withdrawal;
 - its latest health event is `valid` or `unchecked`;
-- what it earned in the last 24 h, with unknown usage and calls in flight
-  at the most they could owe, is under its daily cap. A miner picks the
+- what it earned in the last 24 h, with unknown usage and calls not
+  settled at the most they could owe, is under its daily cap. A miner picks the
   cap, at most $20 a day per key at launch. A call skips a key without
   room for it.
 
@@ -192,7 +192,9 @@ All amounts are integer micro-USD.
 - **Unknown usage:** sometimes the usage is unknown, such as a 5xx answer,
   a timeout, or a 2xx with no cost in it. Then the buyer pays nothing and
   the miner is owed nothing. The miner bears that risk, at most the key's
-  daily cap a day. A buyer whose unknown usage and calls in flight on a
+  daily cap a day valued at the ask: a key asked below the vendor's price
+  can lose more in vendor spend. A call cut off before it settles, by a
+  restart, counts as unknown usage. A buyer whose unknown usage and calls in flight on a
   key pass a quarter of its cap skips that key, so one buyer cannot push a
   key out of the book for free.
   - A request that may have reached the vendor is never retried on another
@@ -277,6 +279,9 @@ deployment, exactly as lead orders do.
   the vault would close this.
 - **A balance reads every tab the buyer ever opened.** Fine at launch;
   keep a running total before buyers open thousands of tabs.
+- **A signed balance read needs no funds.** Each costs a few chain reads,
+  and a new hotkey per request adds a row each time (one hotkey polling
+  adds none). Rate-limit the route at the edge before opening it widely.
 - **Anyone can fill the vault's connections.** It serves at most 128 at
   once, and one that sends nothing holds its slot for 10 s, so a stranger
   can keep every call at `503 no_supply` (nothing is charged). Limit the

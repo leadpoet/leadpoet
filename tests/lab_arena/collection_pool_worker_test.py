@@ -405,8 +405,9 @@ def test_completed_receipt_retry_never_repays_a_lost_response():
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("reordered", [False, True])
 def test_automatic_independent_correction_staged_once_and_runs_with_funding(
-    pool_fixture, tmp_path
+    pool_fixture, tmp_path, reordered
 ):
     from functools import partial
     from scripts.run_locked_collection import stage_failed_pool_continuation
@@ -418,6 +419,11 @@ def test_automatic_independent_correction_staged_once_and_runs_with_funding(
     raw["arms"].append(dict(raw["arms"][0], id="stronger", model=EXPERT))
     raw["max_slots"] = 2
     raw["budget_microusd"] = 200000
+    original_program = deepcopy(raw)
+    if reordered:
+        original_program["arms"].reverse()
+        raw["series_arm_order"] = [a["id"] for a in original_program["arms"]]
+    expected_program = judge.digest({k: v for k, v in original_program.items() if k != "cases"})
     out = tmp_path / "offers"
     out.mkdir()
     callback = partial(
@@ -432,6 +438,8 @@ def test_automatic_independent_correction_staged_once_and_runs_with_funding(
     parent = simulation(e, raw, [bad, good], on_pool_failure=callback)
     [path] = out.glob("pool-*.json")
     new = json.loads(path.read_bytes())
+    assert new["auto_from_program"] == expected_program
+    assert "series_arm_order" not in new
     assert (
         new["arms"][0]["role"] == "continuation" and new["arms"][0]["model"] == EXPERT
     )

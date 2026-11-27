@@ -39,7 +39,7 @@ def test_paid_offer_is_immutable_and_binds_generator_route():
     verify_live_panel(raw, policy, proof)
     class Schedule:
         def rpc(self, name, params):
-            assert name == "collection_reward_schedule_v1" and params == {}
+            assert name == "collection_offer_schedule_v1" and params == {"p_offer": policy.batch_id}
             return {"pilot_evidence": proof}
     meter = CollectionBroker(None, Schedule(), None, {"mode":"live", "batch_id":policy.batch_id},
                              {}, routes=raw["routes"])

@@ -10,7 +10,7 @@ from decimal import Decimal
 
 from lab_arena import broker, contracts, operations, provider_costs, store
 from lab_arena.collection_judge import QUALIFICATION_JUDGES, JudgeUnavailable, model_family
-from lab_arena.collection_intake import GENERATOR_ROUTES, VERIFIED_PRICE_SCHEMA
+from lab_arena.collection_intake import GENERATOR_ROUTES, VERIFIED_PRICE_SCHEMA, VERIFIED_TASK_PRICE_SCHEMA
 from lab_arena.lead_orders.broker import deepline_cost_microusd
 
 store.FUNCTION_SIGNATURES.update(
@@ -233,9 +233,9 @@ class CollectionBroker:
             return False
         batch, mode = self.job.get("batch_id"), self.job.get("mode")
         if mode == "live" and re.fullmatch(r"dv-[0-9a-f]{64}", str(batch)):
-            approved = (self.database.rpc("collection_reward_schedule_v1", {}) or {}).get("pilot_evidence", {})
+            approved = (self.database.rpc("collection_offer_schedule_v1", {"p_offer": batch}) or {}).get("pilot_evidence", {})
             return (
-                approved.get("schema") == VERIFIED_PRICE_SCHEMA
+                approved.get("schema") in (VERIFIED_PRICE_SCHEMA, VERIFIED_TASK_PRICE_SCHEMA)
                 and approved.get("live_batch_id") == batch
                 and approved.get("routes", {}).get(model) == route
                 and (route == GENERATOR_ROUTES[model].tag or (model, route) == (REFERENCE_MODEL, REFERENCE_ROUTE))
@@ -272,16 +272,15 @@ class CollectionBroker:
             },
         )
 
+    def _credential(self, provider):
+        if provider == "judge":
+            return self.judge_key
+        return self.intake.credential(self.job["job_id"], self.job["lease_token"], provider)
+
     def _call(
         self, request_id, provider, url, content, reserve, *, model=None, timeout=120
     ):
-        secret = (
-            self.judge_key
-            if provider == "judge"
-            else self.intake.credential(
-                self.job["job_id"], self.job["lease_token"], provider
-            )
-        )
+        secret = self._credential(provider)
         if not secret or secret.encode() in content:
             raise CollectionCallError("invalid provider credential binding")
         admitted = self._rpc(

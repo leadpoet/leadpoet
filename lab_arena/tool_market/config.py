@@ -101,13 +101,15 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
                              and 0 < int(verify_limit) <= MAX_ASK[TOOLS["zerobounce"]]):
         raise ToolMarketConfigError("%s must be a positive per-call ask within the catalog limit" % VERIFY_MAX_ASK_ENV)
     terms_version = env.get(TERMS_VERSION_ENV, "").strip()
+    if env.get(NETUID_ENV, "71").strip() != "71":
+        raise ToolMarketConfigError("%s must be 71: the market counts only SN71's Gamma" % NETUID_ENV)
     config = ToolMarketConfig(
         lead_search_verify_max_ask=int(verify_limit) if verify_limit else None,
         mode=mode, tools=tools, approved_suppliers=frozenset(approved), buyer_hotkeys=buyers, private_suppliers=private,
         gamma_service=env.get(GAMMA_SERVICE_ENV, "").strip(),
         terms_version=terms_version, terms_sha256=PUBLISHED_TERMS.get(terms_version, ""),
         public_base_url=env.get(PUBLIC_BASE_URL_ENV, "").strip().rstrip("/"),
-        netuid=int(env.get(NETUID_ENV, "71")),
+        netuid=71,
     )
     if not off <= set(TOOLS):
         raise ToolMarketConfigError("%s names a tool the catalog does not have" % TOOLS_OFF_ENV)

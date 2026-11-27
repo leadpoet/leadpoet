@@ -543,8 +543,14 @@ class ToolMarket:
         """One vendor request on one key. ``None`` means try the next key."""
 
         def settle(status: str, http_status: Optional[int], *, units: int = 0, owed: int = 0, charge: int = 0) -> bool:
-            return self._store.settle_call(call_id=call_id, status=status, http_status=http_status, units=units,
-                                           owed_microusd=owed, charge_microusd=charge, epoch=epoch) in ("settled", "exists")
+            # A store failure here comes after the vendor may have answered: the
+            # call stays reserved and lapses unpaid, and the answer still goes
+            # back, so a retry never spends the miner's key twice.
+            try:
+                return self._store.settle_call(call_id=call_id, status=status, http_status=http_status, units=units,
+                                               owed_microusd=owed, charge_microusd=charge, epoch=epoch) in ("settled", "exists")
+            except ArenaStoreError:
+                return False
 
         try:
             response = self._transport.send(

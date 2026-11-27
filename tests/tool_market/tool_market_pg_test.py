@@ -1043,3 +1043,21 @@ def test_a_busy_chain_mid_failover_says_retry_not_top_up(world):
     finally:
         for _ in range(market_module.CHAIN_READS):
             world.market._chain_reads.release()
+
+
+def test_a_store_blip_after_the_vendor_answers_still_returns_the_answer_unpaid(world, monkeypatch):
+    from lab_arena.store import ArenaStoreError
+
+    world.miner_key("blip-key", 10_000)
+    buyer, token = world.buyer()
+    settle = world.store.settle_call
+
+    def blip(**kwargs):
+        if kwargs["status"] == "settled":
+            raise ArenaStoreError("connection reset")
+        return settle(**kwargs)
+
+    monkeypatch.setattr(world.store, "settle_call", blip)
+    result = world.market.call(token, PROFILE)
+    # The vendor answered once: the buyer gets it, unpaid, so has no reason to retry.
+    assert result["status"] == 200 and result["charge_microusd"] == 0 and len(world.vendor.sent) == 1

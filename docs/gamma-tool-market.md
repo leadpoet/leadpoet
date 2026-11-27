@@ -352,7 +352,7 @@ All tool-market data is in `scripts/770-tool-market.sql`.
 | `LEADPOET_TOOL_MARKET_GAMMA_SERVICE` | the tool market's Gamma service SS58 hotkey; must differ from lead orders' |
 | `LEADPOET_TOOL_MARKET_TERMS_VERSION` | the terms both sides sign: `tool-market-terms-v1`, whose SHA-256 of `docs/tool-market-terms.md`'s exact bytes is in `PUBLISHED_TERMS` in `config.py`; live mode refuses any other version |
 | `LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL` | the https host every signed request names, and the base of the services document's urls |
-| `LAB_ARENA_NETUID` | must be 71, the default; the build refuses any other value |
+| `LAB_ARENA_NETUID` | must be 71, the default; any other value is `503 tool_market_misconfigured` |
 
 It reuses the Arena store and chain settings, and the key vault
 deployment, exactly as lead orders do.

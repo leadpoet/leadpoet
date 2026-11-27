@@ -8,8 +8,8 @@ the vault, which puts the key where the vendor expects it. The buyer pays
 the ask plus 10% (``book.charge_microusd``); the miner is owed the ask.
 
 What the gateway never sees: the vendor key. What it trusts: the vendor's
-own answer for usage (a 2xx for per-call tools, the reported cost for
-``vendor_usd`` tools). When the usage is unknown the buyer pays nothing and
+own answer for usage (what a 2xx shows was charged, or the reported cost
+for ``vendor_usd`` tools). When the usage is unknown the buyer pays nothing and
 the miner is owed nothing (``uncertain``).
 """
 

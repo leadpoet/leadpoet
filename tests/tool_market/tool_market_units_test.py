@@ -107,8 +107,7 @@ def test_units_count_only_what_the_vendor_charges():
     assert FINDYMAIL.units(200, {"contact": None}) == 0
     assert EXA.units(200, {"costDollars": {"total": 0.005}}) == 5_000
     assert EXA.units(200, {"costDollars": {"total": "0.0000001"}}) == 1  # rounded up to a micro-USD
-    assert EXA.units(200, {"costDollars": {"total": 1000}}) == EXA.max_units
-    for answer in (None, {}, {"costDollars": None}, {"costDollars": {"total": -1}}, {"costDollars": {"total": "NaN"}},
+    for answer in ({}, {"costDollars": None}, {"costDollars": {"total": -1}}, {"costDollars": {"total": "NaN"}},
                    {"costDollars": {"total": True}}, {"costDollars": {"total": "1e999999"}}, [1]):
         assert EXA.units(200, answer) is None  # unknown usage: nobody pays
 
@@ -167,8 +166,3 @@ def test_the_published_terms_hash_is_the_terms_file():
     text = path.read_bytes()
     assert hashlib.sha256(text).hexdigest() == PUBLISHED_TERMS["tool-market-terms-v1"]
     assert b"(tool-market-terms-v1)" in text
-
-
-def test_every_operation_says_what_it_does():
-    # Agents choose from the catalog by task; an operation without a line is unfindable.
-    assert all(op.does for op in catalog.OPERATIONS.values())

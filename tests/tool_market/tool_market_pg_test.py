@@ -339,7 +339,14 @@ def test_a_buyer_pages_their_own_finished_calls_by_watermark(world, database):
     with connection.cursor() as cursor:
         # Age the calls on this scratch database, past the append-only trigger.
         cursor.execute("SET session_replication_role=replica")
-        cursor.execute("UPDATE public.tool_market_calls SET opened_at=opened_at-interval '11 minutes'")
+        # A later sequence with an earlier opened_at (two calls racing) waits
+        # for the older one, so paging cannot step past it.
+        latest = ("(SELECT max(c.sequence) FROM public.tool_market_calls c JOIN public.tool_market_tabs t "
+                  "USING (tab_id) WHERE t.hotkey=%s)")
+        age = "UPDATE public.tool_market_calls SET opened_at=opened_at-interval '11 minutes' WHERE sequence"
+        cursor.execute(age + "=" + latest, (buyer,))
+        assert world.market.usage(world.who(buyer), 0, 100)["calls"] == []
+        cursor.execute(age + "<>" + latest, (buyer,))
     connection.close()
     first = world.market.usage(world.who(buyer), 0, 2)
     assert [c["charge_microusd"] for c in first["calls"]] == [11_000, 11_000]

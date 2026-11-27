@@ -16,10 +16,6 @@ PPM = 1_000_000
 MARKUP_PPM = 100_000
 
 
-def _ceil_div(numerator: int, denominator: int) -> int:
-    return -(-numerator // denominator)
-
-
 def owed_microusd(operation: Operation, units: int, ask_microusd: int) -> int:
     """What the miner earns for ``units`` (``Operation.units`` caps them)."""
 
@@ -29,7 +25,7 @@ def owed_microusd(operation: Operation, units: int, ask_microusd: int) -> int:
 def charge_microusd(owed: int) -> int:
     """What the buyer pays for ``owed``: 10% more, rounded up."""
 
-    return _ceil_div(int(owed) * (PPM + MARKUP_PPM), PPM)
+    return -(-int(owed) * (PPM + MARKUP_PPM) // PPM)
 
 
 @dataclass(frozen=True)

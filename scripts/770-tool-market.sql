@@ -584,12 +584,16 @@ $statement770$;
 -- change. Usage only, never the vendor's answer.
 CREATE FUNCTION public.tool_market_usage_v1(p_hotkey TEXT,p_after BIGINT,p_limit INTEGER)
 RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $usage770$
- WITH page AS (
-  SELECT c.*,s.status settled,s.http_status,s.units,s.charge_microusd,s.settled_at
+ -- Two calls can take their sequence and their opened_at in opposite
+ -- orders, so a page stops before the first call still too young.
+ WITH mine AS MATERIALIZED (
+  SELECT c.*,c.opened_at<clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1()+60) settled_by_now
   FROM public.tool_market_tabs t JOIN public.tool_market_calls c ON c.tab_id=t.tab_id
-  LEFT JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
-  WHERE t.hotkey=p_hotkey AND c.sequence>p_after
-   AND c.opened_at<clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1()+60)
+  WHERE t.hotkey=p_hotkey AND c.sequence>p_after),
+ page AS (
+  SELECT c.*,s.status settled,s.http_status,s.units,s.charge_microusd,s.settled_at
+  FROM mine c LEFT JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
+  WHERE c.sequence<coalesce((SELECT min(y.sequence) FROM mine y WHERE NOT y.settled_by_now),9223372036854775807)
   ORDER BY c.sequence LIMIT greatest(1,least(p_limit,500)))
  SELECT jsonb_build_object(
   'calls',coalesce((SELECT jsonb_agg(jsonb_build_object('call_id',call_id,'sequence',sequence,'tool',tool,

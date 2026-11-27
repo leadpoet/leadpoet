@@ -47,13 +47,12 @@ def build_from_environment(config: ToolMarketConfig):
     except vault_trust.TrustError as error:
         raise ToolMarketConfigError(str(error)) from None
     vault = VaultClient(deployment, _required("LEAD_ORDER_VAULT_CALLER_TOKEN", env))
-    market = ToolMarket(
+    return ToolMarket(
         config=config, store=store, vault=vault, transport=VaultTransport(vault),
         gamma_reader=GammaBalanceReader(arena_chain, service_id=config.gamma_service),
         current_epoch=lambda: chain_module.current_settlement_epoch(arena_chain, cutover),
         is_registered=lambda hotkey: chain_module.is_registered(arena_chain.metagraph(), hotkey),
     )
-    return market
 
 
 __all__ = ["build_from_environment"]

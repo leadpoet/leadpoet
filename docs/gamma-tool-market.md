@@ -304,9 +304,9 @@ A tool is data, not a new code path:
 
 1. One `Operation` per endpoint in `lab_arena/tool_market/catalog.py`:
    method, URL, unit, maximum units per call, allowed parameters, how to
-   count what the vendor charged, and one line on what it `does`. A vendor whose status codes mean
-   something else, such as an error inside a 200, names a `real_status`
-   reader.
+   count what the vendor charged, and one line on what it `does`. A vendor
+   whose status codes mean something else, such as an error inside a 200,
+   names a `real_status` reader.
 2. One `Tool` entry in `lead_order_vault/tools.py`: the host, where the key
    goes (a header, with or without `Bearer`, or a query parameter), which
    routes it may call, and its free balance check. The vault is a separate

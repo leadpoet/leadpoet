@@ -305,8 +305,9 @@ assert set(REQUEST_PRIVACY) == set(TOOLS) and set(REQUEST_PRIVACY.values()) <= {
 _NAME_RE = re.compile(r"^[a-z_]{1,40}$")
 
 # One unit per tool, so one ask prices every operation of that tool. A
-# vendor-USD operation must read the vendor's cost.
-assert all(op.unit == TOOLS[op.tool] and (op.unit == UNIT_CALL or op.cost) for op in _OPERATIONS)
+# vendor-USD operation must read the vendor's cost. Agents choose by task,
+# so every operation says what it does.
+assert all(op.unit == TOOLS[op.tool] and (op.unit == UNIT_CALL or op.cost) and op.does for op in _OPERATIONS)
 assert all(_NAME_RE.fullmatch(op.tool) and _NAME_RE.fullmatch(op.name) for op in _OPERATIONS)
 
 

@@ -37,8 +37,11 @@ MAX_TAB_MICROUSD = 1_000_000_000  # $1,000
 # Low at launch: what one key may earn in 24 h. Raising it is a code change.
 MAX_KEY_DAILY_CAP_MICROUSD = 20_000_000  # $20
 
-_TERMS_RE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
-_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+# Each published terms version (docs/tool-market-terms.md) and the SHA-256 of
+# that file's exact bytes. Live mode trades only on one of these.
+PUBLISHED_TERMS: Mapping[str, str] = {
+    "tool-market-terms-v1": "0d216eb6f9c835b0bc74e7c365a304951b123e061175afd80fe821bfa9b2c619",
+}
 
 
 class ToolMarketConfigError(RuntimeError):
@@ -96,8 +99,8 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
     # One Gamma deposit must not fund two products.
     if config.gamma_service == env.get(LEAD_ORDERS_GAMMA_SERVICE_ENV, "").strip():
         raise ToolMarketConfigError("%s must differ from %s" % (GAMMA_SERVICE_ENV, LEAD_ORDERS_GAMMA_SERVICE_ENV))
-    if not _TERMS_RE.fullmatch(config.terms_version) or not _SHA_RE.fullmatch(config.terms_sha256):
-        raise ToolMarketConfigError("%s and %s are required" % (TERMS_VERSION_ENV, TERMS_SHA256_ENV))
+    if PUBLISHED_TERMS.get(config.terms_version) != config.terms_sha256:
+        raise ToolMarketConfigError("%s and %s must name published terms" % (TERMS_VERSION_ENV, TERMS_SHA256_ENV))
     if not config.public_base_url.startswith("https://"):
         raise ToolMarketConfigError("%s must be an https URL" % PUBLIC_BASE_URL_ENV)
     return config

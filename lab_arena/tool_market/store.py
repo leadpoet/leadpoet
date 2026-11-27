@@ -47,6 +47,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_charge", _B), ("p_epoch", _B),
     ),
     "tool_market_statement_v1": (("p_hotkey", _T),),
+    "tool_market_usage_v1": (("p_hotkey", _T), ("p_after", _B), ("p_limit", _I)),
 }
 
 
@@ -130,6 +131,9 @@ class ToolMarketStore:
 
     def statement(self, hotkey: str) -> Dict[str, Any]:
         return self._rpc("tool_market_statement_v1", p_hotkey=hotkey)
+
+    def usage(self, *, hotkey: str, after: int, limit: int) -> Dict[str, Any]:
+        return self._rpc("tool_market_usage_v1", p_hotkey=hotkey, p_after=int(after), p_limit=int(limit))
 
     # Calls ------------------------------------------------------------------
     def reserve_call(self, *, call_id: str, token_hash: str, tool: str, operation: str, key_id: str,

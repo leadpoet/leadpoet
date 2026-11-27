@@ -144,7 +144,7 @@ CREATE TABLE public.tool_market_calls (
   owed_cap_microusd BIGINT NOT NULL CHECK(owed_cap_microusd>=0),
   opened_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
-CREATE INDEX tool_market_calls_tab ON public.tool_market_calls(tab_id);
+CREATE INDEX tool_market_calls_tab ON public.tool_market_calls(tab_id,sequence);
 CREATE INDEX tool_market_calls_key ON public.tool_market_calls(key_id,opened_at);
 
 -- settled: the vendor answered and its usage is known. uncertain: it may
@@ -548,6 +548,32 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
    ORDER BY k.sequence),'[]'::JSONB))
  FROM public.tool_market_keys k WHERE k.miner_hotkey=p_hotkey;
 $statement770$;
+
+-- A buyer's own calls, oldest first, after a watermark (a call sequence).
+-- Only finished calls are listed: settled, or open past the late-answer
+-- window, which can no longer settle. The page stops before the buyer's
+-- oldest call still open, so a watermark never passes a call that may still
+-- settle. Usage only, never the vendor's answer.
+CREATE FUNCTION public.tool_market_usage_v1(p_hotkey TEXT,p_after BIGINT,p_limit INTEGER)
+RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $usage770$
+ WITH mine AS (
+  SELECT c.*,s.status settled,s.http_status,s.units,s.charge_microusd,s.settled_at
+  FROM public.tool_market_tabs t JOIN public.tool_market_calls c ON c.tab_id=t.tab_id
+  LEFT JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
+  WHERE t.hotkey=p_hotkey AND c.sequence>p_after),
+ open_from AS (
+  SELECT min(sequence) seq FROM mine WHERE settled IS NULL
+   AND opened_at>clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1())),
+ page AS (
+  SELECT * FROM mine WHERE sequence<coalesce((SELECT seq FROM open_from),9223372036854775807)
+  ORDER BY sequence LIMIT greatest(1,least(p_limit,500)))
+ SELECT jsonb_build_object(
+  'calls',coalesce((SELECT jsonb_agg(jsonb_build_object('call_id',call_id,'sequence',sequence,'tool',tool,
+    'operation',operation,'opened_at',opened_at,'status',coalesce(settled,'expired'),'http_status',http_status,
+    'units',coalesce(units,0),'charge_microusd',coalesce(charge_microusd,0),'settled_at',settled_at)
+    ORDER BY sequence) FROM page),'[]'::JSONB),
+  'watermark',coalesce((SELECT max(sequence) FROM page),p_after));
+$usage770$;
 
 -- Every tool_market function: owner, no PUBLIC execute; the service may
 -- execute all but the double-underscore helpers.

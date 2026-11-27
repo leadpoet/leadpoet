@@ -22,7 +22,7 @@ from lab_arena.lead_orders.vault_client import VaultTransportError
 from lab_arena.store import ArenaStoreError, PsycopgTransport
 from lab_arena.tool_market import market as market_module
 from lab_arena.tool_market.config import ToolMarketConfig
-from lab_arena.tool_market.market import ATTESTATION, ToolMarket, ToolMarketError
+from lab_arena.tool_market.market import ATTESTATION, ToolMarket, ToolMarketError, token_hash
 from lab_arena.tool_market.store import ToolMarketStore
 from lead_order_vault import envelope as vault_envelope
 from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
@@ -262,6 +262,36 @@ def test_the_catalog_lists_each_tool_its_operations_and_best_price(world):
         == (9_000, 9_900, 250_000)
     assert {op["operation"] for op in harvest["operations"]} == {"linkedin_profile", "linkedin_company"}
     assert tools["exa"]["best_ask_microusd"] is None  # nobody sells it yet
+
+
+def test_a_buyer_pages_their_own_finished_calls_by_watermark(world):
+    world.miner_key("usage-key", 10_000)
+    buyer, token = world.buyer()
+    other, other_token = world.buyer()
+    world.vendor.script["usage-key"] = [ok({"id": "p"})]
+    for _ in range(3):
+        world.market.call(token, PROFILE)
+    world.market.call(other_token, PROFILE)
+    first = world.market.usage(world.who(buyer), 0, 2)
+    assert [c["charge_microusd"] for c in first["calls"]] == [11_000, 11_000]
+    assert set(first["calls"][0]) == {"call_id", "sequence", "tool", "operation", "opened_at", "status",
+                                      "http_status", "units", "charge_microusd", "settled_at"}  # no answers
+    rest = world.market.usage(world.who(buyer), first["watermark"], 100)
+    assert len(rest["calls"]) == 1 and world.market.usage(world.who(buyer), rest["watermark"], 100)["calls"] == []
+    assert len(world.market.usage(world.who(other), 0, 100)["calls"]) == 1  # only the signer's own
+    # A call still open holds the page before it, so the watermark cannot pass it.
+    tab = token_hash(token)
+    open_call = str(uuid.uuid4())
+    ask = world.store.book(tool="harvestapi", terms_sha256=world.config.terms_sha256, check_max_age_seconds=3600)[0]
+    assert world.store.reserve_call(call_id=open_call, token_hash=tab, tool="harvestapi", operation=PROFILE["operation"],
+                                    key_id=ask["key_id"], ask_microusd=ask["ask_microusd"], reserve_microusd=11_000,
+                                    owed_cap_microusd=10_000) == "reserved"
+    world.market.call(token, PROFILE)
+    held = world.market.usage(world.who(buyer), rest["watermark"], 100)
+    assert held == {"calls": [], "watermark": rest["watermark"]}
+    for after, limit in ((-1, 10), (0, 0), (0, 501), ("1", 10)):
+        with pytest.raises(ToolMarketError):
+            world.market.usage(world.who(buyer), after, limit)
 
 
 def test_tabs_need_terms_balance_and_budget(world):

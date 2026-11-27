@@ -145,7 +145,15 @@ no key asking more serves it.
 
 `GET /tool-market/catalog` lists every tool that trades: its operations and
 their parameters, its price ceiling, and the cheapest ask with what a buyer
-pays for it. `GET /tool-market/books/{tool}` shows the asks and what a buyer pays for
+pays for it. ## Usage history
+
+`GET /tool-market/usage?after=<watermark>&limit=<1-500>`, signed by the
+buyer, lists the buyer's own finished calls, oldest first: tool, operation,
+status, units, charge and times. It never returns a vendor's answer. Pass the
+returned `watermark` back as `after` for the next page. A page stops before
+the buyer's oldest call that may still settle, so paging never skips one.
+
+`GET /tool-market/books/{tool}` shows the asks and what a buyer pays for
 each. It shows no miner hotkeys and no key data.
 
 ## Money

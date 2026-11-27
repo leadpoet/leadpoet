@@ -42,6 +42,7 @@ TOKEN_PREFIX = "tmt_"
 # Keys tried for one call before the buyer is told there is no supply.
 MAX_KEYS_PER_CALL = 3
 RECHECK_SPACING_SECONDS = 60
+MAX_USAGE_PAGE = 500
 CALL_TIMEOUT_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MIN_TAB_SECONDS = 60
@@ -145,6 +146,12 @@ class ToolMarket:
         if not found:
             raise ToolMarketError(401, "tab_unknown")
         return found
+
+    def usage(self, identity: BuyerIdentity, after: Any, limit: Any) -> Dict[str, Any]:
+        """The buyer's own finished calls after ``after``; pass back ``watermark`` for the next page."""
+
+        return self._store.usage(hotkey=identity.hotkey, after=_int(after, 0, 2**62, "after_invalid"),
+                                 limit=_int(limit, 1, MAX_USAGE_PAGE, "limit_invalid"))
 
     def close_tab(self, token: str) -> Dict[str, Any]:
         closed = self._store.close_tab(token_hash(token)) if token else None

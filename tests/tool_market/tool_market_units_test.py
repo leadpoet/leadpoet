@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import pathlib
+
 import json
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from lab_arena.tool_market import book, catalog
-from lab_arena.tool_market.config import ToolMarketConfigError, load_config
+from lab_arena.tool_market.config import PUBLISHED_TERMS, ToolMarketConfigError, load_config
 from lead_order_vault import tools
 
 ALICE = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
@@ -135,7 +138,8 @@ def _sample(param):
 def test_config_is_off_by_default_and_strict_when_live():
     assert not load_config({}).enabled
     live = {"LEADPOET_TOOL_MARKET_MODE": "live", "LEADPOET_TOOL_MARKET_GAMMA_SERVICE": ALICE,
-            "LEADPOET_TOOL_MARKET_TERMS_VERSION": "v1", "LEADPOET_TOOL_MARKET_TERMS_SHA256": "a" * 64,
+            "LEADPOET_TOOL_MARKET_TERMS_VERSION": "tool-market-terms-v1",
+            "LEADPOET_TOOL_MARKET_TERMS_SHA256": PUBLISHED_TERMS["tool-market-terms-v1"],
             "LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL": "https://gw.example/"}
     config = load_config(live)
     # Live means every catalog tool trades; one switch turns single tools off.
@@ -144,9 +148,17 @@ def test_config_is_off_by_default_and_strict_when_live():
     assert load_config(dict(live, LEADPOET_TOOL_MARKET_TOOLS_OFF="exa, hunter")).tools \
         == set(catalog.TOOLS) - {"exa", "hunter"}
     for bad in ({"LEADPOET_TOOL_MARKET_TOOLS_OFF": "deepline"},
-                {"LEADPOET_LEAD_ORDERS_GAMMA_SERVICE": ALICE}, {"LEADPOET_TOOL_MARKET_TERMS_SHA256": "x"},
+                {"LEADPOET_LEAD_ORDERS_GAMMA_SERVICE": ALICE}, {"LEADPOET_TOOL_MARKET_TERMS_SHA256": "a" * 64},
                 {"LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL": "http://gw.example"},
                 {"LEADPOET_TOOL_MARKET_GAMMA_SERVICE": "71"}, {"LEADPOET_TOOL_MARKET_BUYER_HOTKEYS": "nope"},
                 {"LEADPOET_TOOL_MARKET_MODE": "staff"}):
         with pytest.raises(ToolMarketConfigError):
             load_config(dict(live, **bad))
+
+
+def test_the_published_terms_hash_is_the_terms_file():
+    # The hash both sides sign must be the published file's exact bytes.
+    path = pathlib.Path(__file__).resolve().parents[2] / "docs" / "tool-market-terms.md"
+    text = path.read_bytes()
+    assert hashlib.sha256(text).hexdigest() == PUBLISHED_TERMS["tool-market-terms-v1"]
+    assert b"(tool-market-terms-v1)" in text

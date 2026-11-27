@@ -191,6 +191,16 @@ async def post_ask(request: Request) -> Response:
     return await _handle(request, lambda m, who, body: m.post_ask(who, _json(body)), signed=True)
 
 
+@router.get("/tool-market/usage")
+async def usage(request: Request, after: str = "0", limit: str = "100") -> Response:
+    # The query is not signed; it only pages the signer's own calls.
+    return await _handle(request, lambda m, who, body: m.usage(who, _digits(after), _digits(limit)), signed=True)
+
+
+def _digits(text: str) -> Any:
+    return int(text) if text.isascii() and text.isdigit() and len(text) <= 19 else None
+
+
 @router.get("/tool-market/statement")
 async def statement(request: Request) -> Response:
     return await _handle(request, lambda m, who, body: m.statement(who.hotkey), signed=True)

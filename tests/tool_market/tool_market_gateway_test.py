@@ -42,6 +42,10 @@ class FakeMarket:
     def tool_catalog(self):
         return {"tools": []}
 
+    def usage(self, identity, after, limit):
+        self.seen.append(("usage", identity.hotkey, after, limit))
+        return {"calls": [], "watermark": after}
+
     def order_book(self, tool):
         return {"tool": tool, "asks": []}
 
@@ -80,7 +84,8 @@ def test_every_route_is_404_when_the_mode_is_off(client, monkeypatch):
                          ("POST", "/tool-market/terms"), ("GET", "/tool-market/balance"),
                          ("POST", "/tool-market/tabs"), ("POST", "/tool-market/keys"),
                          ("POST", "/tool-market/keys/k/check"), ("POST", "/tool-market/keys/k/revoke"),
-                         ("POST", "/tool-market/asks"), ("GET", "/tool-market/statement")):
+                         ("POST", "/tool-market/asks"), ("GET", "/tool-market/statement"),
+                         ("GET", "/tool-market/usage")):
         response = client.request(method, path)
         assert response.status_code == 404 and response.json() == {"detail": "Not Found"}
     assert routes._state is None
@@ -116,3 +121,12 @@ def test_calls_take_the_tab_token_and_return_the_market_answer(client):
     assert market.seen[-1][1] == ""  # a non-bearer header passes no token
     assert client.get("/tool-market/books/exa").json() == {"tool": "exa", "asks": []}
     assert client.get("/tool-market/catalog").json() == {"tools": []}
+
+
+def test_usage_is_signed_and_pages_by_a_strict_watermark(client):
+    market = enable()
+    answer = client.get("/tool-market/usage?after=7&limit=50", headers=signed("/tool-market/usage", b"", method="GET"))
+    assert answer.status_code == 200 and market.seen[-1] == ("usage", ALICE, 7, 50)
+    client.get("/tool-market/usage?after=-1", headers=signed("/tool-market/usage", b"", method="GET"))
+    assert market.seen[-1] == ("usage", ALICE, None, 100)  # not digits: the market refuses it
+    assert client.get("/tool-market/usage").status_code == 401

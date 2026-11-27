@@ -487,6 +487,7 @@ def test_each_tool_gets_its_key_where_it_expects_it(tool):
 @pytest.mark.parametrize("tool,method,url", [
     ("zerobounce", "GET", "https://api.zerobounce.net/v2/getcredits"),
     ("zerobounce", "GET", "https://api.zerobounce.net/v2/validate?email=a&api_key=someone-elses"),
+    ("zerobounce", "GET", "https://api.zerobounce.net/v2/validate?email=a&API_KEY=someone-elses"),
     ("zerobounce", "GET", "https://api.zerobounce.net/v2/validatebatch?email=a"),
     ("zerobounce", "POST", "https://api.zerobounce.net/v2/validate"),
     ("prospeo", "GET", "https://api.prospeo.io/account-information"),
@@ -543,7 +544,7 @@ ZB_CREDITS = "/v2/getcredits?api_key=" + ZEROBOUNCE_KEY
     # ZeroBounce sends its credits as text, and -1 for a key it does not know.
     ("zerobounce", lambda: _balance(ZB_CREDITS, 200, {"Credits": "2500"}), {"status": "valid", "balance": 2500}),
     ("zerobounce", lambda: _balance(ZB_CREDITS, 200, {"Credits": "-1"}),
-     {"status": "invalid", "reason": "zerobounce_api_key_no_credit"}),
+     {"status": "invalid", "reason": "zerobounce_api_key_invalid"}),
     ("zerobounce", lambda: _balance(ZB_CREDITS, 200, {"Credits": "0"}),
      {"status": "invalid", "reason": "zerobounce_api_key_no_credit"}),
     ("prospeo", lambda: _balance("/account-information", 200, {"error": False, "response": {"remaining_credits": 99}}),
@@ -560,10 +561,16 @@ ZB_CREDITS = "/v2/getcredits?api_key=" + ZEROBOUNCE_KEY
      {"status": "valid"}),
     ("exa", FakeProvider, {"status": "unchecked"}),
     ("harvestapi", FakeProvider, {"status": "unchecked"}),
+    # Lead orders: a stray 400 from Deepline's check is not a bad key.
+    ("deepline", lambda: _balance("/api/v2/billing/balance", 400, {}), None),
 ])
 def test_check_reads_a_tool_balance_where_it_has_a_free_one(tool, provider, expected):
     upstream = provider()
-    key = TOOL_CALLS[tool][3]
+    key = TOOL_CALLS[tool][3] if tool in TOOL_CALLS else "dl_" + "g" * 30
+    if expected is None:
+        with pytest.raises(VaultError, match="check_unavailable"):
+            _vault(upstream).check({"provider": tool, "envelope": _seal(key, provider=tool)})
+        return
     result = _vault(upstream).check({"provider": tool, "envelope": _seal(key, provider=tool)})
     assert {k: result[k] for k in expected} == expected and result["key_fingerprint"] == env.fingerprint(tool, key)
     if expected["status"] == "unchecked":

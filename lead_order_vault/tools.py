@@ -73,6 +73,8 @@ class Tool:
     query_param: Optional[str] = None
     balance_url: Optional[str] = None
     balance_field: Tuple = ()
+    # Check answers that mean a bad key. Prospeo answers 400 to one.
+    invalid_statuses: Tuple[int, ...] = (401, 403, 404)
 
     def place(self, secret: str, headers: Mapping[str, str], target: str) -> Tuple[dict, str]:
         """``(headers, target)`` with the key where the vendor reads it."""
@@ -86,7 +88,7 @@ class Tool:
         """The caller's own query already names the key parameter."""
 
         return self.query_param is not None and any(
-            part.split("=", 1)[0] == self.query_param for part in query.split("&") if part)
+            part.split("=", 1)[0].lower() == self.query_param.lower() for part in query.split("&") if part)
 
 
 TOOLS: Mapping[str, Tool] = {
@@ -96,11 +98,12 @@ TOOLS: Mapping[str, Tool] = {
                      balance_url="https://code.deepline.com/api/v2/billing/balance"),
     # Tool market (docs/gamma-tool-market.md): data endpoints only, never
     # account, billing or key management.
+    # Its credits come as text, and "-1" for a key it does not know.
     "zerobounce": Tool("api.zerobounce.net", shape("GET", r"/v2/validate", query=True), query_param="api_key",
                        balance_url="https://api.zerobounce.net/v2/getcredits", balance_field=("Credits",)),
     "prospeo": Tool("api.prospeo.io", shape("POST", r"/enrich-person", query=False), "x-key",
                     balance_url="https://api.prospeo.io/account-information",
-                    balance_field=("response", "remaining_credits")),
+                    balance_field=("response", "remaining_credits"), invalid_statuses=(400, 401, 403, 404)),
     "findymail": Tool("app.findymail.com", shape("POST", r"/api/search/(?:business-profile|name)", query=False),
                       "authorization", "Bearer ", balance_url="https://app.findymail.com/api/credits",
                       balance_field=("credits",)),

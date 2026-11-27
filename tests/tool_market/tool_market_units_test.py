@@ -87,6 +87,8 @@ PROSPEO_MATCH = {"error": False, "free_enrichment": False, "person": {"email": {
 def test_each_vendor_status_is_read_as_what_it_means():
     # ZeroBounce answers 200 for a dead key or an empty account.
     assert ZB.status(200, ZB_DEAD_KEY) == 402 and ZB.status(200, ZB_VALID) == 200
+    # A bad request is the buyer's, so it fails no key.
+    assert ZB.status(200, {"error": "Invalid IP address"}) == 400 and ZB.status(200, {}) == 200
     assert PROSPEO.status(400, {"error": True, "error_code": "INSUFFICIENT_CREDITS"}) == 402
     assert PROSPEO.status(400, {"error": True, "error_code": "INVALID_API_KEY"}) == 401
     assert PROSPEO.status(400, {"error": True, "error_code": "NO_MATCH"}) == 400

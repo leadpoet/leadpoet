@@ -166,8 +166,13 @@ def _get(document: Any, *path: str) -> Any:
 
 
 def _zerobounce_status(status: int, document: Any) -> int:
-    # A dead key and an empty account both answer 200 with an ``error``.
-    return 402 if status == 200 and _get(document, "status") is None and _get(document, "error") else status
+    """ZeroBounce answers 200 with an ``error`` for a dead key or an empty
+    account, and for a bad request too; only the first fails the key."""
+
+    error = _get(document, "error") if status == 200 and _get(document, "status") is None else None
+    if not isinstance(error, str) or not error:
+        return status
+    return 402 if re.search(r"api key|credits", error, re.IGNORECASE) else 400
 
 
 def _zerobounce_cost(document: Any) -> Optional[int]:

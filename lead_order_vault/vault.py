@@ -280,6 +280,8 @@ class Vault:
                 balance = _field(self._probe(tool, tool.balance_url, runtime, provider + "_api_key_invalid"),
                                  tool.balance_field)
                 if balance is not None:
+                    if balance < 0:  # ZeroBounce's answer for a key it does not know
+                        raise _Invalid(provider + "_api_key_invalid")
                     if balance <= 0:
                         raise _Invalid(provider + "_api_key_no_credit")
                     result["balance"] = balance
@@ -375,7 +377,7 @@ class Vault:
             response = self._upstream("GET", parts.hostname, target, headers, b"", CHECK_TIMEOUT_SECONDS, 65536)
         except UpstreamError:
             raise VaultError("check_unavailable", 503) from None
-        if response.status in (400, 401, 403, 404):
+        if response.status in tool.invalid_statuses:
             raise _Invalid(invalid_code)
         if response.status == 402:
             raise _Invalid(invalid_code.replace("_invalid", "_no_credit"))

@@ -249,7 +249,7 @@ carries its charge.
 
 ## Money
 
-The database binds buyer credit to one Gamma service, genesis, subnet and subnet registration block when the gateway starts. A restart can still correct a wrong binding until the first balance reading; after that, repointing the ledger requires explicit reconciliation.
+The database binds buyer credit to one Gamma service, genesis, subnet and subnet registration block on each gateway process's first tool-market request. A restart can still correct a wrong binding until the first balance reading; after that, repointing the ledger requires explicit reconciliation.
 
 All amounts are integer micro-USD.
 

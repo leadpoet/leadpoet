@@ -74,7 +74,17 @@ def load_experiment(raw, prompt):
 
     if (
         set(raw)
-        - ({"payment_rule", "routes", "successor_seeds"} if pool else set())
+        - (
+            {
+                "payment_rule",
+                "routes",
+                "successor_seeds",
+                "correction_model",
+                "auto_from_program",
+            }
+            if pool
+            else set()
+        )
         - {
             "claim_protocol",
             "min_pricing_runs",
@@ -252,6 +262,28 @@ def load_experiment(raw, prompt):
                 "standing experiment routes differ from approved pinned endpoints"
             )
         routes.update(selected)
+        if "correction_model" in raw:
+            if (
+                source_ids
+                or len(selected) < 2
+                or raw["correction_model"] not in selected
+                or any(a["role"] != "expert" for a in arms)
+            ):
+                raise ValueError(
+                    "automatic corrections require a distinct approved fresh expert"
+                )
+        if "auto_from_program" in raw:
+            if (
+                not isinstance(raw["auto_from_program"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", raw["auto_from_program"])
+                or len(source_ids) != 1
+                or len(slots) != 1
+                or arms[0]["role"] != "continuation"
+                or raw.get("successor_seeds")
+                or "correction_model" in raw
+            ):
+                raise ValueError("invalid automatic continuation")
+
         if "successor_seeds" in raw:
             # A rolling full-task pack advances exactly one disjoint seed range. Private
             # student checkpoint experiments can never silently turn into new cases.
@@ -548,6 +580,7 @@ def run_experiment(
     epoch,
     before_claim=None,
     prompt=None,
+    on_pool_failure=None,
 ):
     from lab_arena.collection_prices import claim_at_current_price
     from lab_arena.collection_broker import CollectionBroker
@@ -810,6 +843,16 @@ def run_experiment(
             raise RuntimeError(
                 "experiment interrupted: " + type(exc).__name__
             ) from None
+        if (
+            pool
+            and on_pool_failure
+            and spec.raw.get("correction_model")
+            and job["model"] != spec.raw["correction_model"]
+            and evidence["complete_verified"]
+            and not evidence["task_pass"]
+        ):
+            # Settlement is already durable. Follow-up preparation has no provider side effect.
+            on_pool_failure(spec, job)
         count += 1
         print(json.dumps({"job": run_id, "batch": batch, "status": status}), flush=True)
     return count

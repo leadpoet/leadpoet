@@ -379,6 +379,7 @@ def _paid_reply(objects, job, index, event, message):
         or reply.get("model") != job["model"]
         or event["model"] != job["model"]
         or event["finish_reason"] != choice["finish_reason"]
+        or (batch.startswith("pool-") and event.get("usage") != reply.get("usage"))
         or visible != message
     ):
         raise ValueError("original generator receipt differs from the trajectory")

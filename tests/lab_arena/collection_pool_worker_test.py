@@ -235,7 +235,7 @@ def pool_fixture(tmp_path, monkeypatch):
         yield env
 
 
-def simulation(env, raw, scripts):
+def simulation(env, raw, scripts, *, on_pool_failure=None):
     spec = xp.load_experiment(raw, PROMPT)
     env.scripts.extend(scripts)
     sources = env.sources
@@ -256,6 +256,7 @@ def simulation(env, raw, scripts):
         max_jobs=len(scripts),
         epoch=lambda: 123,
         prompt=PROMPT,
+        on_pool_failure=on_pool_failure,
     )
     assert count == len(scripts)
     return spec
@@ -400,3 +401,84 @@ def test_completed_receipt_retry_never_repays_a_lost_response():
         == record
     )
     assert len(calls) == 1
+
+
+def test_automatic_independent_correction_staged_once_and_runs_with_funding(
+    pool_fixture, tmp_path
+):
+    from functools import partial
+    from scripts.run_locked_collection import stage_failed_pool_continuation
+
+    e = pool_fixture
+    raw = pool_raw(repeats=1)
+    raw["correction_model"] = EXPERT
+    raw["routes"][EXPERT] = "coreweave/fp8"
+    raw["arms"].append(dict(raw["arms"][0], id="stronger", model=EXPERT))
+    raw["max_slots"] = 2
+    raw["budget_microusd"] = 200000
+    out = tmp_path / "offers"
+    out.mkdir()
+    callback = partial(
+        stage_failed_pool_continuation,
+        database=e.db,
+        objects=e.objects,
+        directory=out,
+        inputs=e.inputs,
+        prompt=PROMPT,
+    )
+    good, bad = scripts_for(e, "P9")
+    parent = simulation(e, raw, [bad, good], on_pool_failure=callback)
+    [path] = out.glob("pool-*.json")
+    new = json.loads(path.read_bytes())
+    assert (
+        new["arms"][0]["role"] == "continuation" and new["arms"][0]["model"] == EXPERT
+    )
+    assert len(xp.load_experiment(new, PROMPT).slots) == 1
+    assert (
+        callback(parent, e.jobs[0]) is None
+    )  # immutable candidate for this case already exists
+    assert (
+        callback(parent, dict(e.jobs[0], scenario_id="P9-s81001")) is None
+    )  # no second outstanding correction
+    corrected = simulation(
+        e,
+        new,
+        [good[-2:]],
+        on_pool_failure=lambda *a: pytest.fail("automatic correction recursed"),
+    )
+    _, evidence = xp.pool_verified_result(e.objects, e.jobs[-1], corrected)
+    assert (
+        evidence["task_pass"]
+        and evidence["complete_verified"]
+        and evidence["calls"] == 2
+    )
+
+
+def test_native_provider_usage_divergence_is_rejected(pool_fixture):
+    from lab_arena.collection_worker import _paid_reply
+    from lab_arena.collection_workflow import read_artifact
+
+    e = pool_fixture
+    raw = pool_raw(repeats=1)
+    good, _ = scripts_for(e, "P9")
+    spec = simulation(e, raw, [good])
+    job = e.jobs[0]
+    manifest, proof = xp.pool_verified_result(e.objects, job, spec)
+    row = read_artifact(
+        e.objects,
+        spec.batch_id,
+        job["job_id"],
+        "generator",
+        manifest["generator"],
+        128 << 20,
+    )
+    original = next(v for v in row["evidence"]["events"] if v["kind"] == "reply")
+    message = next(m for m in row["messages"] if m["role"] == "assistant")
+    with pytest.raises(ValueError, match="original generator receipt differs"):
+        _paid_reply(
+            e.objects,
+            job,
+            1,
+            dict(original, usage={"completion_tokens": 99999}),
+            message,
+        )

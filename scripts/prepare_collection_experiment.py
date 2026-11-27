@@ -65,6 +65,8 @@ def prepare_pool(args):
         "arms":[{"id":f"expert-{n}","role":"expert","model":m,"repeats":args.repeat,"max_steps":args.max_steps,
                  "max_tokens":args.max_generated_tokens,"max_run_tokens":args.max_run_tokens,"reasoning_effort":"low",
                  "capture_reasoning":True,"budget_microusd":args.cap_microusd} for n,m in enumerate(args.model,1)]}
+    if args.auto_correct_model:
+        raw["correction_model"] = args.auto_correct_model
     if bool(args.source_batch) != bool(args.source_job):
         raise ValueError("supply both the original funded batch and job")
     if args.source_batch:
@@ -157,6 +159,7 @@ def main(argv=None):
     pool.add_argument("--first-seed", type=int, required=True)
     pool.add_argument("--scenario-count", type=int, default=8)
     pool.add_argument("--model", action="append", choices=tuple(GENERATOR_ROUTES), required=True)
+    pool.add_argument("--auto-correct-model", choices=tuple(GENERATOR_ROUTES), help="Stage a same-state correction on this expert after an observed failure by another arm")
     pool.add_argument("--source-batch",type=Path,help="Original standing manifest for a real failed student")
     pool.add_argument("--source-job",help="Verified completed student job ID; changes the arm into a continuation")
     pool.add_argument("--environment-file",type=Path)

@@ -739,6 +739,63 @@ def evidence_stores():
     )
 
 
+def stage_failed_pool_continuation(spec, job, *, database, objects, directory, inputs, prompt):
+    """At most one outstanding continuation per ordinary program and one per scenario."""
+    import fcntl
+    from lab_arena.collection_experiment import load_experiment
+    from lab_arena.collection_pool_source import funded_source
+    from scripts.collection_review import read_file
+    from scripts.prepare_collection_experiment import store_private_json
+
+    corrector = spec.raw["correction_model"]
+    scenario = job["scenario_id"]
+    seed = scenario.split("-s")[1]
+    if job["batch_id"] != spec.batch_id or job["model"] == corrector:
+        raise ValueError("invalid student or independent correction model")
+    program = judge.digest({k:v for k,v in spec.raw.items() if k!="cases"})
+    # Serialize competing trusted workers' decisions on this existing directory.
+    # Source bytes and manifests are hash-addressed; no new queue or mutable job state.
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(fd,fcntl.LOCK_EX)
+        latest = None
+        for path in directory.glob("pool-*.json"):
+            raw = json.loads(read_file(path))
+            if raw.get("auto_from_program") != program:
+                continue
+            case = raw["cases"][0]["scenario_id"]
+            if case == scenario:
+                return None
+            other = int(case.split("-s")[1])
+            if latest is None or other > latest[0]:
+                latest = other,path.stem
+        if latest:
+            if latest[0] >= int(seed):
+                return None
+            previous = database.rpc("collection_batch_jobs_v1",{"p_batch":latest[1]})
+            if not any(j["status"] in {"accepted","rejected","failed"} for j in previous):
+                return None
+        source = funded_source(database,objects,spec.batch_id,job["job_id"],prompt)
+        if not source["rejected_fatal"]:
+            # Keep the observed repairable edit in its original trace; it is not an irreversible rejected action.
+            return None
+        source_hash = "sha256:" + judge.digest(source)
+        expert = next(a for a in spec.raw["arms"] if a["model"]==corrector)
+        raw = {k:v for k,v in spec.raw.items() if k not in ("successor_seeds","correction_model")}
+        raw.update(id="continue-"+program[:24],auto_from_program=program,max_slots=1,
+                   cases=[{"scenario_id":scenario,"source_sha256":source_hash}],
+                   arms=[dict(expert,id="correction",role="continuation",repeats=1)],
+                   routes={corrector:spec.routes[corrector]},budget_microusd=expert["budget_microusd"],
+                   question="Can the expert recover from the observed failing action at the same state?")
+        continuation=load_experiment(raw,prompt)
+        store_private_json(inputs/(source_hash[7:]+".json"),source)
+        store_private_json(directory/(continuation.batch_id+".json"),raw)
+        print(json.dumps({"batch":continuation.batch_id,"source_job":job["job_id"],"status":"correction_staged"}),flush=True)
+        return continuation.batch_id
+    finally:
+        os.close(fd)
+
+
 def poll_pool_experiments(prompt, directory, database, run):
     """Try a disjoint healthy program after a pre-lease refusal, never after an ambiguous claim."""
     from lab_arena.collection_experiment import load_experiment
@@ -763,7 +820,9 @@ def poll_pool_experiments(prompt, directory, database, run):
             continue
         # Old series members remain immutable for exports. Only the most recent
         # published seed range can receive additional assignments.
-        group = judge.digest({k: v for k, v in raw.items() if k != "cases"}) if raw.get("successor_seeds") else spec.batch_id
+        group = (raw.get("auto_from_program") or "") + "-correction" if raw.get("auto_from_program") else (
+            judge.digest({k: v for k, v in raw.items() if k != "cases"}) if raw.get("successor_seeds") else spec.batch_id
+        )
         seed = int(raw["cases"][0]["scenario_id"].split("-s")[1])
         if group not in active or seed > active[group][0]:
             active[group] = seed, spec
@@ -1189,6 +1248,9 @@ def _run_options(args, p, raw, *, before_claim=None):
                     owner_lookup=lambda hk: resolve_finalized_owner(client, hk), judge_key=judge_key,
                     max_jobs=args.max_jobs, epoch=lambda: chain.current_settlement_epoch(client, cutover),
                     before_claim=before_claim, prompt=prompt,
+                    on_pool_failure=(partial(stage_failed_pool_continuation, database=db, objects=objects,
+                                             directory=args.offer_directory, inputs=args.experiment_inputs, prompt=prompt)
+                                     if standing and args.offer_directory else None),
                 )
             else:
                 completed = run_cohort(

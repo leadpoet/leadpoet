@@ -46,15 +46,15 @@ MAX_USAGE_PAGE = 500
 CALL_TIMEOUT_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MIN_TAB_SECONDS = 60
-# The open subnet's name, as miners sign it.
-NETWORK_NAME = "the Gamma network"
+# The open subnet's name, as miners and buyers sign it.
+NETWORK_NAME = "Subnet 71"
 # What a miner signs, inside the register body, for every key they list.
-ATTESTATION = ("tool-market-attestation-v2: I hold the account this key belongs to, and its terms allow me to "
-               "supply capacity through " + NETWORK_NAME + ". I agree that the network may use this key to serve "
-               "other buyers' requests. I alone am responsible for my account's compliance and hold the "
-               "relationship with the provider, and I will revoke this key if that stops being true. The network, "
-               "its validators and its contributors make no claim about any provider's terms and are not liable "
-               "for any action a provider takes on my account.")
+ATTESTATION = ("tool-market-attestation-v3: I hold the account this key belongs to, and its terms allow me to "
+               "supply capacity through Bittensor " + NETWORK_NAME + ". I agree that " + NETWORK_NAME + " may use "
+               "this key to serve other buyers' requests. I alone am responsible for my account's compliance and "
+               "hold the relationship with the provider, and I will revoke this key if that stops being true. "
+               + NETWORK_NAME + ", its validators and its contributors make no claim about any provider's terms "
+               "and are not liable for any action a provider takes on my account.")
 
 
 class ToolMarketError(Exception):
@@ -237,8 +237,9 @@ class ToolMarket:
         asks = book.rank(book.Ask.from_row(row) for row in self._supply(tool))
         return {"tool": tool, "unit": catalog.TOOLS[tool],
                 "operations": sorted(name for (t, name) in catalog.OPERATIONS if t == tool),
-                "asks": [{"ask_microusd": a.ask_microusd, "buyer_pays_microusd": book.charge_microusd(a.ask_microusd)}
-                         for a in asks]}
+                "miner_sees_requests": catalog.MINER_SEES_REQUESTS[tool],
+                "asks": [{"ask_microusd": a.ask_microusd, "buyer_pays_microusd": book.charge_microusd(a.ask_microusd),
+                          "private": self._private(tool, a)} for a in asks]}
 
     def tool_catalog(self) -> Dict[str, Any]:
         """Every tool that trades: its operations and their parameters, its
@@ -250,6 +251,7 @@ class ToolMarket:
             best = listed["asks"][0] if listed["asks"] else None
             tools.append({
                 "tool": tool, "unit": listed["unit"], "max_ask_microusd": catalog.MAX_ASK[listed["unit"]],
+                "miner_sees_requests": listed["miner_sees_requests"],
                 "best_ask_microusd": best and best["ask_microusd"],
                 "buyer_pays_microusd": best and best["buyer_pays_microusd"],
                 "operations": [{"operation": op.name, "max_units": op.max_units,
@@ -261,8 +263,12 @@ class ToolMarket:
 
     # Calls ------------------------------------------------------------------
     def call(self, token: str, body: Mapping[str, Any]) -> Dict[str, Any]:
-        if not isinstance(body, Mapping) or set(body) - {"params", "max_ask_microusd"} != {"tool", "operation"}:
+        if not isinstance(body, Mapping) or set(body) - {"params", "max_ask_microusd", "private"} \
+                != {"tool", "operation"}:
             raise ToolMarketError(400, "request_invalid")
+        private = body.get("private", False)
+        if not isinstance(private, bool):
+            raise ToolMarketError(400, "private_invalid")
         # The most the buyer will let a key ask per unit; the book can move
         # between reading it and calling.
         max_ask = body.get("max_ask_microusd", book.MAX_ASK_MICROUSD)
@@ -285,7 +291,7 @@ class ToolMarket:
         for ask in book.rank(book.Ask.from_row(row) for row in self._supply(tool)):
             if tried >= MAX_KEYS_PER_CALL:
                 break
-            if ask.ask_microusd > max_ask:
+            if ask.ask_microusd > max_ask or (private and not self._private(tool, ask)):
                 continue
             if ask.needs_check:
                 checks += 1
@@ -402,6 +408,12 @@ class ToolMarket:
             confirmed = status == 401 or checked.get("balance") is None
         if confirmed:
             self._store.record_key_event(key_id=ask.key_id, status="failed", reason=failure)
+
+    def _private(self, tool: str, ask: book.Ask) -> bool:
+        """A key that may serve a private call: its miner signed a private-supply
+        agreement, or Leadpoet checked that the vendor shows owners no requests."""
+
+        return ask.miner_hotkey in self._config.private_suppliers or catalog.MINER_SEES_REQUESTS[tool] == "no"
 
     def _recheck_due(self, key_id: str) -> bool:
         """At most one failure re-check per key a minute, so repeated calls

@@ -21,6 +21,7 @@ from lab_arena.tool_market.catalog import TOOLS
 MODE_ENV = "LEADPOET_TOOL_MARKET_MODE"
 TOOLS_OFF_ENV = "LEADPOET_TOOL_MARKET_TOOLS_OFF"
 BUYERS_ENV = "LEADPOET_TOOL_MARKET_BUYER_HOTKEYS"
+PRIVATE_SUPPLIERS_ENV = "LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS"
 GAMMA_SERVICE_ENV = "LEADPOET_TOOL_MARKET_GAMMA_SERVICE"
 TERMS_VERSION_ENV = "LEADPOET_TOOL_MARKET_TERMS_VERSION"
 TERMS_SHA256_ENV = "LEADPOET_TOOL_MARKET_TERMS_SHA256"
@@ -40,7 +41,7 @@ MAX_KEY_DAILY_CAP_MICROUSD = 20_000_000  # $20
 # Each published terms version (docs/tool-market-terms.md) and the SHA-256 of
 # that file's exact bytes. Live mode trades only on one of these.
 PUBLISHED_TERMS: Mapping[str, str] = {
-    "tool-market-terms-v1": "0d216eb6f9c835b0bc74e7c365a304951b123e061175afd80fe821bfa9b2c619",
+    "tool-market-terms-v1": "1c76cd8317b7fc68be0655ff24fd36a31ae1745e6b0c8e4ca878d60a67457988",
 }
 
 
@@ -54,6 +55,9 @@ class ToolMarketConfig:
     tools: FrozenSet[str] = frozenset()
     # Empty: any hotkey may buy. Otherwise only these (a staff rollout).
     buyer_hotkeys: FrozenSet[str] = frozenset()
+    # Miners who signed a private-supply agreement: they do not read buyers'
+    # requests in their vendor accounts. Serves calls marked private.
+    private_suppliers: FrozenSet[str] = frozenset()
     gamma_service: str = ""
     gamma_pallet: str = DEFAULT_GAMMA_PALLET
     gamma_storage: str = DEFAULT_GAMMA_STORAGE
@@ -83,8 +87,9 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
     off = frozenset(t.strip() for t in env.get(TOOLS_OFF_ENV, "").split(",") if t.strip())
     tools = frozenset(TOOLS) - off
     buyers = frozenset(h.strip() for h in env.get(BUYERS_ENV, "").split(",") if h.strip())
+    private = frozenset(h.strip() for h in env.get(PRIVATE_SUPPLIERS_ENV, "").split(",") if h.strip())
     config = ToolMarketConfig(
-        mode=mode, tools=tools, buyer_hotkeys=buyers,
+        mode=mode, tools=tools, buyer_hotkeys=buyers, private_suppliers=private,
         gamma_service=env.get(GAMMA_SERVICE_ENV, "").strip(),
         terms_version=env.get(TERMS_VERSION_ENV, "").strip(),
         terms_sha256=env.get(TERMS_SHA256_ENV, "").strip().lower(),
@@ -92,8 +97,9 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
     )
     if not off <= set(TOOLS):
         raise ToolMarketConfigError("%s names a tool the catalog does not have" % TOOLS_OFF_ENV)
-    if not all(is_valid_hotkey(h) for h in buyers):
-        raise ToolMarketConfigError("%s has an invalid hotkey" % BUYERS_ENV)
+    for name, hotkeys in ((BUYERS_ENV, buyers), (PRIVATE_SUPPLIERS_ENV, private)):
+        if not all(is_valid_hotkey(h) for h in hotkeys):
+            raise ToolMarketConfigError("%s has an invalid hotkey" % name)
     if not is_valid_hotkey(config.gamma_service):
         raise ToolMarketConfigError("%s must be the tool market's Gamma service SS58 hotkey" % GAMMA_SERVICE_ENV)
     # One Gamma deposit must not fund two products.

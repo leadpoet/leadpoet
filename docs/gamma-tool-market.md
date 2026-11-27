@@ -1,8 +1,10 @@
-# Gamma tool market
+# Subnet 71 tool market
 
-The Gamma tool market sells metered access to go-to-market (GTM) data tools.
+The Subnet 71 tool market sells metered access to go-to-market (GTM) data tools.
 Miners supply the vendor keys and set a price per unit. Agents and buyers
-pay in Gamma and call one API. Each call goes to the cheapest healthy key.
+pay in Gamma and call one API. Gamma is Subnet 71's on-chain spending: what a
+buyer's hotkey spent to the market's Gamma service on netuid 71
+(`GammaSpent`). Each call goes to the cheapest healthy key.
 
 It is off by default. Every route answers 404 until
 `LEADPOET_TOOL_MARKET_MODE=live`. Once live, every catalog tool trades.
@@ -13,16 +15,15 @@ It is off by default. Every route answers 404 until
 
 A miner lists a key only by signing, with their hotkey, this exact
 statement inside the register request (`ATTESTATION` in
-`lab_arena/tool_market/market.py`; the network's name is `NETWORK_NAME`):
+`lab_arena/tool_market/market.py`; the subnet's name is `NETWORK_NAME`):
 
-> tool-market-attestation-v2: I hold the account this key belongs to, and
-> its terms allow me to supply capacity through the Gamma network. I agree
-> that the network may use this key to serve other buyers' requests. I alone
-> am responsible for my account's compliance and hold the relationship with
-> the provider, and I will revoke this key if that stops being true. The
-> network, its validators and its contributors make no claim about any
-> provider's terms and are not liable for any action a provider takes on my
-> account.
+> tool-market-attestation-v3: I hold the account this key belongs to, and
+> its terms allow me to supply capacity through Bittensor Subnet 71. I agree
+> that Subnet 71 may use this key to serve other buyers' requests. I alone am
+> responsible for my account's compliance and hold the relationship with the
+> provider, and I will revoke this key if that stops being true. Subnet 71,
+> its validators and its contributors make no claim about any provider's
+> terms and are not liable for any action a provider takes on my account.
 
 The signed request body, its signature, host and time are stored with the
 key, so anyone can verify the attestation later. The statement is
@@ -145,7 +146,25 @@ no key asking more serves it.
 
 `GET /tool-market/catalog` lists every tool that trades: its operations and
 their parameters, its price ceiling, and the cheapest ask with what a buyer
-pays for it. ## Usage history
+pays for it. ## Privacy
+
+A miner owns the vendor account behind their key, so whatever that vendor
+shows its account owner, the miner can see. The vault protects the key, not
+the request.
+
+- Each tool states `miner_sees_requests` in the catalog and its book: `yes`
+  when the vendor documents a request history, `unknown` when it does not
+  (treat it as yes), and `no` only after Leadpoet checks a vendor account
+  itself (`MINER_SEES_REQUESTS` in `catalog.py`).
+- Miners who sign a private-supply agreement, promising not to read buyers'
+  requests, are listed in `LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS`. Leadpoet
+  can be one of them.
+- A call with `"private": true` goes only to those miners' keys, or to a tool
+  marked `no`. The book marks which asks can serve one.
+- This lowers the risk; it does not remove it. The vendor still holds the
+  data.
+
+## Usage history
 
 `GET /tool-market/usage?after=<watermark>&limit=<1-500>`, signed by the
 buyer, lists the buyer's own finished calls, oldest first: tool, operation,
@@ -191,6 +210,7 @@ All tool-market data is in `scripts/770-tool-market.sql`.
 | `LEADPOET_TOOL_MARKET_MODE` | `off` (default) or `live` |
 | `LEADPOET_TOOL_MARKET_TOOLS_OFF` | comma-separated tools turned off; empty by default, so all trade |
 | `LEADPOET_TOOL_MARKET_BUYER_HOTKEYS` | optional allowlist of buyer hotkeys, for a staff rollout |
+| `LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS` | hotkeys of miners with a private-supply agreement; serve private calls |
 | `LEADPOET_TOOL_MARKET_GAMMA_SERVICE` | the tool market's Gamma service SS58 hotkey; must differ from lead orders' |
 | `LEADPOET_TOOL_MARKET_TERMS_VERSION`, `LEADPOET_TOOL_MARKET_TERMS_SHA256` | the terms both sides sign: `tool-market-terms-v1` and the SHA-256 of `docs/tool-market-terms.md`'s exact bytes (`PUBLISHED_TERMS` in `config.py`); live mode refuses any other pair |
 | `LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL` | the https host every signed request names |
@@ -240,7 +260,7 @@ deployment, exactly as lead orders do.
   `max_ask_microusd`; a delay on increases can follow.
 - **No MCP server yet.** Agents call the HTTP API with a tab token. An MCP
   server that lists the catalog's operations as tools is a separate package.
-- **The terms name no governing law.** The network has no legal entity
+- **The terms name no governing law.** Subnet 71 has no legal entity
   yet; add one when an entity exists.
 - **Lead orders still exist.** They stay as they are, and off. Retiring them
   is a separate decision.

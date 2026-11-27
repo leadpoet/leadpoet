@@ -8,6 +8,7 @@ miner accepted it, so tests never see each other's supply.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import random
 import uuid
@@ -167,8 +168,8 @@ def test_a_call_goes_to_the_cheapest_key_and_pays_its_ask_plus_ten_percent(world
     cheap, cheap_key = world.miner_key("cheap-key", 10_000)
     buyer, token = world.buyer(usd=1, budget=100_000)
     assert world.market.order_book("harvestapi")["asks"] == [
-        {"ask_microusd": 10_000, "buyer_pays_microusd": 11_000},
-        {"ask_microusd": 12_000, "buyer_pays_microusd": 13_200}]
+        {"ask_microusd": 10_000, "buyer_pays_microusd": 11_000, "private": False},
+        {"ask_microusd": 12_000, "buyer_pays_microusd": 13_200, "private": False}]
     result = world.market.call(token, PROFILE)
     assert result["status"] == 200 and result["charge_microusd"] == 11_000 and result["body"] == {"ok": True}
     secret, method, url, _ = world.vendor.sent[0]
@@ -292,6 +293,22 @@ def test_a_buyer_pages_their_own_finished_calls_by_watermark(world):
     for after, limit in ((-1, 10), (0, 0), (0, 501), ("1", 10)):
         with pytest.raises(ToolMarketError):
             world.market.usage(world.who(buyer), after, limit)
+
+
+def test_a_private_call_goes_only_to_a_private_supplier(world):
+    world.miner_key("open-key", 8_000)
+    trusted, _ = world.miner_key("trusted-key", 10_000)
+    world.market._config = dataclasses.replace(world.config, private_suppliers=frozenset({trusted}))
+    _, token = world.buyer()
+    listed = world.market.order_book("harvestapi")
+    assert listed["miner_sees_requests"] == "unknown" and [a["private"] for a in listed["asks"]] == [False, True]
+    world.market.call(token, dict(PROFILE, private=True))
+    assert [s[0] for s in world.vendor.sent] == ["trusted-key"]
+    world.market.call(token, PROFILE)  # not private: the cheapest key
+    assert world.vendor.sent[-1][0] == "open-key"
+    with pytest.raises(ToolMarketError) as bad:
+        world.market.call(token, dict(PROFILE, private="yes"))
+    assert bad.value.code == "private_invalid"
 
 
 def test_tabs_need_terms_balance_and_budget(world):

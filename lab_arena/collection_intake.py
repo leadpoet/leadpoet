@@ -72,6 +72,8 @@ VERIFIED_WORKFLOW_PAY = (
 )
 PAID_OFFER_ID = re.compile(r"dv-[0-9a-f]{64}")
 VERIFIED_PRICE_SCHEMA = "leadpoet.collection.verified_p7_prices.v1"
+VERIFIED_TASK_PRICE_SCHEMA = "leadpoet.collection.verified_task_prices.v1"
+PAID_TASK_FAMILIES = {"verified_p7_v1": "P", "verified_sales_evidence_v1": "P8"}
 
 SYNTHETIC_TRAINING_TERMS = (
     "I authorize Leadpoet to charge my dedicated OpenRouter key up to my signed rolling 24-hour limit "
@@ -200,10 +202,20 @@ def terms(mode, task_scope=TASK_SCOPE):
     }
 
 
-def comparison_offer(transport):
+def comparison_offer(transport, offer_id=None):
     """Expose only the public offer and its prices from the immutable schedule."""
     try:
-        schedule = transport.rpc("collection_reward_schedule_v1", {})
+        if offer_id is not None and (not isinstance(offer_id, str) or not PAID_OFFER_ID.fullmatch(offer_id)):
+            raise IntakeError("collection_offer_unknown", 404)
+        if offer_id is None:
+            schedule = transport.rpc("collection_reward_schedule_v1", {})
+            if (schedule.get("pilot_evidence", {}).get("schema") == VERIFIED_PRICE_SCHEMA
+                    and not schedule.get("staged")):
+                schedule = transport.rpc("collection_offer_schedule_v1", {"p_offer": None})
+        else:
+            schedule = transport.rpc("collection_offer_schedule_v1", {"p_offer": offer_id})
+            if schedule.get("pilot_evidence", {}).get("live_batch_id") != offer_id:
+                raise IntakeError("collection_offer_unknown", 404)
         if schedule == {}:
             return {"fixed_quotes": []}
         evidence = schedule["pilot_evidence"]
@@ -212,15 +224,22 @@ def comparison_offer(transport):
             raise ValueError("invalid price schedule")
         quotes = []
         offer = {"fixed_quotes": quotes}
-        if evidence.get("schema") == VERIFIED_PRICE_SCHEMA:
+        if evidence.get("schema") in (VERIFIED_PRICE_SCHEMA, VERIFIED_TASK_PRICE_SCHEMA):
+            family = PAID_TASK_FAMILIES[evidence["payment_rule"]] if evidence.get("schema") == VERIFIED_TASK_PRICE_SCHEMA else "P"
             offer_id = evidence["live_batch_id"]
             if (not isinstance(offer_id, str) or not PAID_OFFER_ID.fullmatch(offer_id)
-                    or set(prices) != {"P"} or set(budgets) != {"P"}
-                    or not prices["P"] or set(prices["P"]) != set(budgets["P"])
-                    or not set(prices["P"]).issubset(MODELS)):
+                    or set(prices) != {family} or set(budgets) != {family}
+                    or not prices[family] or set(prices[family]) != set(budgets[family])
+                    or not set(prices[family]).issubset(MODELS)):
                 raise ValueError("invalid priced workflow offer")
             offer.update(offer_id=offer_id, terms=PAID_WORKFLOW_TERMS, terms_sha256=PAID_WORKFLOW_TERMS_HASH)
-        for family in ("B", "C", "E", "K", "P"):
+            if evidence.get("schema") == VERIFIED_TASK_PRICE_SCHEMA:
+                offer["reference_runs"] = evidence["job_count"]
+                if "historical_realization" in evidence:
+                    offer["historical_realization"] = evidence["historical_realization"]
+            if schedule.get("available_offers"):
+                offer["available_offers"] = schedule["available_offers"]
+        for family in ("B", "C", "E", "K", "P", "P8"):
             if family not in prices:
                 continue
             for model in MODELS:
@@ -233,6 +252,8 @@ def comparison_offer(transport):
                     "cap_microusd": _micros(budgets[family][model], 1),
                 })
         return offer
+    except IntakeError:
+        raise
     except (KeyError, TypeError, ValueError, store.ArenaStoreError) as exc:
         raise IntakeError("collection_comparison_prices_unavailable", 503) from exc
 
@@ -342,7 +363,7 @@ class CollectionIntake:
         if published is None:
             published = terms(self.mode, body["task_scope"])
             if self.mode == "live" and body["task_scope"] == TASK_SCOPE and "offer_id" in body:
-                published.update(comparison_offer(self.transport))
+                published.update(comparison_offer(self.transport, body["offer_id"]))
         if (
             body["terms_sha256"] != published["terms_sha256"]
             or body.get("offer_id") != published.get("offer_id")
@@ -433,11 +454,11 @@ class CollectionIntake:
             or len(set(scenario_ids)) != len(scenario_ids)
         ):
             raise IntakeError("collection_scenarios_invalid")
-        if not all(SYNTHETIC_SCENARIO.fullmatch(s) for s in scenario_ids):
+        if not all(SYNTHETIC_SCENARIO.fullmatch(s) or (paid_offer and re.fullmatch(r"P8-s[1-9][0-9]{0,7}", s)) for s in scenario_ids):
             raise IntakeError("collection_synthetic_scope_required")
         roster = MODELS
         if paid_offer:
-            if not all(s.startswith("P7-") for s in scenario_ids):
+            if len({s.split("-", 1)[0] for s in scenario_ids}) != 1 or not scenario_ids[0].startswith(("P7-", "P8-")):
                 raise IntakeError("collection_scenarios_invalid")
             if not isinstance(prices_microusd, Mapping) or not prices_microusd:
                 raise IntakeError("collection_price_coverage_invalid")
@@ -549,9 +570,8 @@ def _validate_quality(summary):
         "payment_rule",
     }:
         raise IntakeError("collection_quality_invalid")
-    if "payment_rule" in summary and summary != {
-        "payment_rule": "verified_p7_v1", "training_status": "needs_review"
-    }:
+    if "payment_rule" in summary and (summary.get("payment_rule") not in PAID_TASK_FAMILIES or
+           set(summary) != {"payment_rule", "training_status"} or summary["training_status"] != "needs_review"):
         raise IntakeError("collection_quality_invalid")
     if "training_status" in summary and summary["training_status"] not in {
         "code_rejected",

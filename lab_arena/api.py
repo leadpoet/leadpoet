@@ -382,8 +382,9 @@ def create_app(service: ArenaService) -> FastAPI:
     # -- miner --------------------------------------------------------------
 
     @app.get("/arena/v1/collection/terms")
-    async def collection_terms(task_scope: str = "synthetic_workflows") -> Any:
-        return await no_store_public_call(service.collection_terms, task_scope)
+    async def collection_terms(task_scope: str = "synthetic_workflows", offer_id: Optional[str] = None) -> Any:
+        args = (task_scope, offer_id) if offer_id is not None else (task_scope,)
+        return await no_store_public_call(service.collection_terms, *args)
 
     @app.post("/arena/v1/collection/{operation}")
     async def collection_request(operation: str, request: Request) -> Any:

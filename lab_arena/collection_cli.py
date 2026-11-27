@@ -62,6 +62,8 @@ def add_commands(commands, common_options):
         )
         if action in ("terms", "register"):
             parser.add_argument("--task-scope", choices=(TASK_SCOPE, CORRECTION_SCOPE), default=TASK_SCOPE)
+        if action == "terms":
+            parser.add_argument("--offer", help="Read prices for a specific published offer")
         if action == "register":
             parser.add_argument(
                 "--max-slots-per-day", type=int, choices=range(1, MAX_DAILY_SLOTS + 1),
@@ -103,11 +105,20 @@ def _review_paid_offer(published, args, cap):
         raise MinerSubmissionError("collection_comparison_prices_unavailable")
     print("Validator reward targets and maximum OpenRouter spend per assignment (USD)", file=sys.stderr)
     print("Network votes and token prices determine the actual payout.", file=sys.stderr)
+    history = published.get("historical_realization")
+    if isinstance(history, dict):
+        quoted = history.get("quoted_microusd")
+        received = history.get("received_microusd_at_signed_price")
+        if type(quoted) is int and quoted > 0 and type(received) is int and received >= 0:
+            ratio = Decimal(received) / Decimal(quoted)
+            print(f"At quote epoch {history['quote_epoch']}, miners received {100*ratio:.1f}% of targets "
+                  "at the signed token price. At that rate and the measured average cost, "
+                  f"the estimated margin would be {100*(Decimal('1.25')*ratio-1):.1f}%.", file=sys.stderr)
     seen = set()
     for quote in quotes:
         model = quote["model"]
         fee, budget = quote["quote_microusd"], quote["cap_microusd"]
-        if (model not in MODELS or model in seen or quote["task_class"] != "P"
+        if (model not in MODELS or model in seen or quote["task_class"] not in {"P", "P8"}
                 or any(type(v) is not int or not 0 < v <= MAX_MICROUSD for v in (fee, budget))):
             raise MinerSubmissionError("collection_comparison_prices_unavailable")
         print(f"{model}  target ${Decimal(fee).scaleb(-6):f}  spend cap ${Decimal(budget).scaleb(-6):f}", file=sys.stderr)
@@ -130,6 +141,11 @@ def run(args, wallet, *, session=requests):
         offer_id = None
         if action in ("terms", "register"):
             url = base + "terms" + ("?task_scope=" + CORRECTION_SCOPE if task_scope == CORRECTION_SCOPE else "")
+            selected = getattr(args, "offer", None) if action == "terms" else getattr(args, "accept_offer", None)
+            if selected:
+                if task_scope != TASK_SCOPE or not PAID_OFFER_ID.fullmatch(selected):
+                    raise MinerSubmissionError("collection_offer_changed")
+                url += "?offer_id=" + selected
             response = session.get(url, timeout=30, allow_redirects=False)
             if action == "register":
                 if response.status_code != 200:

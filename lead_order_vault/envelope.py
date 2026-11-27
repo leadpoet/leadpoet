@@ -32,8 +32,12 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 PREFIX = "lov1."
-PROVIDERS = ("openrouter", "deepline")
-HOSTS = {"openrouter.ai": "openrouter", "code.deepline.com": "deepline"}
+# Lead orders use OpenRouter and Deepline. The tool market
+# (docs/gamma-tool-market.md) adds the GTM tools after them.
+PROVIDERS = ("openrouter", "deepline", "scrapecreators", "dataforseo", "exa", "harvestapi")
+HOSTS = {"openrouter.ai": "openrouter", "code.deepline.com": "deepline",
+         "api.scrapecreators.com": "scrapecreators", "api.dataforseo.com": "dataforseo",
+         "api.exa.ai": "exa", "api.harvestapi.io": "harvestapi"}
 ENCRYPTION_DOMAIN = "leadpoet/lead-order-vault/encryption/v1"
 RECEIPTS_DOMAIN = "leadpoet/lead-order-vault/receipts/v1"
 KEY_ALGORITHM = "secp256k1"

@@ -440,6 +440,112 @@ def test_check_deepline_reads_the_balance():
     assert result["status"] == "valid" and provider.requests[0]["target"] == "/api/v2/billing/balance"
 
 
+# -- tool market tools ---------------------------------------------------------------
+
+DATAFORSEO_KEY = "login@example.com:" + "p" * 16
+TOOL_CALLS = {
+    "scrapecreators": ("GET", "https://api.scrapecreators.com/v1/linkedin/profile?url=https%3A%2F%2Flinkedin.com%2Fin%2Fa",
+                       "x-api-key", "sc_" + "d" * 30),
+    "dataforseo": ("POST", "https://api.dataforseo.com/v3/serp/google/organic/live/advanced", "authorization",
+                   DATAFORSEO_KEY),
+    "exa": ("POST", "https://api.exa.ai/search", "x-api-key", "exa_" + "e" * 30),
+    "harvestapi": ("GET", "https://api.harvestapi.io/linkedin/profile?query=a", "x-api-key", "hv_" + "f" * 30),
+}
+
+
+def _tool_call(tool, **extra):
+    method, url, _, key = TOOL_CALLS[tool]
+    request = _call(url=url, sealed=_seal(key, provider=tool), method=method)
+    if method == "GET":
+        request.pop("body_b64")
+    request.update(extra)
+    return request
+
+
+@pytest.mark.parametrize("tool", sorted(TOOL_CALLS))
+def test_each_tool_gets_its_key_where_it_expects_it(tool):
+    _, _, header, key = TOOL_CALLS[tool]
+    provider = FakeProvider()
+    result = _vault(provider).call(_tool_call(tool))
+    sent = provider.requests[0]["headers"]
+    expected = "Basic " + base64.b64encode(key.encode()).decode() if tool == "dataforseo" else key
+    assert sent[header] == expected and set(sent) == {header, "content-type"}
+    receipt = _check_receipt(result["receipt"])
+    assert receipt["provider"] == tool and receipt["key_fingerprint"] == env.fingerprint(tool, key)
+    assert key not in json.dumps(result) and expected not in json.dumps(result)
+
+
+@pytest.mark.parametrize("tool,method,url", [
+    ("scrapecreators", "GET", "https://api.scrapecreators.com/v1/account/credit-balance"),
+    ("scrapecreators", "GET", "https://api.scrapecreators.com/v1/account/get-api-usage"),
+    ("scrapecreators", "POST", "https://api.scrapecreators.com/v1/linkedin/profile"),
+    ("scrapecreators", "GET", "https://api.scrapecreators.com/v1/linkedin/profile?url=a&url=b#x"),
+    ("dataforseo", "GET", "https://api.dataforseo.com/v3/appendix/user_data"),
+    ("dataforseo", "POST", "https://api.dataforseo.com/v3/serp/google/organic/task_post"),
+    ("dataforseo", "POST", "https://api.dataforseo.com/v3/serp/google/organic/live/advanced?x=1"),
+    ("exa", "POST", "https://api.exa.ai/websets/v0/websets"),
+    ("exa", "GET", "https://api.exa.ai/search"),
+    ("harvestapi", "GET", "https://api.harvestapi.io/users/my-api-user"),
+    ("harvestapi", "GET", "https://api.harvestapi.io/linkedin/profile?query=a b"),
+    ("harvestapi", "POST", "https://api.harvestapi.io/linkedin/profile"),
+])
+def test_a_tool_key_reaches_only_data_endpoints(tool, method, url):
+    upstream = FakeProvider()
+    request = _tool_call(tool, url=url, method=method)
+    if method == "GET":
+        request.pop("body_b64", None)
+    with pytest.raises(VaultError, match="path_not_allowed|host_not_allowed|url_invalid"):
+        _vault(upstream).call(request)
+    assert upstream.requests == []
+
+
+def test_a_caller_cannot_set_the_header_the_key_goes_in():
+    provider = FakeProvider()
+    _vault(provider).call(_tool_call("exa", headers={"authorization": "Bearer " + _seal(TOOL_CALLS["exa"][3], provider="exa"),
+                                                     "x-api-key": "someone-elses"}))
+    assert provider.requests[0]["headers"]["x-api-key"] == TOOL_CALLS["exa"][3]
+
+
+def test_an_echo_of_the_encoded_basic_credential_is_withheld():
+    encoded = base64.b64encode(DATAFORSEO_KEY.encode()).decode()
+    echo = UpstreamResponse(200, [], json.dumps({"auth": encoded}).encode())
+    result = _vault(FakeProvider({"/v3/serp/google/organic/live/advanced": echo})).call(_tool_call("dataforseo"))
+    assert result["status"] == 502 and encoded not in json.dumps(result)
+
+
+def _balance(target, status, document):
+    return FakeProvider({target: UpstreamResponse(status, [], json.dumps(document).encode())})
+
+
+@pytest.mark.parametrize("tool,provider,expected", [
+    ("scrapecreators", lambda: _balance("/v1/account/credit-balance", 200, {"creditCount": 2500}),
+     {"status": "valid", "balance": 2500}),
+    ("scrapecreators", lambda: _balance("/v1/account/credit-balance", 200, {"creditCount": 0}),
+     {"status": "invalid", "reason": "scrapecreators_api_key_no_credit"}),
+    ("scrapecreators", lambda: _balance("/v1/account/credit-balance", 401, {}),
+     {"status": "invalid", "reason": "scrapecreators_api_key_invalid"}),
+    ("scrapecreators", lambda: _balance("/v1/account/credit-balance", 402, {}),
+     {"status": "invalid", "reason": "scrapecreators_api_key_no_credit"}),
+    ("dataforseo", lambda: _balance("/v3/appendix/user_data", 200,
+                                    {"tasks": [{"result": [{"money": {"balance": 12.5}}]}]}),
+     {"status": "valid", "balance": 12.5}),
+    ("exa", FakeProvider, {"status": "unchecked"}),
+    ("harvestapi", FakeProvider, {"status": "unchecked"}),
+])
+def test_check_reads_a_tool_balance_where_it_has_a_free_one(tool, provider, expected):
+    upstream = provider()
+    key = TOOL_CALLS[tool][3]
+    result = _vault(upstream).check({"provider": tool, "envelope": _seal(key, provider=tool)})
+    assert {k: result[k] for k in expected} == expected and result["key_fingerprint"] == env.fingerprint(tool, key)
+    if expected["status"] == "unchecked":
+        assert upstream.requests == []  # no free check: nothing is spent to check it
+
+
+def test_every_tool_has_a_rule():
+    from lead_order_vault.vault import TOOLS
+    assert set(TOOLS) == set(env.PROVIDERS) == set(env.HOSTS.values())
+
+
 def test_identity_reveals_no_key():
     vault = _vault()
     vault.call(_call())

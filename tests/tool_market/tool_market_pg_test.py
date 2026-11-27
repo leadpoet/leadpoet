@@ -44,9 +44,12 @@ def hotkey() -> str:
     return "5" + "".join(random.choice(B58) for _ in range(47))
 
 
+HARVEST_PROFILE = {"status": 200, "element": {"id": "profile-id"}}
+
+
 def ok(document=None, status=200, headers=None):
     return ProviderResponse(status, headers or {"content-type": "application/json"},
-                            json.dumps(document if document is not None else {"ok": True}).encode())
+                            json.dumps(document if document is not None else HARVEST_PROFILE).encode())
 
 
 @pytest.fixture(scope="module")
@@ -189,10 +192,10 @@ def test_a_call_goes_to_the_cheapest_key_and_pays_its_ask_plus_ten_percent(world
         {"ask_microusd": 10_000, "buyer_pays_microusd": 11_000, "private": False},
         {"ask_microusd": 12_000, "buyer_pays_microusd": 13_200, "private": False}]
     result = world.market.call(token, PROFILE)
-    assert result["status"] == 200 and result["charge_microusd"] == 11_000 and result["body"] == {"ok": True}
+    assert result["status"] == 200 and result["charge_microusd"] == 11_000 and result["body"] == HARVEST_PROFILE
     secret, method, url, _ = world.vendor.sent[0]
     assert secret == "cheap-key" and method == "GET"
-    assert url == "https://api.harvestapi.io/linkedin/profile?url=https%3A%2F%2Fwww.linkedin.com%2Fin%2Fsomeone"
+    assert url == "https://api.harvestapi.io/linkedin/profile?query=https%3A%2F%2Fwww.linkedin.com%2Fin%2Fsomeone"
     assert world.market.tab(token)["committed_microusd"] == 11_000
     earned = world.market.statement(cheap)["keys"][0]
     assert earned["key_id"] == cheap_key and earned["owed_microusd"] == 10_000 and earned["calls"] == 1
@@ -352,7 +355,7 @@ def test_a_buyer_pages_their_own_finished_calls_by_watermark(world, admin):
     world.miner_key("usage-key", 10_000)
     buyer, token = world.buyer()
     other, other_token = world.buyer()
-    world.vendor.script["usage-key"] = [ok({"id": "p"})]
+    world.vendor.script["usage-key"] = [ok(HARVEST_PROFILE)]
     for _ in range(3):
         world.market.call(token, PROFILE)
     world.market.call(other_token, PROFILE)

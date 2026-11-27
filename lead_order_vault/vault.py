@@ -40,6 +40,7 @@ import hashlib
 import hmac
 import http.client
 import json
+import math
 import os
 import re
 import signal
@@ -216,6 +217,9 @@ def https_upstream(method: str, host: str, target: str, headers: Mapping[str, st
             if size > max_bytes:
                 raise UpstreamError("response_too_large", status, seen)
             chunks.append(chunk)
+        # read1() reports EOF without raising when Content-Length is unmet.
+        if response.length not in (None, 0):
+            raise UpstreamError("upstream_incomplete", status, seen)
         return UpstreamResponse(status, seen, b"".join(chunks))
     except UpstreamError:
         raise
@@ -285,6 +289,8 @@ class Vault:
                     return dict(result, status="unchecked")
                 balance = _field(self._probe(tool, tool.balance_url, runtime, provider + "_api_key"),
                                  tool.balance_field)
+                if tool.balance_field and balance is None:
+                    raise VaultError("check_unavailable", 503)
                 if balance is not None:
                     if balance < 0:  # ZeroBounce's answer for a key it does not know
                         raise _Invalid(provider + "_api_key_invalid")
@@ -328,6 +334,12 @@ class Vault:
                    "request_sha256": hashlib.sha256(body).hexdigest()}
         try:
             response = self._upstream(method, parts.hostname, keyed_target, outbound, body, timeout, max_bytes)
+            # The vault requests identity encoding. Opaque coded bytes cannot
+            # undergo the normal key-echo inspection or safely be returned.
+            if any(k.lower() == "content-encoding" and v.strip().lower() not in ("", "identity")
+                   for k, v in response.headers):
+                raise UpstreamError("response_encoding_unsupported", response.status,
+                                    [(k, v) for k, v in response.headers if k.lower() in REQUEST_ID_HEADERS])
         except Exception as caught:  # the call is counted, so every failure must get a receipt
             error = caught if isinstance(caught, UpstreamError) else UpstreamError("upstream_unavailable")
             receipt.update(outcome="transport_error", response_status=error.observed_status, response_sha256=None)
@@ -385,7 +397,15 @@ class Vault:
             raise VaultError("check_unavailable", 503) from None
         if response.status in tool.invalid_statuses:
             raise _Invalid(key_name + "_invalid")
-        if response.status == 402:
+        if tool == TOOLS["prospeo"] and response.status == 400:
+            # Their account probe uses 400 for both an invalid key and internal failures.
+            try:
+                error = json.loads(response.body)
+            except (ValueError, RecursionError):
+                error = None
+            if isinstance(error, dict) and error.get("error_code") == "INVALID_API_KEY":
+                raise _Invalid(key_name + "_invalid")
+        if response.status == 402 or (tool == TOOLS["hunter"] and response.status == 429):
             raise _Invalid(key_name + "_no_credit")
         if response.status != 200:
             raise VaultError("check_unavailable", 503)
@@ -427,7 +447,7 @@ def _field(document, path: Tuple):
         value = value.get(step) if isinstance(value, Mapping) else None
     if isinstance(value, str) and _NUMBER.fullmatch(value):  # ZeroBounce sends its credits as text
         value = float(value)
-    if path and type(value) in (int, float) and value == value:
+    if path and (type(value) is int or (type(value) is float and math.isfinite(value))):
         return value
     return None
 

@@ -58,6 +58,7 @@ class Param:
     low: int = 1
     high: int = 1
     choices: Tuple[str, ...] = ()
+    vendor_name: Optional[str] = None
 
     def _text(self, value: Any) -> bool:
         # JSON allows a lone surrogate, which no request can encode.
@@ -145,7 +146,8 @@ class Operation:
         for name, param in self.params.items():
             if param.required and name not in params:
                 raise CatalogError("param_missing")
-        values = {name: self.params[name].read(value) for name, value in params.items()}
+        values = {self.params[name].vendor_name or name: self.params[name].read(value)
+                  for name, value in params.items()}
         headers = {"accept": "application/json"}
         if self.method == "GET":
             if any(len(quote_plus(str(v))) > MAX_ENCODED_QUERY_VALUE for v in values.values()):
@@ -194,7 +196,9 @@ def _zerobounce_status(status: int, document: Any) -> int:
 
 def _zerobounce_cost(document: Any) -> Optional[int]:
     result = _get(document, "status")
-    return None if not isinstance(result, str) else 0 if result == "unknown" else 1
+    if result == "unknown":
+        return 0
+    return 1 if result in ("valid", "invalid", "catch-all", "spamtrap", "abuse", "do_not_mail") else None
 
 
 def _findymail_status(status: int, _: Any) -> int:
@@ -232,6 +236,16 @@ _PROSPEO_FIELDS = ("first_name", "last_name", "full_name", "linkedin_url", "emai
                    "company_website", "company_linkedin_url", "person_id")
 _NAME = Param("str", max_length=200)
 _URL = Param("str", required=True, max_length=300)
+# Harvest names the vendor query parameter "query"; keep the buyer-facing "url".
+_HARVEST_URL = Param("str", required=True, max_length=300, vendor_name="query")
+
+
+def _harvest_cost(document: Any) -> Optional[int]:
+    element = _get(document, "element")
+    if _get(document, "error") or not isinstance(element, dict) or not element:
+        return None
+    return 1 if _get(document, "status") in (200, "200") else None
+
 _ZB = "https://api.zerobounce.net"
 _HARVEST = "https://api.harvestapi.io"
 _EXA = "https://api.exa.ai"
@@ -281,9 +295,9 @@ _OPERATIONS: Sequence[Operation] = (
     # HarvestAPI: per-request credits. Its prices are not published per
     # endpoint, so launch keeps the two profile reads only.
     Operation("harvestapi", "linkedin_profile", "GET", _HARVEST + "/linkedin/profile", UNIT_CALL, 1,
-              {"url": _URL}, does="Read a LinkedIn profile: name, headline, current jobs."),
+              {"url": _HARVEST_URL}, cost=_harvest_cost, does="Read a LinkedIn profile: name, headline, current jobs."),
     Operation("harvestapi", "linkedin_company", "GET", _HARVEST + "/linkedin/company", UNIT_CALL, 1,
-              {"url": _URL}, does="Read a LinkedIn company page."),
+              {"url": _HARVEST_URL}, cost=_harvest_cost, does="Read a LinkedIn company page."),
 )
 
 OPERATIONS: Dict[Tuple[str, str], Operation] = {(op.tool, op.name): op for op in _OPERATIONS}

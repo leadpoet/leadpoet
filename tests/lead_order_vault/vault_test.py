@@ -378,6 +378,14 @@ def test_only_allowed_headers_reach_the_provider():
         _vault(provider).call(request)
 
 
+def test_a_coded_provider_body_is_withheld_when_it_cannot_be_inspected():
+    response = UpstreamResponse(200, [("Content-Encoding", "gzip")], b"opaque provider bytes")
+    result = _vault(FakeProvider({"/api/v1/chat/completions": response})).call(_call())
+    assert "body_b64" not in result
+    assert result["transport_error"] == "response_encoding_unsupported"
+    assert _check_receipt(result["receipt"])["response_status"] == 200
+
+
 @pytest.mark.parametrize("headers,body", [
     ([], b'{"your_key":"' + OPENROUTER_KEY.encode() + b'"}'),
     ([], b'{"k":"' + "".join("\\u%04x" % ord(c) for c in OPENROUTER_KEY).encode() + b'"}'),
@@ -571,6 +579,12 @@ ZB_CREDITS = "/v2/getcredits?api_key=" + ZEROBOUNCE_KEY
     # Prospeo answers 400 to a key it does not know.
     ("prospeo", lambda: _balance("/account-information", 400, {"error": True, "error_code": "INVALID_API_KEY"}),
      {"status": "invalid", "reason": "prospeo_api_key_invalid"}),
+    ("prospeo", lambda: _balance("/account-information", 400, {"error": True, "error_code": "INTERNAL_ERROR"}), None),
+    ("hunter", lambda: _balance("/v2/account", 403, {}), None),
+    ("hunter", lambda: _balance("/v2/account", 429, {}),
+     {"status": "invalid", "reason": "hunter_api_key_no_credit"}),
+    ("zerobounce", lambda: _balance(ZB_CREDITS, 200, {"error": "unavailable"}), None),
+    ("findymail", lambda: _balance("/api/credits", 200, {"credits": True}), None),
     ("findymail", lambda: _balance("/api/credits", 200, {"credits": 40}), {"status": "valid", "balance": 40}),
     ("findymail", lambda: _balance("/api/credits", 401, {}), {"status": "invalid", "reason": "findymail_api_key_invalid"}),
     ("findymail", lambda: _balance("/api/credits", 402, {}),
@@ -813,6 +827,9 @@ def test_the_real_upstream_bounds_total_time_and_size():
     def oversize(connection):
         connection.sendall(b"HTTP/1.1 200 OK\r\ncontent-length: 2048\r\n\r\n" + b"x" * 2048)
 
+    def short_body(connection):
+        connection.sendall(b"HTTP/1.1 200 OK\r\ncontent-length: 20\r\n\r\n{}")
+
     def whole(connection):
         connection.sendall(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
 
@@ -824,7 +841,7 @@ def test_the_real_upstream_bounds_total_time_and_size():
     client_context.check_hostname, client_context.verify_mode = False, ssl.CERT_NONE
     try:
         for answer, error in ((trickle, "upstream_timeout"), (oversize, "response_too_large"),
-                              (whole, b"ok"), (closing, b"no")):
+                              (short_body, "upstream_incomplete"), (whole, b"ok"), (closing, b"no")):
             thread = threading.Thread(target=serve, args=(answer,), daemon=True)
             thread.start()
             started = time.monotonic()

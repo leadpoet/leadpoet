@@ -66,7 +66,7 @@ class Tool:
     query_param: Optional[str] = None
     balance_url: Optional[str] = None
     balance_field: Tuple = ()
-    # Check answers that mean a bad key. Prospeo answers 400 to one.
+    # HTTP refusal codes that unambiguously reject this credential.
     invalid_statuses: Tuple[int, ...] = (401, 403, 404)
 
     def place(self, secret: str, headers: Mapping[str, str], target: str) -> Tuple[dict, str]:
@@ -97,14 +97,14 @@ TOOLS: Mapping[str, Tool] = {
                        balance_url="https://api.zerobounce.net/v2/getcredits", balance_field=("Credits",)),
     "prospeo": Tool("api.prospeo.io", shape("POST", r"/enrich-person", query=False), "x-key",
                     balance_url="https://api.prospeo.io/account-information",
-                    balance_field=("response", "remaining_credits"), invalid_statuses=(400, 401, 403, 404)),
+                    balance_field=("response", "remaining_credits"), invalid_statuses=(401, 403, 404)),
     "findymail": Tool("app.findymail.com", shape("POST", r"/api/search/(?:business-profile|name)", query=False),
                       "authorization", "Bearer ", balance_url="https://app.findymail.com/api/credits",
                       balance_field=("credits",)),
     "hunter": Tool("api.hunter.io", shape("GET", r"/v2/email-finder", query=True), "x-api-key",
                    # Its account answer gives a plan's searches, not what is left, so
                    # the check proves the key only.
-                   balance_url="https://api.hunter.io/v2/account"),
+                   balance_url="https://api.hunter.io/v2/account", invalid_statuses=(401,)),
     "harvestapi": Tool("api.harvestapi.io", shape("GET", r"/linkedin/(?:profile|company)", query=True), "x-api-key"),
     "exa": Tool("api.exa.ai", shape("POST", r"/(?:search|contents)", query=False), "x-api-key"),
 }

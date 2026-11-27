@@ -360,6 +360,8 @@ def test_zerobounce_charges_a_check_but_not_an_unknown_and_a_dead_key_fails_over
     _, token = world.buyer()
     # A dead key and an empty account both answer 200 with only an error.
     world.vendor.script["zb-dead"] = [ok({"error": "Invalid API Key or your account ran out of credits"})]
+    # The answer alone fails no key: the vault's free check confirms it.
+    world.vault.answers["zb-dead"] = {"status": "invalid", "reason": "no_credit"}
     world.vendor.script["zb-live"] = [ok({"address": "ada@acme.com", "status": "valid", "sub_status": ""}),
                                       ok({"address": "ada@acme.com", "status": "unknown", "sub_status": "timeout_exceeded"})]
     assert world.market.call(token, VALIDATE)["charge_microusd"] == 5_500
@@ -378,6 +380,7 @@ def test_hunter_rate_limits_skip_a_key_and_an_empty_account_fails_it(world):
     _, token = world.buyer()
     world.vendor.script["hunter-slow"] = [ok({"errors": [{"id": "too_many_requests"}]}, status=403)]
     world.vendor.script["hunter-empty"] = [ok({"errors": [{"id": "too_many_requests"}]}, status=429)]
+    world.vault.answers["hunter-empty"] = {"status": "invalid", "reason": "no_credit"}
     world.vendor.script["hunter-ok"] = [ok({"data": {"email": "ada@acme.com", "score": 97}}),
                                         ok({"data": {"email": None, "score": None}})]
     assert world.market.call(token, FIND)["charge_microusd"] == 11_000
@@ -387,6 +390,65 @@ def test_hunter_rate_limits_skip_a_key_and_an_empty_account_fails_it(world):
     assert world.market.statement(empty)["keys"][0]["health"]["reason"] == "no_credit"
     world.vendor.script["hunter-slow"] = [ok({"data": {"email": None}})]
     assert world.market.call(token, FIND)["charge_microusd"] == 0  # no email found: free
+
+
+def test_a_buyer_cannot_take_working_keys_out_of_the_book(world):
+    world.miner_key("zb-a", 4_000, tool="zerobounce")
+    world.miner_key("exa-a", 900_000, tool="exa")
+    _, token = world.buyer()
+    # A 403 the request caused: the vault's check says the key still works.
+    world.vendor.script["zb-a"] = [ok({}, status=403)]
+    with pytest.raises(ToolMarketError):
+        world.market.call(token, VALIDATE)
+    assert len(world.market.order_book("zerobounce")["asks"]) == 1
+    # Exa has no free check, so its 403 only skips the key for this call.
+    world.vendor.script["exa-a"] = [ok({}, status=403)]
+    with pytest.raises(ToolMarketError):
+        world.market.call(token, SEARCH)
+    assert len(world.market.order_book("exa")["asks"]) == 1
+    # A 401 only the key's account can cause still fails it.
+    world.vendor.script["exa-a"] = [ok({}, status=401)]
+    with pytest.raises(ToolMarketError):
+        world.market.call(token, SEARCH)
+    assert world.market.order_book("exa")["asks"] == []
+
+
+def test_a_miners_tab_never_buys_from_their_own_key(world):
+    miner, _ = world.miner_key("own-key", 10_000)
+    world.gamma.units[miner] = 10**9
+    world.accept(miner, "buyer")
+    token = world.market.open_tab(world.who(miner), {"budget_microusd": 100_000, "seconds": 600})["token"]
+    with pytest.raises(ToolMarketError) as own:
+        world.market.call(token, PROFILE)
+    assert own.value.code == "no_supply" and world.vendor.sent == []
+
+
+def test_a_hotkey_registers_one_key_per_tool_every_30_days(world):
+    miner, key_id = world.miner_key("first-key", 10_000)
+    world.market.revoke_key(world.who(miner), key_id)
+    with pytest.raises(ToolMarketError) as soon:
+        world.register(miner, {"tool": "harvestapi", "daily_cap_microusd": USD,
+                               "envelope": world.vault.seal("harvestapi", miner, "second-key")})
+    assert soon.value.status == 429 and soon.value.code == "key_registration_too_soon"
+    # Another tool is its own 30 days.
+    world.register(miner, {"tool": "exa", "daily_cap_microusd": USD,
+                           "envelope": world.vault.seal("exa", miner, "exa-thirty-day-key")})
+
+
+def test_asks_have_a_ceiling_and_a_buyer_can_cap_what_they_pay(world):
+    miner, key_id = world.miner_key("pricey-key", 200_000)
+    for ask in (250_001, 10_000_000):
+        with pytest.raises(ToolMarketError) as high:
+            world.market.post_ask(world.who(miner), {"key_id": key_id, "ask_microusd": ask})
+        assert high.value.code == "ask_invalid"
+    _, token = world.buyer(budget=500_000)
+    with pytest.raises(ToolMarketError) as capped:
+        world.market.call(token, dict(PROFILE, max_ask_microusd=199_999))
+    assert capped.value.code == "no_supply" and world.vendor.sent == []
+    assert world.market.call(token, dict(PROFILE, max_ask_microusd=200_000))["charge_microusd"] == 220_000
+    with pytest.raises(ToolMarketError) as bad:
+        world.market.call(token, dict(PROFILE, max_ask_microusd=0))
+    assert bad.value.code == "max_ask_invalid"
 
 
 def test_the_epoch_is_read_before_any_vendor_request(world):

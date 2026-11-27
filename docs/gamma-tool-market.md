@@ -110,11 +110,15 @@ A key is in its tool's book only while all of these hold:
 
 Health events come from vault checks and from calls.
 
-- A vendor answer of 401, 402 or 403 marks the key `failed`, read as each
-  vendor means it: ZeroBounce's error inside a 200, Prospeo's
+- A vendor answer of 401, 402 or 403 moves the call to the next key, and
+  the buyer pays nothing for the failed try. These are read as each vendor
+  means them: ZeroBounce's error inside a 200, Prospeo's
   `INSUFFICIENT_CREDITS` and `INVALID_API_KEY` inside a 400, Findymail's
-  423 (paused) and Hunter's 429 (out of searches). The call then moves on
-  to the next key, and the buyer pays nothing for the failed try.
+  423 (paused) and Hunter's 429 (out of searches).
+- That answer alone takes no key out of the book, since a buyer shapes the
+  request. Where the vendor has a free check, the vault runs it and its
+  result decides. Without one (Exa, HarvestAPI), a 401 or 402 marks the key
+  `failed`, and a 403 only skips it for this call.
 - A 429 with no `Retry-After` skips the key for this call only. Hunter's
   403 is its rate limit, so it counts as a 429. A 429 with
   `Retry-After` goes back to the buyer.
@@ -122,6 +126,13 @@ Health events come from vault checks and from calls.
   last check is older than 6 hours. This needs no cron job.
 - After topping up a failed key, the miner calls
   `POST /tool-market/keys/{id}/check` to put it back in the book.
+
+A miner's own tab never buys from their own keys. For security, a hotkey
+registers at most one key per tool every 30 days, revoked keys included.
+
+An ask may be at most $0.25 per credit, or 100% of the vendor's own price
+for a vendor-USD tool. A buyer can send `max_ask_microusd` with a call, and
+no key asking more serves it.
 
 `GET /tool-market/books/{tool}` shows the asks and what a buyer pays for
 each. It shows no miner hotkeys and no key data.
@@ -181,12 +192,17 @@ deployment, exactly as lead orders do.
   from a bill; check it against a miner's statement before scaling.
 - **ZeroBounce cannot tell a dead key from an empty account.** Both mark
   the key `no_credit` until its miner asks for a check.
-- **One bad request can fail up to 3 keys.** A 403 caused by the request
-  itself, not the key, still marks each key tried as `failed` until its
-  miner asks for a check.
-- **An ask can rise between the book and the call.** A buyer pays the ask
-  at the moment of the call, within the tab's budget. A delay on price
-  rises, as Bittensor subnet 28 uses, can come later.
+- **One hotkey per miner is assumed.** The own-key rule, the daily caps
+  and the 30-day registration limit are per hotkey. A miner with several
+  hotkeys can buy from themselves; with the 10% margin that loses money
+  until payouts are wired, so payouts must value what a buyer burns and
+  what a miner earns at the same per-epoch price.
+- **Day 1 has no operator hold.** Ops can turn a whole tool off
+  (`LEADPOET_TOOL_MARKET_TOOLS_OFF`) but cannot hold one key or miner.
+- **A running vault is trusted until it restarts.** The gateway checks the
+  vault's keys against the KMS on each connect, and only an approved build
+  gets those keys. Removing an approval on Base does not stop a vault
+  already running; its owner stops it.
 - **Exa's cost is an estimate.** Exa calls `costDollars` an estimate.
 - **Some keys cannot be checked first.** Exa and HarvestAPI have no free
   key check, so a dead key is found by its first failed call. Hunter's

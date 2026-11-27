@@ -34,6 +34,7 @@ from lab_arena.tool_market.config import (
 )
 from lab_arena.tool_market.store import ToolMarketStore
 from lead_order_vault import envelope as vault_envelope
+from lead_order_vault import tools as vault_tools
 
 TOKEN_PREFIX = "tmt_"
 # Keys tried for one call before the buyer is told there is no supply.
@@ -178,6 +179,8 @@ class ToolMarket:
             signed_body=signed_body.decode("utf-8"), signature=identity.signature.lower().removeprefix("0x"))
         if result["status"] == "duplicate":
             raise ToolMarketError(409, "key_already_listed")
+        if result["status"] == "too_soon":
+            raise ToolMarketError(429, "key_registration_too_soon", next_at=result["next_at"])
         return dict(result, health=checked["status"])
 
     def check_key(self, identity: BuyerIdentity, key_id: Any) -> Dict[str, Any]:
@@ -197,9 +200,10 @@ class ToolMarket:
         if set(body) != {"key_id", "ask_microusd"}:
             raise ToolMarketError(400, "request_invalid")
         ask = body["ask_microusd"]
-        if ask is not None and not book.valid_ask(ask):
-            raise ToolMarketError(400, "ask_invalid")
         key = self._own_key(identity, body["key_id"])
+        ceiling = catalog.MAX_ASK[catalog.TOOLS[key["tool"]]]
+        if ask is not None and not book.valid_ask(ask, ceiling):
+            raise ToolMarketError(400, "ask_invalid", max_ask_microusd=ceiling)
         result = self._store.post_ask(key_id=key["key_id"], hotkey=identity.hotkey, ask_microusd=ask)
         if result["status"] == "not_found":
             raise ToolMarketError(404, "key_unknown")
@@ -222,8 +226,13 @@ class ToolMarket:
 
     # Calls ------------------------------------------------------------------
     def call(self, token: str, body: Mapping[str, Any]) -> Dict[str, Any]:
-        if not isinstance(body, Mapping) or set(body) - {"params"} != {"tool", "operation"}:
+        if not isinstance(body, Mapping) or set(body) - {"params", "max_ask_microusd"} != {"tool", "operation"}:
             raise ToolMarketError(400, "request_invalid")
+        # The most the buyer will let a key ask per unit; the book can move
+        # between reading it and calling.
+        max_ask = body.get("max_ask_microusd", book.MAX_ASK_MICROUSD)
+        if not book.valid_ask(max_ask):
+            raise ToolMarketError(400, "max_ask_invalid")
         tool = body["tool"]
         if tool not in self._config.tools:
             raise ToolMarketError(404, "tool_unavailable")
@@ -239,8 +248,8 @@ class ToolMarket:
         epoch = int(self._epoch())
         tried = checks = 0
         for ask in book.rank(book.Ask.from_row(row) for row in self._supply(tool)):
-            if tried >= MAX_KEYS_PER_CALL:
-                break
+            if tried >= MAX_KEYS_PER_CALL or ask.ask_microusd > max_ask:
+                break  # ranked cheapest first, so every later ask is higher
             if ask.needs_check:
                 checks += 1
                 if checks > MAX_KEYS_PER_CALL or not self._recheck(ask.key_id, tool, ask.envelope):
@@ -288,7 +297,7 @@ class ToolMarket:
         if failure is not None or book.rate_limited(status, response.headers):
             settle("skipped", status)  # the real status, also when a 2xx body reported it
             if failure is not None:
-                self._store.record_key_event(key_id=ask.key_id, status="failed", reason=failure)
+                self._key_failed(op.tool, ask, status, failure)
             return None
         units = op.units(status, document)
         charge = 0
@@ -325,6 +334,17 @@ class ToolMarket:
         self._store.record_key_event(key_id=key_id, status=status, reason=checked.get("reason"),
                                      balance=checked.get("balance"))
         return status != "invalid"
+
+    def _key_failed(self, tool: str, ask: book.Ask, status: int, failure: str) -> None:
+        """A call answered as if the key were unusable. A buyer can shape the
+        request, so the answer alone takes no key out of the book: the
+        vendor's free check decides. Without one, a 401 or 402, which only the
+        key's account can cause, fails it; a 403 skips it for this call."""
+
+        if vault_tools.TOOLS[tool].balance_url is not None:
+            self._recheck(ask.key_id, tool, ask.envelope)
+        elif status in (401, 402):
+            self._store.record_key_event(key_id=ask.key_id, status="failed", reason=failure)
 
     def _own_key(self, identity: BuyerIdentity, key_id: Any) -> Dict[str, Any]:
         try:

@@ -341,14 +341,22 @@ $close770$;
 -- ---------------------------------------------------------------------------
 
 -- One active listing per key: the same vendor key sealed twice, by one miner
--- or two, is refused while the first is listed.
+-- or two, is refused while the first is listed. For security, a hotkey
+-- registers at most one key per tool every 30 days, revoked keys included.
 CREATE FUNCTION public.tool_market_register_key_v1(p_key_id UUID,p_tool TEXT,p_hotkey TEXT,p_envelope TEXT,
  p_fingerprint TEXT,p_daily_cap BIGINT,p_status TEXT,p_balance NUMERIC,p_host TEXT,p_signed_at BIGINT,
  p_signed_body TEXT,p_signature TEXT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $register770$
+DECLARE next_at TIMESTAMPTZ;
 BEGIN
  IF p_status NOT IN ('valid','unchecked') THEN
   RAISE EXCEPTION 'only a valid or unchecked key is registered' USING ERRCODE='22023';
+ END IF;
+ PERFORM public.tool_market__lock_v1('miner_tool',p_hotkey||':'||p_tool);
+ SELECT max(k.registered_at)+interval '30 days' INTO next_at FROM public.tool_market_keys k
+  WHERE k.miner_hotkey=p_hotkey AND k.tool=p_tool;
+ IF next_at>clock_timestamp() THEN
+  RETURN jsonb_build_object('status','too_soon','next_at',next_at);
  END IF;
  PERFORM public.tool_market__lock_v1('fingerprint',p_fingerprint);
  IF EXISTS(SELECT 1 FROM public.tool_market_keys k WHERE k.key_fingerprint=p_fingerprint
@@ -457,6 +465,9 @@ BEGIN
   ORDER BY ask_sequence DESC LIMIT 1;
  IF k.key_id IS NULL OR NOT public.tool_market__key_active_v1(p_key_id) OR current_ask IS DISTINCT FROM p_ask THEN
   RETURN jsonb_build_object('status','ask_changed');
+ END IF;
+ IF k.miner_hotkey=tab.hotkey THEN  -- a miner's own tab never buys from their own key
+  RETURN jsonb_build_object('status','own_key');
  END IF;
  IF public.tool_market__key_day_v1(p_key_id)+p_owed_cap>k.daily_cap_microusd THEN
   RETURN jsonb_build_object('status','key_cap');

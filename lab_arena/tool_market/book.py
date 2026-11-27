@@ -45,9 +45,9 @@ def reserve_microusd(operation: Operation, ask_microusd: int) -> int:
     return charge_microusd(_ceil_div(operation.max_units * int(ask_microusd), operation.unit_scale))
 
 
-def valid_ask(ask_microusd: object) -> bool:
+def valid_ask(ask_microusd: object, ceiling: int = MAX_ASK_MICROUSD) -> bool:
     return isinstance(ask_microusd, int) and not isinstance(ask_microusd, bool) \
-        and 0 < ask_microusd <= MAX_ASK_MICROUSD
+        and 0 < ask_microusd <= min(ceiling, MAX_ASK_MICROUSD)
 
 
 @dataclass(frozen=True)

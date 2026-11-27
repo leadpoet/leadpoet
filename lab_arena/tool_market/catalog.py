@@ -33,6 +33,9 @@ from urllib.parse import urlencode
 UNIT_CALL = "call"
 UNIT_VENDOR_USD = "vendor_usd"
 UNIT_SCALE = {UNIT_CALL: 1, UNIT_VENDOR_USD: 1_000_000}
+# The highest ask a miner may post. Per credit: above every launch vendor's
+# own list price. Per vendor USD: the vendor's own price.
+MAX_ASK = {UNIT_CALL: 250_000, UNIT_VENDOR_USD: 1_000_000}
 
 
 class CatalogError(ValueError):
@@ -274,4 +277,4 @@ def operation(tool: Any, name: Any) -> Operation:
     return found
 
 
-__all__ = ["CatalogError", "OPERATIONS", "Operation", "Param", "TOOLS", "UNIT_CALL", "UNIT_VENDOR_USD", "operation"]
+__all__ = ["CatalogError", "MAX_ASK", "OPERATIONS", "Operation", "Param", "TOOLS", "UNIT_CALL", "UNIT_VENDOR_USD", "operation"]

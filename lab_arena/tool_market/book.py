@@ -21,7 +21,6 @@ def owed_microusd(operation: Operation, units: int, ask_microusd: int) -> int:
 def charge_microusd(owed: int) -> int:
     """What the buyer pays for ``owed``: 10% more, rounded up (the SQL settle check's formula)."""
 
-    owed = int(owed)
     return owed + (owed + 9) // 10
 
 

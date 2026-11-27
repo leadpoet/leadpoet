@@ -597,18 +597,15 @@ class ToolMarket:
           tool with no check, it only skips the key.
         """
 
-        if status == 401:
-            confirmed = True
-        elif vault_tools.TOOLS[tool].balance_url is None or not self._recheck_due(ask.key_id):
-            confirmed = False
-        else:
+        if status == 402:
+            if vault_tools.TOOLS[tool].balance_url is None or not self._recheck_due(ask.key_id):
+                return
             checked = self._recheck(ask.key_id, tool, ask.envelope)
-            if checked is None or checked["status"] == "invalid":
-                return  # unknown, or already recorded as invalid
-            confirmed = checked.get("balance") is None
-        if confirmed:
-            self._store.record_key_event(key_id=ask.key_id, status="invalid",
-                                         reason="unauthorized" if status == 401 else "no_credit")
+            # Unknown, already recorded as invalid, or it still has credit.
+            if checked is None or checked["status"] == "invalid" or checked.get("balance") is not None:
+                return
+        self._store.record_key_event(key_id=ask.key_id, status="invalid",
+                                     reason="unauthorized" if status == 401 else "no_credit")
 
     def _private(self, tool: str, ask: book.Ask) -> bool:
         """A key that may serve a private call: its miner signed a private-supply

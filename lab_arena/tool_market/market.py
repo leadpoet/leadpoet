@@ -152,7 +152,7 @@ class ToolMarket:
         result = self._store.record_gamma_reading(
             hotkey=hotkey, block_number=reading.block_number, block_hash=reading.block_hash,
             spent_units=reading.spent_units, available=reading.available)
-        if result.get("status") == "counter_backwards":
+        if result.get("status") in ("counter_backwards", "reading_conflict"):
             raise ToolMarketError(503, "gamma_unavailable")
         return result
 
@@ -212,6 +212,7 @@ class ToolMarket:
         tool = body["tool"]
         if not isinstance(tool, str) or tool not in self._config.tools:
             raise ToolMarketError(404, "tool_unavailable")
+        self._require_supplier(tool, identity.hotkey)
         cap = _int(body["daily_cap_microusd"], 1, MAX_KEY_DAILY_CAP_MICROUSD, "daily_cap_invalid")
         try:
             registered = self._is_registered(identity.hotkey)
@@ -262,6 +263,7 @@ class ToolMarket:
         """
 
         key = self._own_key(identity, key_id)
+        self._require_supplier(key["tool"], identity.hotkey)
         if vault_tools.TOOLS[key["tool"]].balance_url is None:
             raise ToolMarketError(409, "key_cannot_be_checked")
         with self._slot("check:" + identity.hotkey, 1, "check_in_flight"):
@@ -283,6 +285,7 @@ class ToolMarket:
         key = self._own_key(identity, body["key_id"])
         ceiling = catalog.MAX_ASK[catalog.TOOLS[key["tool"]]]
         if ask is not None:
+            self._require_supplier(key["tool"], identity.hotkey)
             _int(ask, 1, ceiling, "ask_invalid", max_ask_microusd=ceiling)
             # Each operation's largest call owes something, so every call
             # reserves, and a key's cap holds 4 of them, so each buyer's
@@ -435,7 +438,7 @@ class ToolMarket:
 
         def settle(status: str, http_status: Optional[int], *, units: int = 0, owed: int = 0, charge: int = 0) -> bool:
             return self._store.settle_call(call_id=call_id, status=status, http_status=http_status, units=units,
-                                           owed_microusd=owed, charge_microusd=charge, epoch=epoch) == "settled"
+                                           owed_microusd=owed, charge_microusd=charge, epoch=epoch) in ("settled", "exists")
 
         try:
             response = self._transport.send(
@@ -472,8 +475,13 @@ class ToolMarket:
         return {"call_id": call_id, "status": response.status, "body": document, "charge_microusd": charge}
 
     # Helpers ----------------------------------------------------------------
+    def _require_supplier(self, tool: str, hotkey: str) -> None:
+        if not self._config.may_supply(tool, hotkey):
+            raise ToolMarketError(403, "supplier_not_approved")
+
     def _supply(self, tool: str):
-        return self._store.book(tool=tool, terms_sha256=self._config.terms_sha256)
+        return [row for row in self._store.book(tool=tool, terms_sha256=self._config.terms_sha256)
+                if self._config.may_supply(tool, row["miner_hotkey"])]
 
     def _check(self, tool: str, envelope: str) -> Mapping[str, Any]:
         try:

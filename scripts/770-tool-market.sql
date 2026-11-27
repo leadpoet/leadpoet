@@ -288,18 +288,26 @@ $balance770$;
 CREATE FUNCTION public.tool_market_record_gamma_reading_v1(
  p_hotkey TEXT,p_block_number BIGINT,p_block_hash TEXT,p_units NUMERIC,p_available BOOLEAN)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $reading770$
-DECLARE prior public.tool_market_gamma_readings;
+DECLARE prior public.tool_market_gamma_readings; latest public.tool_market_gamma_readings;
 BEGIN
+ -- Finalized readings and tab openings for one buyer share the same lock.
+ PERFORM public.tool_market__lock_v1('buyer',p_hotkey);
+ SELECT * INTO latest FROM public.tool_market_gamma_readings WHERE hotkey=p_hotkey
+  ORDER BY block_number DESC,reading_id DESC LIMIT 1;
+ IF latest.reading_id IS NOT NULL AND p_block_number<=latest.block_number THEN
+  IF p_block_number=latest.block_number AND
+    (lower(p_block_hash),p_available,CASE WHEN p_available THEN p_units ELSE 0 END)
+      IS DISTINCT FROM (latest.block_hash,latest.available,latest.spent_units) THEN
+   RETURN jsonb_build_object('status','reading_conflict');
+  END IF;
+  RETURN public.tool_market__balance_v1(p_hotkey);
+ END IF;
  SELECT * INTO prior FROM public.tool_market_gamma_readings WHERE hotkey=p_hotkey AND available
   ORDER BY block_number DESC,reading_id DESC LIMIT 1;
  -- The spent counter only grows; a smaller value is a broken read.
  IF p_available AND prior.reading_id IS NOT NULL AND p_block_number>=prior.block_number
   AND p_units<prior.spent_units THEN
   RETURN jsonb_build_object('status','counter_backwards');
- END IF;
- -- The same reading again (a client polling its balance) adds no row.
- IF p_available AND prior.block_number IS NOT DISTINCT FROM p_block_number AND prior.spent_units=p_units THEN
-  RETURN public.tool_market__balance_v1(p_hotkey);
  END IF;
  INSERT INTO public.tool_market_gamma_readings(hotkey,block_number,block_hash,spent_units,available)
  VALUES(p_hotkey,p_block_number,lower(p_block_hash),CASE WHEN p_available THEN p_units ELSE 0 END,p_available);
@@ -445,6 +453,7 @@ $revoke770$;
 CREATE FUNCTION public.tool_market_record_key_event_v1(p_key_id UUID,p_status TEXT,p_reason TEXT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $event770$
 BEGIN
+ PERFORM public.tool_market__lock_v1('key',p_key_id::TEXT);
  INSERT INTO public.tool_market_key_events(key_id,status,reason) VALUES(p_key_id,p_status,p_reason);
  RETURN jsonb_build_object('status','recorded');
 END;
@@ -527,7 +536,9 @@ BEGIN
  PERFORM public.tool_market__lock_v1('key',p_key_id::TEXT);
  SELECT ask_microusd INTO current_ask FROM public.tool_market_asks WHERE key_id=p_key_id
   ORDER BY ask_sequence DESC LIMIT 1;
- IF NOT public.tool_market__key_active_v1(p_key_id) OR current_ask IS DISTINCT FROM p_ask THEN
+ IF NOT public.tool_market__key_active_v1(p_key_id) OR current_ask IS DISTINCT FROM p_ask
+  OR NOT coalesce((SELECT e.status IN ('valid','unchecked') FROM public.tool_market_key_events e
+      WHERE e.key_id=p_key_id ORDER BY e.event_id DESC LIMIT 1),FALSE) THEN
   RETURN jsonb_build_object('status','ask_changed');
  END IF;
  SELECT * INTO g FROM public.tool_market__key_ledger_v1(p_key_id,tab.hotkey);
@@ -549,21 +560,29 @@ $reserve770$;
 CREATE FUNCTION public.tool_market_settle_call_v1(p_call_id UUID,p_status TEXT,p_http_status INTEGER,p_units BIGINT,
  p_owed BIGINT,p_charge BIGINT,p_epoch BIGINT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $settle770$
-DECLARE c public.tool_market_calls;
+DECLARE c public.tool_market_calls; previous public.tool_market_call_settlements;
 BEGIN
  SELECT * INTO c FROM public.tool_market_calls WHERE call_id=p_call_id;
  IF c.call_id IS NULL THEN RETURN jsonb_build_object('status','not_found'); END IF;
  PERFORM public.tool_market__lock_v1('buyer',(SELECT t.hotkey FROM public.tool_market_tabs t WHERE t.tab_id=c.tab_id));
  PERFORM public.tool_market__lock_v1('key',c.key_id::TEXT);
+ SELECT * INTO previous FROM public.tool_market_call_settlements WHERE call_id=p_call_id;
+ IF FOUND THEN
+  IF (p_status,p_http_status,p_units,p_owed,p_charge,p_epoch) IS DISTINCT FROM
+     (previous.status,previous.http_status,previous.units,previous.owed_microusd,previous.charge_microusd,previous.epoch) THEN
+   RAISE EXCEPTION 'conflicting call settlement' USING ERRCODE='22023';
+  END IF;
+  RETURN jsonb_build_object('status','exists');
+ END IF;
  IF c.opened_at<=clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1()) THEN
   RETURN jsonb_build_object('status','expired');
  END IF;
- IF p_charge>c.reserve_microusd THEN
-  RAISE EXCEPTION 'a call cannot charge more than it reserved' USING ERRCODE='22023';
+ IF p_charge>c.reserve_microusd OR p_owed>c.owed_cap_microusd OR p_charge<>p_owed+(p_owed+9)/10 THEN
+  RAISE EXCEPTION 'call settlement exceeds its reservation or differs from the market fee' USING ERRCODE='22023';
  END IF;
  INSERT INTO public.tool_market_call_settlements(call_id,status,http_status,units,owed_microusd,charge_microusd,epoch)
- VALUES(p_call_id,p_status,p_http_status,p_units,p_owed,p_charge,p_epoch) ON CONFLICT DO NOTHING;
- RETURN jsonb_build_object('status',CASE WHEN FOUND THEN 'settled' ELSE 'exists' END);
+ VALUES(p_call_id,p_status,p_http_status,p_units,p_owed,p_charge,p_epoch);
+ RETURN jsonb_build_object('status','settled');
 END;
 $settle770$;
 

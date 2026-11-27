@@ -169,6 +169,9 @@ class World:
     def register(self, miner, body):
         """A register request as the gateway hands it over: parsed and as signed."""
 
+        self.config = dataclasses.replace(
+            self.market._config, approved_suppliers=self.market._config.approved_suppliers | {(body["tool"], miner)})
+        self.market._config = self.config
         body = dict(body, attestation=ATTESTATION) if "attestation" not in body else body
         return self.market.register_key(self.who(miner), body, json.dumps(body).encode())
 
@@ -639,8 +642,8 @@ def test_a_settlement_cannot_charge_more_than_its_reserve_or_settle_twice(world)
     world.miner_key("rule-key", 10_000)
     _, token = world.buyer()
     call_id = world.market.call(token, PROFILE)["call_id"]
-    assert world.store.settle_call(call_id=call_id, status="settled", http_status=200, units=1, owed_microusd=1,
-                                   charge_microusd=1, epoch=7) == "exists"
+    assert world.store.settle_call(call_id=call_id, status="settled", http_status=200, units=1, owed_microusd=10_000,
+                                   charge_microusd=11_000, epoch=7) == "exists"
     reserve = world.store.book(tool="harvestapi", terms_sha256=world.terms)[0]
     other = str(uuid.uuid4())
     assert world.store.reserve_call(call_id=other, token_hash=market_module.token_hash(token), tool="harvestapi",

@@ -45,10 +45,14 @@ RECHECK_SPACING_SECONDS = 60
 CALL_TIMEOUT_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MIN_TAB_SECONDS = 60
+# The open subnet's name, as miners sign it.
+NETWORK_NAME = "the Gamma network"
 # What a miner signs, inside the register body, for every key they list.
-ATTESTATION = ("tool-market-attestation-v1: My account with this tool's provider, and this key, allow me to "
-               "supply capacity through Stanza. I alone am responsible for my account's compliance and hold the "
-               "relationship with the provider. Stanza makes no claim about any provider's terms and is not liable "
+ATTESTATION = ("tool-market-attestation-v2: I hold the account this key belongs to, and its terms allow me to "
+               "supply capacity through " + NETWORK_NAME + ". I agree that the network may use this key to serve "
+               "other buyers' requests. I alone am responsible for my account's compliance and hold the "
+               "relationship with the provider, and I will revoke this key if that stops being true. The network, "
+               "its validators and its contributors make no claim about any provider's terms and are not liable "
                "for any action a provider takes on my account.")
 
 

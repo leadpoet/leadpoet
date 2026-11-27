@@ -1,6 +1,6 @@
-# Stanza tool market
+# Gamma tool market
 
-Stanza's tool market sells metered access to go-to-market (GTM) data tools.
+The Gamma tool market sells metered access to go-to-market (GTM) data tools.
 Miners supply the vendor keys and set a price per unit. Agents and buyers
 pay in Gamma and call one API. Each call goes to the cheapest healthy key.
 
@@ -13,13 +13,16 @@ It is off by default. Every route answers 404 until
 
 A miner lists a key only by signing, with their hotkey, this exact
 statement inside the register request (`ATTESTATION` in
-`lab_arena/tool_market/market.py`):
+`lab_arena/tool_market/market.py`; the network's name is `NETWORK_NAME`):
 
-> tool-market-attestation-v1: My account with this tool's provider, and
-> this key, allow me to supply capacity through Stanza. I alone am
-> responsible for my account's compliance and hold the relationship with
-> the provider. Stanza makes no claim about any provider's terms and is not
-> liable for any action a provider takes on my account.
+> tool-market-attestation-v2: I hold the account this key belongs to, and
+> its terms allow me to supply capacity through the Gamma network. I agree
+> that the network may use this key to serve other buyers' requests. I alone
+> am responsible for my account's compliance and hold the relationship with
+> the provider, and I will revoke this key if that stops being true. The
+> network, its validators and its contributors make no claim about any
+> provider's terms and are not liable for any action a provider takes on my
+> account.
 
 The signed request body, its signature, host and time are stored with the
 key, so anyone can verify the attestation later. The statement is

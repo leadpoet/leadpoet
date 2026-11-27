@@ -68,7 +68,6 @@ def key_failure(status: int) -> Optional[str]:
 
 __all__ = [
     "Ask",
-    "MARKUP_PPM",
     "charge_microusd",
     "key_failure",
     "owed_microusd",

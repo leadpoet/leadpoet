@@ -105,9 +105,9 @@ def test_editing_the_public_header_breaks_the_envelope(field, value):
 
 
 def test_an_envelope_opens_only_to_a_key_a_header_can_carry():
-    for secret in ("sk-or\r\nx: y", "key with space", "kéy"):
-        with pytest.raises(env.EnvelopeError, match="envelope_invalid"):
-            env.open_envelope(_seal(secret), ENCRYPTION)
+    for secret in ("sk-or\r\nx: y", "Bearer sk-or-v1-a", "kéy"):
+        with pytest.raises(env.EnvelopeError, match="secret_invalid"):
+            _seal(secret)
     nested = env.PREFIX + base64.urlsafe_b64encode(b"[" * 3000).decode().rstrip("=")
     with pytest.raises(env.EnvelopeError, match="envelope_invalid"):
         env.read_header(nested)

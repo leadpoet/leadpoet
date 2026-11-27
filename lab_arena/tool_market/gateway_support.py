@@ -25,7 +25,7 @@ def build_state() -> Tuple[Any, Any]:
         return config, None
     from lab_arena.tool_market.wiring import build_from_environment
 
-    return build_from_environment(config)
+    return config, build_from_environment(config)
 
 
 __all__ = [

@@ -464,7 +464,7 @@ class ToolMarket:
                 return  # unknown, or already recorded as invalid
             confirmed = checked.get("balance") is None
         if confirmed:
-            self._store.record_key_event(key_id=ask.key_id, status="failed", reason=failure)
+            self._store.record_key_event(key_id=ask.key_id, status="invalid", reason=failure)
 
     def _private(self, tool: str, ask: book.Ask) -> bool:
         """A key that may serve a private call: its miner signed a private-supply

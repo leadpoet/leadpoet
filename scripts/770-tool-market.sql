@@ -89,13 +89,13 @@ CREATE TABLE public.tool_market_key_revocations (
   revoked_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
--- A key's health: a vault check (valid, unchecked when the vendor has no free
--- check, or invalid) or a call that showed the key unusable (failed). The
+-- A key's health: valid, unchecked (the vendor has no free check) or
+-- invalid, from a vault check or a call that showed the key unusable. The
 -- latest event decides whether the key trades.
 CREATE TABLE public.tool_market_key_events (
   event_id BIGSERIAL PRIMARY KEY,
   key_id UUID NOT NULL REFERENCES public.tool_market_keys(key_id),
-  status TEXT NOT NULL CHECK(status IN ('valid','unchecked','invalid','failed')),
+  status TEXT NOT NULL CHECK(status IN ('valid','unchecked','invalid')),
   reason TEXT CHECK(reason ~ '^[a-z_]{1,64}$'),
   recorded_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );

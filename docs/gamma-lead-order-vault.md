@@ -90,7 +90,8 @@ once with Phala's Base KMS address on its "Cloud vs Onchain KMS" page: it
 is the one value the tool cannot check for you. Every command reads Base
 through its public endpoint; pass `--rpc <url>` to use one you trust.
 
-`seal` reads the key from the terminal and prints the envelope to submit as
+`seal` reads the bare key (printable ASCII, no `Bearer `) from the
+terminal and prints the envelope to submit as
 `credentials` to `POST /lead-orders/keys`. `receipts` takes every page of
 `GET /lead-orders/vault-receipts` from `since=0`. It checks each signature
 against the vault's receipts key, lists any gap in each key's sequence, and

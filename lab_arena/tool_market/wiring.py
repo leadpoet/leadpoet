@@ -29,7 +29,7 @@ def _required(name: str, env: Mapping[str, str]) -> str:
 
 
 def build_from_environment(config: ToolMarketConfig):
-    """Return ``(config, market)`` for live mode (``gateway_support`` loads and checks ``config``)."""
+    """The live market for ``config``, which ``gateway_support`` loads and checks."""
 
     env = os.environ
     store = ToolMarketStore(PostgrestTransport(
@@ -53,7 +53,7 @@ def build_from_environment(config: ToolMarketConfig):
         current_epoch=lambda: chain_module.current_settlement_epoch(arena_chain, cutover),
         is_registered=lambda hotkey: chain_module.is_registered(arena_chain.metagraph(), hotkey),
     )
-    return config, market
+    return market
 
 
 __all__ = ["build_from_environment"]

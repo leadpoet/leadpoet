@@ -116,12 +116,19 @@ def compressed(public_key: ec.EllipticCurvePublicKey) -> bytes:
     return public_key.public_bytes(serialization.Encoding.X962, serialization.PublicFormat.CompressedPoint)
 
 
+def _key_ok(plaintext: bytes) -> bool:
+    """A provider key is 1 to MAX_SECRET_BYTES of printable ASCII, so any
+    header can carry it."""
+
+    return 1 <= len(plaintext) <= MAX_SECRET_BYTES and all(0x21 <= byte <= 0x7e for byte in plaintext)
+
+
 def seal(secret: str, header: Header) -> str:
     """Encrypt ``secret`` to the vault named in ``header``."""
 
     _check_header(header)
     plaintext = secret.encode("utf-8")
-    if not 1 <= len(plaintext) <= MAX_SECRET_BYTES or secret != secret.strip():
+    if not _key_ok(plaintext):
         raise EnvelopeError("secret_invalid")
     vault_key = bytes.fromhex(header.vault_key)
     vault = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256K1(), vault_key)
@@ -182,8 +189,6 @@ def open_envelope(envelope: str, private_key: ec.EllipticCurvePrivateKey) -> Tup
         plaintext = AESGCM(key).decrypt(nonce, ciphertext, _aad(header))
     except InvalidTag:
         raise EnvelopeError("envelope_tampered") from None
-    # A provider key is printable ASCII; anything else could not be sent
-    # in a header, so it fails when checked rather than on every call.
-    if not all(0x21 <= byte <= 0x7e for byte in plaintext) or not plaintext:
+    if not _key_ok(plaintext):  # fails its check, not every call
         raise EnvelopeError("envelope_invalid")
     return plaintext.decode("ascii"), header

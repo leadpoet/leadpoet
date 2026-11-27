@@ -203,7 +203,7 @@ def test_a_key_that_ran_out_fails_over_and_goes_to_the_back(world):
         assert result["charge_microusd"] == 11_000
         assert world.market.tab(token)["committed_microusd"] == 11_000  # the failed try costs nothing
     assert [s[0] for s in world.vendor.sent] == ["empty-key", "full-key"] * 3
-    assert world.market.statement(miner)["keys"][0]["health"]["status"] != "failed"
+    assert world.market.statement(miner)["keys"][0]["health"]["status"] != "invalid"
     world.market.call(token, PROFILE)
     assert world.vendor.sent[-1][0] == "full-key" and len(world.vendor.sent) == 7
 
@@ -503,19 +503,6 @@ def test_keys_without_room_for_a_call_do_not_use_up_its_attempts(world):
     assert [s[0] for s in world.vendor.sent] == ["roomy-key"]
 
 
-def test_a_key_that_died_since_its_check_is_found_by_its_first_call(world):
-    miner, _ = world.miner_key("died-key", 9_000, tool="zerobounce")
-    world.miner_key("live-key", 10_000, tool="zerobounce")
-    _, token = world.buyer()
-    world.vendor.script["died-key"] = [ok({"error": "Invalid API key or your account ran out of credits"})]
-    world.vault.answers["died-key"] = {"status": "invalid", "reason": "zerobounce_api_key_no_credit"}
-    assert world.market.call(token, VALIDATE)["charge_microusd"] == 0  # live key, no status: unknown, free
-    assert [s[0] for s in world.vendor.sent] == ["died-key", "live-key"]
-    assert world.market.statement(miner)["keys"][0]["health"]["status"] == "invalid"
-    world.market.call(token, VALIDATE)
-    assert world.vendor.sent[-1][0] == "live-key"  # out of the book, never tried again
-
-
 def test_a_buyer_who_keeps_causing_unknown_usage_is_stopped(world):
     miner, _ = world.miner_key("drained-key", 10_000)
     _, token = world.buyer()
@@ -608,6 +595,7 @@ def test_zerobounce_charges_a_check_but_not_an_unknown_and_a_dead_key_fails_over
     assert [s[0] for s in world.vendor.sent] == ["zb-dead", "zb-live"]
     assert world.market.statement(miner)["keys"][0]["health"]["reason"] == "no_credit"
     assert world.market.call(token, VALIDATE)["charge_microusd"] == 0  # ZeroBounce does not charge unknowns
+    assert world.vendor.sent[-1][0] == "zb-live"  # the dead key is out of the book
     _, method, url, _ = world.vendor.sent[1]
     # The vault, not the market, puts the key in the query.
     assert method == "GET" and url == "https://api.zerobounce.net/v2/validate?email=ada%40acme.com"
@@ -627,8 +615,8 @@ def test_hunter_rate_limits_skip_a_key_and_an_empty_account_fails_it(world):
     assert world.market.call(token, FIND)["charge_microusd"] == 11_000
     assert [s[0] for s in world.vendor.sent] == ["hunter-slow", "hunter-empty", "hunter-ok"]
     # Hunter's 403 is a rate limit: skipped for this call only.
-    assert world.market.statement(slow)["keys"][0]["health"]["status"] != "failed"
-    assert world.market.statement(empty)["keys"][0]["health"]["status"] == "failed"
+    assert world.market.statement(slow)["keys"][0]["health"]["status"] != "invalid"
+    assert world.market.statement(empty)["keys"][0]["health"]["status"] == "invalid"
     world.vendor.script["hunter-slow"] = [ok({"data": {"email": None}})]
     assert world.market.call(token, FIND)["charge_microusd"] == 0  # no email found: free
 

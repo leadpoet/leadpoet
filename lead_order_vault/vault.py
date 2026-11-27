@@ -417,10 +417,7 @@ def _field(document, path: Tuple):
 
     value = document
     for step in path:
-        if isinstance(step, int):
-            value = value[step] if isinstance(value, list) and len(value) > step else None
-        else:
-            value = value.get(step) if isinstance(value, Mapping) else None
+        value = value.get(step) if isinstance(value, Mapping) else None
     if isinstance(value, str) and _NUMBER.fullmatch(value):  # ZeroBounce sends its credits as text
         value = float(value)
     if path and type(value) in (int, float) and value == value:

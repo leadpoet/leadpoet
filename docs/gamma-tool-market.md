@@ -118,27 +118,24 @@ A key is in its tool's book only while all of these hold:
 
 Health events come from vault checks and from calls.
 
-- A vendor answer of 401, 402 or 403 moves the call to the next key, and
-  the buyer pays nothing for the failed try. These are read as each vendor
-  means them: ZeroBounce's error inside a 200, Prospeo's
-  `INSUFFICIENT_CREDITS` and `INVALID_API_KEY` inside a 400, Findymail's
-  423 (paused, read as 401) and Hunter's 429 (out of searches).
+- A vendor answer of 401, 402, 403 or 429 (with or without `Retry-After`)
+  moves the call to the next key, and the buyer pays nothing for the
+  failed try. These are read as each vendor means them: ZeroBounce's error
+  inside a 200, Prospeo's `INSUFFICIENT_CREDITS` and `INVALID_API_KEY`
+  inside a 400, Findymail's 423 (paused, read as 401), and Hunter's 429
+  (out of searches, read as 402) and 403 (its rate limit, read as 429).
 - A buyer shapes the request, so that answer alone does not always take a
   key out of the book. A 401 (a bad key or a paused account) marks it
-  `failed`. A 402 takes it out only when the vendor's free check finds no
-  balance (`invalid`) or none to read (`failed`); a tool with no check, or a
-  key checked in the last minute, only skips the key. A 403 only skips it.
+  `invalid`. A 402 does so only when the vendor's free check finds no
+  balance, or none to read; a tool with no check, or a key checked in the
+  last minute, only skips the key. A 403 or 429 only skips it.
 - A key goes to the back of its book, still in it, after a 429 in the
   last minute, or in the last hour a 402 that did not fail it, a 403 or
   unknown usage, each for 3 different buyers. A buyer can shape each of those,
   so one buyer cannot push a rival's key back.
-- A 429, with or without `Retry-After`, moves the call to the next key:
-  the limit is the key's account, not the buyer's. Hunter's 403 is its rate
-  limit, so it counts as a 429.
 - There is no scheduled re-check: a key that dies between checks is found
-  by its next call, which moves to the next key and costs the buyer
-  nothing.
-- After topping up a failed key, the miner calls
+  by its next call.
+- After topping up an invalid key, the miner calls
   `POST /tool-market/keys/{id}/check` to put it back in the book. Exa and HarvestAPI have no free check, so this is refused
   (`409 key_cannot_be_checked`): a key a call found dead there stays out,
   and the miner lists a new key (the 30-day limit applies).

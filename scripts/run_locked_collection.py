@@ -741,7 +741,7 @@ def evidence_stores():
 
 def stage_failed_pool_continuation(spec, job, *, database, objects, directory, inputs, prompt):
     """At most one outstanding continuation per ordinary program and one per scenario."""
-    from lab_arena.collection_experiment import load_experiment
+    from lab_arena.collection_experiment import load_experiment, pool_program_id
     from lab_arena.collection_pool_source import funded_source
     from scripts.collection_review import read_file
     from scripts.prepare_collection_experiment import (
@@ -755,7 +755,7 @@ def stage_failed_pool_continuation(spec, job, *, database, objects, directory, i
     seed = scenario.split("-s")[1]
     if job["batch_id"] != spec.batch_id or job["model"] == corrector:
         raise ValueError("invalid student or independent correction model")
-    program = judge.digest({k:v for k,v in spec.raw.items() if k!="cases"})
+    program = pool_program_id(spec.raw)
     # Serialize competing trusted workers' decisions on this existing directory.
     # Source bytes and manifests are hash-addressed; no new queue or mutable job state.
     with lock_pool_directory(directory):
@@ -796,7 +796,7 @@ def stage_failed_pool_continuation(spec, job, *, database, objects, directory, i
             return None
         source_hash = "sha256:" + judge.digest(source)
         expert = next(a for a in spec.raw["arms"] if a["model"]==corrector)
-        raw = {k:v for k,v in spec.raw.items() if k not in ("successor_seeds","correction_model")}
+        raw = {k:v for k,v in spec.raw.items() if k not in ("successor_seeds","correction_model","series_arm_order")}
         raw.update(id="continue-"+program[:24],auto_from_program=program,max_slots=1,
                    cases=[{"scenario_id":scenario,"source_sha256":source_hash}],
                    arms=[dict(expert,id="correction",role="continuation",repeats=1)],
@@ -809,14 +809,64 @@ def stage_failed_pool_continuation(spec, job, *, database, objects, directory, i
         return continuation.batch_id
 
 
-def poll_pool_experiments(prompt, directory, database, run):
-    """Try a disjoint healthy program after a pre-lease refusal, never after an ambiguous claim."""
-    from lab_arena.collection_experiment import load_experiment
+def _freeze_pool_successor(parent, directory, prompt, leader):
+    from lab_arena.collection_experiment import load_experiment, pool_program_id
     from scripts.collection_review import read_file
-    from scripts.prepare_collection_experiment import store_private_json
+    from scripts.prepare_collection_experiment import (
+        lock_pool_directory,
+        store_private_json,
+    )
+
+    family, last = parent.raw["cases"][-1]["scenario_id"].split("-s")
+    seed = int(last) + 1
+    size = len(parent.raw["cases"])
+    cases = [{"scenario_id": f"{family}-s{i}"} for i in range(seed, seed + size)]
+    raw = dict(parent.raw, cases=cases)
+    group = pool_program_id(parent.raw)
+    if leader and leader[0] == raw["id"]:
+        model = leader[1]
+        arms = raw["arms"]
+        if model not in {arm["model"] for arm in arms}:
+            raise ValueError("successor leader must already be in the frozen program")
+        if arms[0]["model"] != model:
+            raw.setdefault("series_arm_order", [arm["id"] for arm in arms])
+            raw["arms"] = sorted(arms, key=lambda arm: arm["model"] != model)
+    successor = load_experiment(raw, prompt)
+    with lock_pool_directory(directory):
+        # Two operators can configure different leaders at the same pack boundary.
+        # Reuse the already-frozen roster before publishing a second batch.
+        for path in directory.glob("pool-*.json"):
+            if path.stem == parent.batch_id:
+                continue
+            try:
+                candidate = json.loads(read_file(path))
+            except (OSError, ValueError):
+                continue  # Reported by the poller's normal manifest validation.
+            if (
+                not isinstance(candidate, dict)
+                or not candidate.get("successor_seeds")
+                or candidate.get("cases") != cases
+                or candidate.get("id") != raw["id"]
+            ):
+                continue
+            existing = load_experiment(candidate, prompt)
+            if existing.batch_id != path.stem:
+                raise ValueError("successor filename differs from its frozen identity")
+            if pool_program_id(candidate) == group:
+                return existing
+        store_private_json(directory / (successor.batch_id + ".json"), raw)
+    return successor
+
+
+def poll_pool_experiments(prompt, directory, database, run, *, successor_leader=None):
+    """Try a disjoint healthy program after a pre-lease refusal, never after an ambiguous claim."""
+    from lab_arena.collection_experiment import load_experiment, pool_program_id
+    from scripts.collection_review import read_file
+    from lab_arena.collection_prices import CatalogError
 
     def unavailable(name, exc):
-        print(json.dumps({"batch": name, "status": "pool_unavailable", "reason": type(exc).__name__}),
+        reason = exc.code if isinstance(exc, CatalogError) else type(exc).__name__
+        print(json.dumps({"batch": name, "status": "pool_unavailable", "reason": reason}),
               file=sys.stderr, flush=True)
 
     active = {}
@@ -834,15 +884,21 @@ def poll_pool_experiments(prompt, directory, database, run):
         # Old series members remain immutable for exports. Only the most recent
         # published seed range can receive additional assignments.
         group = (raw.get("auto_from_program") or "") + "-correction" if raw.get("auto_from_program") else (
-            judge.digest({k: v for k, v in raw.items() if k != "cases"}) if raw.get("successor_seeds") else spec.batch_id
+            pool_program_id(raw) if raw.get("successor_seeds") else spec.batch_id
         )
         seed = int(raw["cases"][0]["scenario_id"].split("-s")[1])
+        if group in active and seed == active[group][0]:
+            # Hold a conflicting range without denying unrelated funded work.
+            active[group] = (seed, None)
+            unavailable(path.stem, ValueError("conflicting frozen packs"))
+            failures = True
+            continue
         if group not in active or seed > active[group][0]:
             active[group] = seed, spec
     if not active:
         raise ValueError("active standing pool requires a valid operator experiment")
     cursor = directory / ".last-pool-program"
-    groups = sorted(active)
+    groups = sorted(k for k, (_, spec) in active.items() if spec is not None)
     if cursor.exists():
         previous = read_file(cursor, maximum=128).decode()
         if previous in groups:
@@ -872,12 +928,8 @@ def poll_pool_experiments(prompt, directory, database, run):
             finished = {j["slot"] for j in jobs if j["status"] in {"accepted", "rejected", "failed"}}
             if finished != set(range(len(spec.slots))):
                 continue
-            size = len(spec.raw["cases"])
-            family = spec.raw["cases"][0]["scenario_id"].split("-s")[0]
-            raw = dict(spec.raw, cases=[{"scenario_id": f"{family}-s{i}"} for i in range(seed + size, seed + size * 2)])
-            successor = load_experiment(raw, prompt)
-            store_private_json(directory / (successor.batch_id + ".json"), raw)
-            if run(raw, before_claim=on_claim):
+            successor = _freeze_pool_successor(spec, directory, prompt, successor_leader)
+            if run(successor.raw, before_claim=on_claim):
                 return 1
             if attempted:
                 return 0
@@ -956,6 +1008,8 @@ def main(argv=None):
     p.add_argument("--champion-repo", type=Path)
     p.add_argument("--poet-repo", type=Path)
     p.add_argument("--max-jobs", type=int, default=1)
+    p.add_argument("--successor-first-model", nargs=2, metavar=("PROGRAM", "MODEL"),
+                   help="Lead only future renewable packs of this program with an existing assigned model")
     p.add_argument("--research-case-index", type=Path)
     p.add_argument(
         "--research-stdio",
@@ -982,6 +1036,14 @@ def main(argv=None):
         help="Optional private binding from a settled pilot successor to one frozen complete reference",
     )
     args = p.parse_args(argv)
+    if args.successor_first_model and (
+        not args.offer_directory
+        or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", args.successor_first_model[0])
+        or args.successor_first_model[1] not in GENERATOR_ROUTES
+    ):
+        p.error(
+            "successor-first-model requires offer-directory, an experiment id and an approved model"
+        )
     if args.environment_file:
         from scripts.run_lab_arena_service import load_scoped_environment
 
@@ -1000,7 +1062,8 @@ def main(argv=None):
         if database.rpc("collection_pool_active_v1", {}) is True:
             args.experiment_inputs = args.experiment_inputs or args.offer_directory.parent / "experiment-inputs"
             for _ in range(limit):
-                if not poll_pool_experiments(prompt, args.offer_directory, database, partial(_run_options, args, p)):
+                if not poll_pool_experiments(prompt, args.offer_directory, database, partial(_run_options, args, p),
+                                             successor_leader=args.successor_first_model):
                     break
         else:
             poll_paid_offers(baseline, prompt, args.offer_directory, partial(_run_options, args, p))

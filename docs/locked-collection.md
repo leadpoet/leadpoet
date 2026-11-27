@@ -31,6 +31,8 @@ Before changing the checkout for either service, stop its timer and let the curr
 
 Use `systemctl show SERVICE -p ActiveState -p SubState -p MainPID -p ControlPID -p Job`. Wait for `inactive`, `dead`, both PIDs zero and an empty job. Change the checkout, restart the timer and confirm the next cycle completes on that revision. If a service fails, inspect the failed cycle before updating.
 
+The paid worker starts fresh consent-and-suppression packs with DeepSeek and uses the original model order for the other task families. This lets another program try a healthy route when the first one is unavailable. The change takes effect only when the existing pack finishes. Each scenario still gets four runs per model. A catalog or retention check that fails before a lease spends no miner funds.
+
 ## Historical offers and operator reference
 
 The following sections document earlier fixed-price cohorts, pilots and their evidence. Their manifests and original signatures remain necessary to reproduce historical work.

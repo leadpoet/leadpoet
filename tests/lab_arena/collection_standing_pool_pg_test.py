@@ -399,3 +399,81 @@ def test_provider_auth_or_credit_refusal_falls_back_without_releasing_unknown_bi
     assert remaining == 23000
     second = p.claim("after", token=token)
     assert second["registration_id"] == (reserve if should_fall_back else normal)[0]
+
+
+def test_staggered_paid_slot_uses_healthy_pack_only_and_enforces_cap(pool, tmp_path):
+    from lab_arena.collection_experiment import load_experiment
+    from scripts.prepare_collection_experiment import store_private_json
+    from scripts.run_locked_collection import poll_pool_experiments
+    from tests.lab_arena.collection_pool_worker_test import SMALL, EXPERT, pool_raw
+    from tests.lab_arena.collection_judge_test import PROMPT
+
+    p = pool
+    p.activate()
+    p.register(1, 1, 100000)
+    packs = []
+    for family, first in (("P8", SMALL), ("P9", EXPERT)):
+        raw = pool_raw(family, repeats=4)
+        raw["arms"].append(dict(raw["arms"][0], model=EXPERT, id="stronger"))
+        raw.update(max_slots=8, budget_microusd=800000)
+        raw["routes"][EXPERT] = "coreweave/fp8"
+        if first == EXPERT:
+            raw["series_arm_order"] = [a["id"] for a in raw["arms"]]
+            raw["arms"].reverse()
+        spec = load_experiment(raw, PROMPT)
+        store_private_json(tmp_path / (spec.batch_id + ".json"), raw)
+        packs.append(spec)
+    from lab_arena.collection_experiment import pool_program_id
+
+    # Give the unavailable DeepSeek pack the first probe.
+    cursor = tmp_path / ".last-pool-program"
+    cursor.write_text(pool_program_id(packs[0].raw))
+    cursor.chmod(0o600)
+
+    def native_claim(spec, expected, job_id, token):
+        arms = [a for _, a, _ in spec.slots]
+        return p.rpc(
+            "priced_claim",
+            job_id,
+            token,
+            spec.batch_id,
+            "live",
+            p.harness,
+            Json([case["scenario_id"] for case, _, _ in spec.slots]),
+            Json([a["model"] for a in arms]),
+            Json(dict.fromkeys(spec.raw["routes"], 0)),
+            Json({a["model"]: a["budget_microusd"] for a in arms}),
+            POOL_TERMS_HASH,
+            expected,
+        )
+
+    observed = []
+
+    def run(raw, *, before_claim):
+        spec = load_experiment(raw, PROMPT)
+        id_ = str(uuid4())
+        token = "sha256:" + digest(id_)
+        preview = native_claim(spec, None, id_, token)
+        if not preview:
+            return 0
+        model = preview["model"]
+        observed.append(model)
+        if model == EXPERT:
+            raise ValueError(
+                "approved route unavailable"
+            )  # No lease or cost on this pack.
+        before_claim()
+        assert native_claim(spec, model, id_, token)["model"] == SMALL
+        return 1
+
+    assert poll_pool_experiments(PROMPT, tmp_path, None, run) == 1 and observed == [
+        EXPERT,
+        SMALL,
+    ]
+    # The healthy job's full ceiling now holds the sole key's signed balance.
+    for spec in packs:
+        assert (
+            native_claim(spec, None, str(uuid4()), "sha256:" + digest("preview"))
+            is None
+        )
+    assert cursor.read_text() == pool_program_id(packs[0].raw)

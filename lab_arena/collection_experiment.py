@@ -64,6 +64,15 @@ def source_revisions(raw=None):
     return experiment_revisions(c["scenario_id"] for c in (raw or {}).get("cases", []))
 
 
+def pool_program_id(raw):
+    """Keep the original series, cursor and correction identity when arms change order."""
+    settings = {k: v for k, v in raw.items() if k not in ("cases", "series_arm_order")}
+    if "series_arm_order" in raw:
+        arms = {a["id"]: a for a in raw["arms"]}
+        settings["arms"] = [arms[arm_id] for arm_id in raw["series_arm_order"]]
+    return judge.digest(settings)
+
+
 def load_experiment(raw, prompt):
     from lab_arena.collection_claims import protocol_of
 
@@ -81,6 +90,7 @@ def load_experiment(raw, prompt):
                 "successor_seeds",
                 "correction_model",
                 "auto_from_program",
+                "series_arm_order",
             }
             if pool
             else set()
@@ -272,6 +282,12 @@ def load_experiment(raw, prompt):
                 raise ValueError(
                     "automatic corrections require a distinct approved fresh expert"
                 )
+        if "series_arm_order" in raw:
+            order = raw["series_arm_order"]
+            if (raw.get("successor_seeds") is not True or not isinstance(order, list)
+                    or not all(isinstance(k, str) for k in order)
+                    or len(order) != len(arms) or set(order) != arm_names):
+                raise ValueError("original arm order must identify each renewable arm exactly once")
         if "auto_from_program" in raw:
             if (
                 not isinstance(raw["auto_from_program"], str)
@@ -576,6 +592,7 @@ def run_experiment(
     before_claim=None,
     prompt=None,
     on_pool_failure=None,
+    on_pool_settled=None,
 ):
     from lab_arena.collection_prices import claim_at_current_price
     from lab_arena.collection_broker import CollectionBroker
@@ -850,6 +867,8 @@ def run_experiment(
         ):
             # Settlement is already durable. Follow-up preparation has no provider side effect.
             on_pool_failure(spec, job)
+        if pool and on_pool_settled:
+            on_pool_settled(status)
         count += 1
         print(json.dumps({"job": run_id, "batch": batch, "status": status}), flush=True)
     return count

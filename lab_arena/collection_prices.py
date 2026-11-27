@@ -4,19 +4,45 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import json
 from urllib.request import Request
+from urllib.error import HTTPError, URLError
 
 from lab_arena import broker
 from lab_arena.collection_broker import batch_versions
 
 
+class CatalogError(ValueError):
+    """A bounded operator reason with the usual descriptive validation error."""
+
+    def __init__(self, code, message):
+        self.code = code
+        super().__init__(message)
+
+
 def _catalog(url, open_url):
-    with open_url(
-        Request(url, headers={"Accept": "application/json"}), timeout=12
-    ) as response:
-        raw = response.read(4 * 1024 * 1024 + 1)
+    try:
+        with open_url(
+            Request(url, headers={"Accept": "application/json"}), timeout=12
+        ) as response:
+            raw = response.read(4 * 1024 * 1024 + 1)
+    except HTTPError as exc:
+        code = (
+            "provider_catalog_throttled"
+            if exc.code == 429
+            else "provider_catalog_http_error"
+        )
+        raise CatalogError(code, "catalog HTTP request failed") from exc
+    except (URLError, TimeoutError, ConnectionError) as exc:
+        raise CatalogError(
+            "provider_catalog_unreachable", "catalog unavailable"
+        ) from exc
     if len(raw) > 4 * 1024 * 1024:
-        raise ValueError("oversized endpoint catalog")
-    return json.loads(raw)["data"]
+        raise CatalogError("provider_catalog_invalid", "oversized endpoint catalog")
+    try:
+        return json.loads(raw)["data"]
+    except (KeyError, ValueError, TypeError) as exc:
+        raise CatalogError(
+            "provider_catalog_invalid", "malformed endpoint catalog"
+        ) from exc
 
 
 def _true_zdr_routes(open_url):
@@ -44,7 +70,9 @@ def endpoint_prices(routes, *, open_url=None, models=None):
         url = "https://openrouter.ai/api/v1/models/" + model + "/endpoints"
         data = _catalog(url, open_url)
         if data["id"] != model:
-            raise ValueError("wrong endpoint catalog model")
+            raise CatalogError(
+                "provider_catalog_invalid", "wrong endpoint catalog model"
+            )
         candidates = [
             row
             for row in data["endpoints"]
@@ -54,16 +82,26 @@ def endpoint_prices(routes, *, open_url=None, models=None):
             and row["name"].endswith(" | " + revisions[model])
         ]
         if len(candidates) != 1:
-            raise ValueError("configured endpoint unavailable for " + model)
+            raise CatalogError(
+                "configured_endpoint_unavailable",
+                "configured endpoint unavailable for " + model,
+            )
         if not strict.get((model, route, candidates[0]["name"]), False):
-            raise ValueError("strict zero-retention endpoint unavailable for " + model)
+            raise CatalogError(
+                "strict_retention_unavailable",
+                "strict zero-retention endpoint unavailable for " + model,
+            )
         provider = candidates[0].get("provider_name")
         if not isinstance(provider, str) or not provider.strip():
-            raise ValueError("missing provider identity for " + model)
+            raise CatalogError(
+                "provider_identity_missing", "missing provider identity for " + model
+            )
         providers[model] = provider
         pricing = candidates[0]["pricing"]
         if not {"prompt", "completion"} <= set(pricing):
-            raise ValueError("incomplete endpoint prices")
+            raise CatalogError(
+                "provider_prices_incomplete", "incomplete endpoint prices"
+            )
         tiers = [pricing, *pricing.get("overrides", [])]
         prices = {
             k: str(max(Decimal(str(tier.get(k, 0))) for tier in tiers))

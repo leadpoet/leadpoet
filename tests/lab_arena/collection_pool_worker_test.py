@@ -405,8 +405,9 @@ def test_completed_receipt_retry_never_repays_a_lost_response():
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("reordered", [False, True])
 def test_automatic_independent_correction_staged_once_and_runs_with_funding(
-    pool_fixture, tmp_path
+    pool_fixture, tmp_path, reordered
 ):
     from functools import partial
     from scripts.run_locked_collection import stage_failed_pool_continuation
@@ -418,6 +419,11 @@ def test_automatic_independent_correction_staged_once_and_runs_with_funding(
     raw["arms"].append(dict(raw["arms"][0], id="stronger", model=EXPERT))
     raw["max_slots"] = 2
     raw["budget_microusd"] = 200000
+    original_program = deepcopy(raw)
+    if reordered:
+        original_program["arms"].reverse()
+        raw["series_arm_order"] = [a["id"] for a in original_program["arms"]]
+    expected_program = judge.digest({k: v for k, v in original_program.items() if k != "cases"})
     out = tmp_path / "offers"
     out.mkdir()
     callback = partial(
@@ -432,6 +438,8 @@ def test_automatic_independent_correction_staged_once_and_runs_with_funding(
     parent = simulation(e, raw, [bad, good], on_pool_failure=callback)
     [path] = out.glob("pool-*.json")
     new = json.loads(path.read_bytes())
+    assert new["auto_from_program"] == expected_program
+    assert "series_arm_order" not in new
     assert (
         new["arms"][0]["role"] == "continuation" and new["arms"][0]["model"] == EXPERT
     )
@@ -701,3 +709,241 @@ def test_standing_grounding_followup_requires_persistent_error(
         not pair["step_checks"]["student_action_fatal"]
         and pair["failure_kind"] == "unrepaired_grounding"
     )
+
+
+def test_stagger_only_rotates_fresh_paid_successors(tmp_path):
+    from scripts.prepare_collection_experiment import store_private_json
+    from scripts.run_locked_collection import poll_pool_experiments
+    from lab_arena.collection_experiment import pool_program_id
+
+    raw = pool_raw()
+    raw.update(
+        id="consent-and-suppression",
+        correction_model=EXPERT,
+        max_slots=8,
+        budget_microusd=800000,
+    )
+    raw["routes"][EXPERT] = "coreweave/fp8"
+    raw["arms"].append(dict(raw["arms"][0], id="stronger", model=EXPERT))
+    prior = xp.load_experiment(raw, PROMPT)
+    p = tmp_path / (prior.batch_id + ".json")
+    store_private_json(p, raw)
+    original_bytes = p.read_bytes()
+    series = judge.digest({k: v for k, v in raw.items() if k != "cases"})
+    assert pool_program_id(raw) == series
+    goal = (raw["id"], EXPERT)
+    called = []
+    settled = set(range(7))
+    db = SimpleNamespace(
+        rpc=lambda op, p: (
+            [dict(slot=i, status="accepted") for i in settled]
+            if p["p_batch"] == prior.batch_id
+            else []
+        )
+    )
+
+    def run(doc, *, before_claim):
+        called.append(doc)
+        return 0  # Exhausted authorized budget, or no eligible key; never a real lease.
+
+    assert poll_pool_experiments(PROMPT, tmp_path, db, run, successor_leader=goal) == 0
+    assert called == [raw] and len(list(tmp_path.glob("pool-*.json"))) == 1
+    settled.add(7)
+    assert poll_pool_experiments(PROMPT, tmp_path, db, run, successor_leader=goal) == 0
+    nxt = called[-1]
+    fresh = xp.load_experiment(nxt, PROMPT)
+    assert (
+        nxt["cases"] == [{"scenario_id": "P9-s81001"}]
+        and pool_program_id(nxt) == series
+    )
+    assert [(a["model"], r) for _, a, r in fresh.slots] == [
+        (m, n) for n in range(1, 5) for m in (EXPERT, SMALL)
+    ]
+    assert p.read_bytes() == original_bytes and fresh.batch_id != prior.batch_id
+    from scripts.run_locked_collection import _freeze_pool_successor
+
+    assert (
+        _freeze_pool_successor(prior, tmp_path, PROMPT, None).batch_id == fresh.batch_id
+    )
+    assert (
+        _freeze_pool_successor(prior, tmp_path, PROMPT, goal).batch_id == fresh.batch_id
+    )
+    # A different operator order racing at the same boundary cannot create a second pack.
+    assert (
+        _freeze_pool_successor(prior, tmp_path, PROMPT, (raw["id"], SMALL)).batch_id
+        == fresh.batch_id
+    )
+    assert poll_pool_experiments(PROMPT, tmp_path, db, run) == 0
+    assert called[-1] == nxt and len(list(tmp_path.glob("pool-*.json"))) == 2
+
+    def claim(doc, *, before_claim):
+        assert doc == nxt
+        before_claim()
+        return 1
+
+    assert (
+        poll_pool_experiments(PROMPT, tmp_path, db, claim, successor_leader=goal) == 1
+    )
+    assert (tmp_path / ".last-pool-program").read_text() == series
+    shifted = deepcopy(nxt)
+    shifted["series_arm_order"] = ["stronger", "stronger"]
+    with pytest.raises(ValueError):
+        xp.load_experiment(shifted, PROMPT)
+    shifted = deepcopy(nxt)
+    shifted.pop("successor_seeds")
+    with pytest.raises(ValueError):
+        xp.load_experiment(shifted, PROMPT)
+
+
+def test_prelease_price_diagnostic_redacts_provider_details(tmp_path, capsys):
+    from scripts.prepare_collection_experiment import store_private_json
+    from scripts.run_locked_collection import poll_pool_experiments
+    from lab_arena.collection_prices import endpoint_prices
+    from urllib.error import HTTPError
+
+    raw = pool_raw()
+    store_private_json(
+        tmp_path / (xp.load_experiment(raw, PROMPT).batch_id + ".json"), raw
+    )
+
+    def refused(request, timeout):
+        raise HTTPError(
+            "https://sensitive.invalid/key", 429, "credentials are private", None, None
+        )
+
+    def run(doc, *, before_claim):
+        endpoint_prices(
+            xp.load_experiment(doc, PROMPT).routes, models=[SMALL], open_url=refused
+        )
+        pytest.fail("an unavailable route cannot authorize a lease")
+
+    with pytest.raises(ValueError, match="could not be polled"):
+        poll_pool_experiments(PROMPT, tmp_path, None, run)
+    [line] = capsys.readouterr().err.splitlines()
+    record = json.loads(line)
+    assert (
+        record["reason"] == "provider_catalog_throttled"
+        and not (tmp_path / ".last-pool-program").exists()
+    )
+    assert "sensitive" not in line and "credentials" not in line
+
+
+def test_productive_burst_finishes_work_then_obeys_time_funding_and_drain():
+    from scripts.run_locked_collection import poll_funded_burst
+
+    now = [100.0]
+    issued = []
+
+    def advance():
+        issued.append(now[0])
+        now[0] += 200
+        return 1
+
+    # The ninth authorized run may finish exactly at the deadline; no tenth lease is started.
+    assert (
+        poll_funded_burst(
+            64,
+            advance,
+            productive=True,
+            monotonic=lambda: now[0],
+            timer_active=lambda: True,
+        )
+        == 9
+    )
+    assert len(issued) == 9
+    issued.clear()
+    assert (
+        poll_funded_burst(
+            64,
+            lambda: issued.append(1) or 1,
+            productive=True,
+            monotonic=lambda: 0,
+            timer_active=lambda: False,
+        )
+        == 8
+    )
+    assert len(issued) == 8
+    issued.clear()
+    assert (
+        poll_funded_burst(
+            64,
+            lambda: issued.append(1) or 0,
+            productive=True,
+            monotonic=lambda: 0,
+            timer_active=lambda: True,
+        )
+        == 0
+    )
+    assert len(issued) == 1
+    issued.clear()
+
+    def failing():
+        issued.append(1)
+        raise RuntimeError("ambiguous claim")
+
+    with pytest.raises(RuntimeError, match="ambiguous claim"):
+        poll_funded_burst(
+            64, failing, productive=True, monotonic=lambda: 0, timer_active=lambda: True
+        )
+    assert len(issued) == 1
+
+    def no_timer():
+        pytest.fail("ordinary operators never inspect the service timer")
+
+    assert (
+        poll_funded_burst(
+            3, lambda: 1, productive=False, monotonic=lambda: 0, timer_active=no_timer
+        )
+        == 3
+    )
+    assert (
+        poll_funded_burst(
+            64,
+            lambda: 1,
+            productive=True,
+            monotonic=lambda: 0,
+            timer_active=lambda: True,
+        )
+        == 64
+    )
+
+
+@pytest.mark.parametrize("terminal", ["accepted", "rejected"])
+def test_installed_worker_extends_only_a_paid_burst(tmp_path, monkeypatch, terminal):
+    import scripts.run_locked_collection as worker
+
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text("{}")
+    calls = []
+    monkeypatch.setattr(
+        worker, "evidence_stores", lambda: (SimpleNamespace(rpc=lambda *a: True), None)
+    )
+
+    def completed(args, parser, raw, *, on_pool_settled, before_claim=None):
+        calls.append(1)
+        on_pool_settled(terminal)
+        return 1
+
+    monkeypatch.setattr(worker, "_run_options", completed)
+    monkeypatch.setattr(
+        worker,
+        "poll_pool_experiments",
+        lambda prompt, directory, database, run, **kw: run({}),
+    )
+    assert (
+        worker.main(
+            [
+                "--batch",
+                str(cfg),
+                "--prompt",
+                str(cfg),
+                "--offer-directory",
+                str(tmp_path),
+                "--productive-burst",
+                "--max-jobs",
+                "5",
+            ]
+        )
+        == 0
+    )
+    assert len(calls) == (5 if terminal == "accepted" else 1)

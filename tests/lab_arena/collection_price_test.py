@@ -4,7 +4,7 @@ import json
 import pytest
 
 from lab_arena.collection_broker import VERSIONS
-from lab_arena.collection_prices import endpoint_prices
+from lab_arena.collection_prices import CatalogError, endpoint_prices
 
 
 def test_prices_use_exact_provider_revision_and_highest_context_tier():
@@ -52,8 +52,9 @@ def test_prices_use_exact_provider_revision_and_highest_context_tier():
     result = endpoint_prices(routes, open_url=quote)
     assert all(p["prompt"] == "0.000004" for p in result["models"].values())
     routes[next(iter(routes))] = "unknown"
-    with pytest.raises(ValueError, match="unavailable"):
+    with pytest.raises(CatalogError, match="unavailable") as error:
         endpoint_prices(routes, open_url=quote)
+    assert error.value.code == "configured_endpoint_unavailable"
 
 
 @pytest.mark.parametrize("safety", [True, None, "false"])
@@ -89,5 +90,6 @@ def test_safety_retention_or_unknown_tier_cannot_admit_a_funding_job(safety):
             }
         return io.BytesIO(json.dumps(body).encode())
 
-    with pytest.raises(ValueError, match="strict zero-retention"):
+    with pytest.raises(CatalogError, match="strict zero-retention") as error:
         endpoint_prices(dict.fromkeys(VERSIONS, "p"), open_url=catalog)
+    assert error.value.code == "strict_retention_unavailable"

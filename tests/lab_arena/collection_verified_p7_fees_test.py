@@ -50,6 +50,7 @@ def db():
         755,
         756,
         757,
+        758,
     ]
     yield from database_with_lab_arena_migration(
         (
@@ -458,7 +459,7 @@ def exercise_successor_offers(
         research,
         "live",
         commit,
-        Json(["P8-s2"]),
+        Json(["P8-s2", "P8-s3"]),
         Json([model]),
         Json({model: 1250}),
         Json({model: 20000}),
@@ -491,6 +492,27 @@ def exercise_successor_offers(
         1400,
         200,
     )
+    # An existing fixed grant can finish at its original rate after prospective pool activation.
+    q.execute("SAVEPOINT standing_switch")
+    def legacy_grant(label):
+        hk = Keypair.create_from_uri("//" + label).ss58_address
+        return (
+            str(uuid4()), hk, hk, "live", Json(dict(grant, hotkey=hk)), 100000,
+            Json({"key_id": str(uuid4()), "fingerprint": "sha256:" + uuid4().hex * 2, "ciphertext_b64": "mock"}), None,
+        )
+    assert rpc("collection_register_v1", *legacy_grant("EligibleBeforeCutover"))["status"] == "enrolled"
+    frozen = (token, research, "live", commit, Json(["P8-s2", "P8-s3"]), Json([model]),
+              Json({model: 1250}), Json({model: 20000}), PAID_WORKFLOW_TERMS_HASH)
+    assert rpc("collection_priced_claim_v1", str(uuid4()), *frozen, None) == {"model": model}
+    q.execute("INSERT INTO public.collection_pool_activation(singleton) VALUES(true)")
+    assert rpc("collection_register_v1", *legacy_grant("ClosedAfterCutover"))["error"] == "collection_consent_invalid"
+    assert rpc("collection_priced_claim_v1", str(uuid4()), *frozen, None) is None
+    assert rpc("collection_claim_v1", job["job_id"], *frozen)["job_id"] == job["job_id"]
+    assert rpc("collection_finish_v1", job["job_id"], token, "accepted",
+               Json({"payment_rule": "verified_sales_evidence_v1", "training_status": "needs_review"}),
+               artifact, 101)["status"] == "accepted"
+    assert rpc("collection_reward_quotes_v1", 102)["quotes_microusd"] == {key: 1250}
+    q.execute("ROLLBACK TO standing_switch")
     q.execute("SAVEPOINT native_quality")
     with pytest.raises(pg.Error, match="settled verified"):
         rpc(

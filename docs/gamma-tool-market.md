@@ -114,11 +114,13 @@ Health events come from vault checks and from calls.
   the buyer pays nothing for the failed try. These are read as each vendor
   means them: ZeroBounce's error inside a 200, Prospeo's
   `INSUFFICIENT_CREDITS` and `INVALID_API_KEY` inside a 400, Findymail's
-  423 (paused) and Hunter's 429 (out of searches).
-- That answer alone takes no key out of the book, since a buyer shapes the
-  request. Where the vendor has a free check, the vault runs it and its
-  result decides. Without one (Exa, HarvestAPI), a 401 or 402 marks the key
-  `failed`, and a 403 only skips it for this call.
+  423 (paused, read as 401) and Hunter's 429 (out of searches).
+- A buyer shapes the request, so that answer alone does not always take a
+  key out of the book. A 401 (a bad key or a paused account) marks it
+  `failed`. A 402 marks it `failed` unless the vendor's free check still sees
+  a positive balance. A 403 only skips it, unless the free check says the key
+  is invalid. The vault runs that check at most once a minute per key;
+  without one due, only a 401 fails a key.
 - A 429 with no `Retry-After` skips the key for this call only. Hunter's
   403 is its rate limit, so it counts as a 429. A 429 with
   `Retry-After` goes back to the buyer.
@@ -128,7 +130,8 @@ Health events come from vault checks and from calls.
   `POST /tool-market/keys/{id}/check` to put it back in the book.
 
 A miner's own tab never buys from their own keys. For security, a hotkey
-registers at most one key per tool every 30 days, revoked keys included.
+registers at most one key per tool every 30 days after a key that served a
+call, revoked keys included.
 
 An ask may be at most $0.25 per credit, or 100% of the vendor's own price
 for a vendor-USD tool. A buyer can send `max_ask_microusd` with a call, and

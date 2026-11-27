@@ -223,13 +223,13 @@ _OPERATIONS: Sequence[Operation] = (
               dict({name: _NAME for name in _PROSPEO_FIELDS}, only_verified_email=Param("bool")),
               cost=_prospeo_cost, real_status=_prospeo_status,
               wrap=_prospeo_body),
-    # Findymail: one credit per email found. 423 is a paused account.
+    # Findymail: one credit per email found. 423 is a paused account, which no free check sees, so it counts as a bad key.
     Operation("findymail", "find_from_linkedin", "POST", "https://app.findymail.com/api/search/business-profile",
               UNIT_CALL, 1, {"linkedin_url": _URL}, cost=_found_email("contact", "email"),
-              real_status=lambda status, _: 402 if status == 423 else status),
+              real_status=lambda status, _: 401 if status == 423 else status),
     Operation("findymail", "find_from_name", "POST", "https://app.findymail.com/api/search/name", UNIT_CALL, 1,
               {"name": Param("str", required=True, max_length=200), "domain": Param("str", required=True, max_length=253)},
-              cost=_found_email("contact", "email"), real_status=lambda status, _: 402 if status == 423 else status),
+              cost=_found_email("contact", "email"), real_status=lambda status, _: 401 if status == 423 else status),
     # Hunter: one search per email found. Its 403 is a rate limit and its
     # 429 an empty account.
     Operation("hunter", "email_finder", "GET", "https://api.hunter.io/v2/email-finder", UNIT_CALL, 1,

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import threading
+import time
 import uuid
 from typing import Any, Callable, Dict, Mapping, Optional
 
@@ -39,6 +41,7 @@ from lead_order_vault import tools as vault_tools
 TOKEN_PREFIX = "tmt_"
 # Keys tried for one call before the buyer is told there is no supply.
 MAX_KEYS_PER_CALL = 3
+RECHECK_SPACING_SECONDS = 60
 CALL_TIMEOUT_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MIN_TAB_SECONDS = 60
@@ -82,6 +85,8 @@ class ToolMarket:
         self._epoch = current_epoch
         self._new_id = new_id
         self._new_token = new_token
+        self._rechecked: Dict[str, float] = {}
+        self._recheck_lock = threading.Lock()
 
     # Terms and balance ------------------------------------------------------
     def accept_terms(self, identity: BuyerIdentity, body: Mapping[str, Any]) -> Dict[str, Any]:
@@ -324,27 +329,56 @@ class ToolMarket:
     def _recheck(self, key_id: str, tool: str, envelope: str) -> bool:
         """Check a key with its vendor again and record it; True if it may trade."""
 
+        checked = self._recheck_answer(key_id, tool, envelope)
+        return checked is not None and checked["status"] != "invalid"
+
+    def _recheck_answer(self, key_id: str, tool: str, envelope: str) -> Optional[Mapping[str, Any]]:
+        """The vault's recorded check of a key, or None when it gave no answer."""
+
         try:
             checked = self._vault.check(provider=tool, envelope=envelope, management_envelope=None)
         except VaultUnavailable:
-            return False
-        status = checked.get("status")
-        if status not in ("valid", "unchecked", "invalid"):
-            return False
-        self._store.record_key_event(key_id=key_id, status=status, reason=checked.get("reason"),
+            return None
+        if checked.get("status") not in ("valid", "unchecked", "invalid"):
+            return None
+        self._store.record_key_event(key_id=key_id, status=checked["status"], reason=checked.get("reason"),
                                      balance=checked.get("balance"))
-        return status != "invalid"
+        return checked
 
     def _key_failed(self, tool: str, ask: book.Ask, status: int, failure: str) -> None:
-        """A call answered as if the key were unusable. A buyer can shape the
-        request, so the answer alone takes no key out of the book: the
-        vendor's free check decides. Without one, a 401 or 402, which only the
-        key's account can cause, fails it; a 403 skips it for this call."""
+        """A call answered as if the key were unusable. A buyer shapes the
+        request, so the answer alone does not always take a key out:
 
-        if vault_tools.TOOLS[tool].balance_url is not None:
-            self._recheck(ask.key_id, tool, ask.envelope)
-        elif status in (401, 402):
+        - 401 (a bad key or account) always fails it;
+        - 402 (no credit) fails it unless the vendor's free check sees a
+          positive balance;
+        - 403 fails it only when the free check says the key is invalid.
+
+        Without a check due (one a minute per key), only a 401 fails it.
+        """
+
+        if vault_tools.TOOLS[tool].balance_url is None:
+            confirmed = status in (401, 402)
+        elif not self._recheck_due(ask.key_id):
+            confirmed = status == 401
+        else:
+            checked = self._recheck_answer(ask.key_id, tool, ask.envelope)
+            if checked is None or checked["status"] == "invalid":
+                return  # unknown, or already recorded as invalid
+            confirmed = status == 401 or (status == 402 and checked.get("balance") is None)
+        if confirmed:
             self._store.record_key_event(key_id=ask.key_id, status="failed", reason=failure)
+
+    def _recheck_due(self, key_id: str) -> bool:
+        """At most one failure re-check per key a minute, so repeated calls
+        cannot hammer a miner's account."""
+
+        now = time.monotonic()
+        with self._recheck_lock:
+            if now - self._rechecked.get(key_id, -RECHECK_SPACING_SECONDS) < RECHECK_SPACING_SECONDS:
+                return False
+            self._rechecked[key_id] = now
+            return True
 
     def _own_key(self, identity: BuyerIdentity, key_id: Any) -> Dict[str, Any]:
         try:

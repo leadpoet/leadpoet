@@ -380,14 +380,15 @@ def test_hunter_rate_limits_skip_a_key_and_an_empty_account_fails_it(world):
     _, token = world.buyer()
     world.vendor.script["hunter-slow"] = [ok({"errors": [{"id": "too_many_requests"}]}, status=403)]
     world.vendor.script["hunter-empty"] = [ok({"errors": [{"id": "too_many_requests"}]}, status=429)]
-    world.vault.answers["hunter-empty"] = {"status": "invalid", "reason": "no_credit"}
+    # Hunter's check proves the key but reads no balance, so its 402 fails it.
+    world.vault.answers["hunter-empty"] = {"balance": None}
     world.vendor.script["hunter-ok"] = [ok({"data": {"email": "ada@acme.com", "score": 97}}),
                                         ok({"data": {"email": None, "score": None}})]
     assert world.market.call(token, FIND)["charge_microusd"] == 11_000
     assert [s[0] for s in world.vendor.sent] == ["hunter-slow", "hunter-empty", "hunter-ok"]
     # Hunter's 403 is a rate limit: skipped for this call only.
     assert world.market.statement(slow)["keys"][0]["health"]["status"] != "failed"
-    assert world.market.statement(empty)["keys"][0]["health"]["reason"] == "no_credit"
+    assert world.market.statement(empty)["keys"][0]["health"]["status"] == "failed"
     world.vendor.script["hunter-slow"] = [ok({"data": {"email": None}})]
     assert world.market.call(token, FIND)["charge_microusd"] == 0  # no email found: free
 
@@ -401,6 +402,14 @@ def test_a_buyer_cannot_take_working_keys_out_of_the_book(world):
     with pytest.raises(ToolMarketError):
         world.market.call(token, VALIDATE)
     assert len(world.market.order_book("zerobounce")["asks"]) == 1
+    # Out of credit, the answer says; the check still sees a balance. Within the
+    # minute after a check none runs again, and the key stays.
+    checks = world.vault.checks
+    world.vendor.script["zb-a"] = [ok({"error": "your account ran out of credits"})]
+    for _ in range(2):
+        with pytest.raises(ToolMarketError):
+            world.market.call(token, VALIDATE)
+    assert world.vault.checks == checks and len(world.market.order_book("zerobounce")["asks"]) == 1
     # Exa has no free check, so its 403 only skips the key for this call.
     world.vendor.script["exa-a"] = [ok({}, status=403)]
     with pytest.raises(ToolMarketError):
@@ -424,7 +433,14 @@ def test_a_miners_tab_never_buys_from_their_own_key(world):
 
 
 def test_a_hotkey_registers_one_key_per_tool_every_30_days(world):
-    miner, key_id = world.miner_key("first-key", 10_000)
+    miner, typo_id = world.miner_key("typo-key", 10_000)
+    world.market.revoke_key(world.who(miner), typo_id)
+    # A key that never served a call does not start the 30 days.
+    key_id = world.register(miner, {"tool": "harvestapi", "daily_cap_microusd": USD,
+                                    "envelope": world.vault.seal("harvestapi", miner, "first-key")})["key_id"]
+    world.market.post_ask(world.who(miner), {"key_id": key_id, "ask_microusd": 10_000})
+    _, token = world.buyer()
+    world.market.call(token, PROFILE)
     world.market.revoke_key(world.who(miner), key_id)
     with pytest.raises(ToolMarketError) as soon:
         world.register(miner, {"tool": "harvestapi", "daily_cap_microusd": USD,

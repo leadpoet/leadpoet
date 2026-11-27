@@ -94,7 +94,8 @@ def test_each_vendor_status_is_read_as_what_it_means():
     assert PROSPEO.status(400, {"error": True, "error_code": "NO_MATCH"}) == 400
     # Hunter's 403 is a rate limit and its 429 an empty account.
     assert HUNTER.status(403, {}) == 429 and HUNTER.status(429, {}) == 402 and HUNTER.status(451, {}) == 451
-    assert FINDYMAIL.status(423, {}) == 402 and FINDYMAIL.status(402, {}) == 402
+    # A paused Findymail account is a bad key: no free check sees it.
+    assert FINDYMAIL.status(423, {}) == 401 and FINDYMAIL.status(402, {}) == 402
 
 
 def test_units_count_only_what_the_vendor_charges():

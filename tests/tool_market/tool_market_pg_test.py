@@ -21,7 +21,7 @@ from lab_arena.broker import ProviderResponse
 from lab_arena.chain import ArenaChainError
 from lab_arena.lead_orders.auth import BuyerIdentity
 from lab_arena.lead_orders.gamma import GammaReading
-from lab_arena.lead_orders.vault_client import VaultTransportError
+from lab_arena.lead_orders.vault_client import VaultTransportError, VaultUnavailable
 from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable, PsycopgTransport
 from lab_arena.tool_market import market as market_module
 from lab_arena.tool_market.config import ToolMarketConfig
@@ -160,7 +160,8 @@ class World:
                              body_sha256="0" * 64)
 
     def accept(self, hk, role):
-        self.market.accept_terms(self.who(hk), {"role": role, "terms_version": "v1", "terms_sha256": self.terms})
+        body = {"role": role, "terms_version": "v1", "terms_sha256": self.terms}
+        self.market.accept_terms(self.who(hk), body, json.dumps(body).encode())
 
     def miner_key(self, secret, ask, *, tool="harvestapi", cap=10 * USD, miner=None):
         miner = miner or hotkey()
@@ -761,6 +762,29 @@ def test_a_miner_rechecks_a_key_only_where_a_free_check_proves_it(world):
     with pytest.raises(ToolMarketError) as soon:
         world.market.check_key(who, zb)
     assert (soon.value.status, soon.value.code) == (429, "check_too_soon")
+
+
+def test_a_recheck_the_vault_cannot_answer_says_so_and_leaves_the_key(world, monkeypatch):
+    miner, zb = world.miner_key("zb-vault-down", 4_000, tool="zerobounce")
+
+    def unreachable(**kwargs):
+        raise VaultUnavailable("vault_unreachable", forwarded=False)
+
+    monkeypatch.setattr(world.vault, "check", unreachable)
+    with pytest.raises(ToolMarketError) as failed:  # not "tradeable": false for a working key
+        world.market.check_key(world.who(miner), zb)
+    assert (failed.value.status, failed.value.code) == (503, "vault_unreachable")
+    assert [ask["ask_microusd"] for ask in world.market.order_book("zerobounce")["asks"]] == [4_000]
+
+
+def test_a_terms_acceptance_keeps_the_body_as_signed(world, admin):
+    buyer = hotkey()
+    world.accept(buyer, "buyer")
+    admin.execute("SELECT signed_body,signature,host,signed_at FROM public.tool_market_terms WHERE hotkey=%s",
+                  (buyer,))
+    signed_body, signature, host, signed_at = admin.fetchone()
+    assert json.loads(signed_body) == {"role": "buyer", "terms_version": "v1", "terms_sha256": world.terms}
+    assert (signature, host, signed_at) == ("ab" * 64, "gw.example", 1)
 
 
 def test_a_buyer_has_a_few_calls_in_flight_at_most(world):

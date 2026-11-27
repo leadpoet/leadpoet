@@ -246,7 +246,7 @@ async def close_tab(request: Request) -> Response:
 
 @router.post("/tool-market/terms")
 async def accept_terms(request: Request) -> Response:
-    return await _handle(request, lambda m, who, body: m.accept_terms(who, _json(body)), signed=True,
+    return await _handle(request, lambda m, who, body: m.accept_terms(who, _json(body), body), signed=True,
                          proof=True)
 
 

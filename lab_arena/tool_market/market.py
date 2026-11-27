@@ -52,7 +52,7 @@ RECHECK_SPACING_SECONDS = 60
 # balance), so past this many the answer is 503 at once.
 CHAIN_READS = 2
 # An envelope (4,096 characters), the attestation and the other fields.
-MAX_REGISTER_BODY_BYTES = 8192
+MAX_SIGNED_BODY_BYTES = 8192  # a terms or register body, kept as signed
 MAX_USAGE_PAGE = 500
 CALL_TIMEOUT_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -143,16 +143,20 @@ class ToolMarket:
         self._chain_reads = threading.BoundedSemaphore(CHAIN_READS)
 
     # Terms and balance ------------------------------------------------------
-    def accept_terms(self, identity: BuyerIdentity, body: Mapping[str, Any]) -> Dict[str, Any]:
+    def accept_terms(self, identity: BuyerIdentity, body: Mapping[str, Any], signed_body: bytes) -> Dict[str, Any]:
+        """Record a signed acceptance; ``signed_body`` is kept so it can be verified again."""
+
         role = body.get("role")
         if role not in ("buyer", "miner") or set(body) != {"role", "terms_version", "terms_sha256"}:
             raise ToolMarketError(400, "request_invalid")
+        if len(signed_body) > MAX_SIGNED_BODY_BYTES:
+            raise ToolMarketError(413, "request_too_large")
         if body["terms_version"] != self._config.terms_version or body["terms_sha256"] != self._config.terms_sha256:
             raise ToolMarketError(409, "terms_outdated", terms_version=self._config.terms_version)
         return self._store.accept_terms(
             role=role, hotkey=identity.hotkey, version=self._config.terms_version,
             terms_sha256=self._config.terms_sha256, host=identity.host, signed_at=identity.signed_at,
-            body_sha256=identity.body_sha256, signature=identity.signature.lower().removeprefix("0x"))
+            signed_body=signed_body.decode("utf-8"), signature=identity.signature.lower().removeprefix("0x"))
 
     def use_nonce(self, hotkey: str, signature_hash: str, signed_at: int) -> bool:
         return self._store.use_nonce(hotkey=hotkey, signature_hash=signature_hash, signed_at=signed_at)
@@ -242,7 +246,7 @@ class ToolMarket:
 
         if set(body) != {"tool", "envelope", "daily_cap_microusd", "attestation"}:
             raise ToolMarketError(400, "request_invalid")
-        if len(signed_body) > MAX_REGISTER_BODY_BYTES:  # it is kept for good
+        if len(signed_body) > MAX_SIGNED_BODY_BYTES:  # it is kept for good
             raise ToolMarketError(413, "request_too_large")
         if body["attestation"] != ATTESTATION:
             raise ToolMarketError(400, "attestation_required", attestation=ATTESTATION)
@@ -307,7 +311,7 @@ class ToolMarket:
             if not self._recheck_due(key["key_id"]):
                 raise ToolMarketError(429, "check_too_soon", retry_after_seconds=RECHECK_SPACING_SECONDS)
             checked = self._recheck(key["key_id"], key["tool"], key["envelope"])
-        return {"key_id": key["key_id"], "tradeable": checked is not None and checked["status"] != "invalid"}
+        return {"key_id": key["key_id"], "tradeable": checked["status"] != "invalid"}
 
     def revoke_key(self, identity: BuyerIdentity, key_id: Any) -> Dict[str, Any]:
         key = self._own_key(identity, key_id)
@@ -620,15 +624,12 @@ class ToolMarket:
         except VaultUnavailable as error:
             raise ToolMarketError(503 if error.retryable else 400, error.code) from None
 
-    def _recheck(self, key_id: str, tool: str, envelope: str) -> Optional[Mapping[str, Any]]:
-        """Check a listed key with its vendor again and record the answer; None when the vault gave none."""
+    def _recheck(self, key_id: str, tool: str, envelope: str) -> Mapping[str, Any]:
+        """Check a listed key with its vendor again and record the answer; raises when the vault gave none."""
 
-        try:
-            checked = self._check(tool, envelope)
-        except ToolMarketError:
-            return None
+        checked = self._check(tool, envelope)
         if checked.get("status") not in ("valid", "unchecked", "invalid"):
-            return None
+            raise ToolMarketError(502, "vault_answer_invalid")
         self._store.record_key_event(key_id=key_id, status=checked["status"], reason=checked.get("reason"))
         return checked
 
@@ -645,9 +646,12 @@ class ToolMarket:
         if status == 402:
             if vault_tools.TOOLS[tool].balance_url is None or not self._recheck_due(ask.key_id):
                 return
-            checked = self._recheck(ask.key_id, tool, ask.envelope)
-            # Unknown, already recorded as invalid, or it still has credit.
-            if checked is None or checked["status"] == "invalid" or checked.get("balance") is not None:
+            try:
+                checked = self._recheck(ask.key_id, tool, ask.envelope)
+            except ToolMarketError:  # unknown: the key stays
+                return
+            # Already recorded as invalid, or it still has credit.
+            if checked["status"] == "invalid" or checked.get("balance") is not None:
                 return
         self._store.record_key_event(key_id=ask.key_id, status="invalid",
                                      reason="unauthorized" if status == 401 else "no_credit")

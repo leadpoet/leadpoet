@@ -23,7 +23,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "tool_market_use_nonce_v1": (("p_hotkey", _T), ("p_signature_hash", _T), ("p_signed_at", _B)),
     "tool_market_accept_terms_v1": (
         ("p_role", _T), ("p_hotkey", _T), ("p_version", _T), ("p_terms_sha256", _T), ("p_host", _T),
-        ("p_signed_at", _B), ("p_body_sha256", _T), ("p_signature", _T),
+        ("p_signed_at", _B), ("p_signed_body", _T), ("p_signature", _T),
     ),
     "tool_market_open_tab_v1": (
         ("p_tab_id", _U), ("p_hotkey", _T), ("p_token_hash", _T), ("p_budget", _B), ("p_seconds", _I),
@@ -95,10 +95,10 @@ class ToolMarketStore:
                               p_signed_at=int(signed_at)))
 
     def accept_terms(self, *, role: str, hotkey: str, version: str, terms_sha256: str, host: str, signed_at: int,
-                     body_sha256: str, signature: str) -> Dict[str, Any]:
+                     signed_body: str, signature: str) -> Dict[str, Any]:
         return self._rpc("tool_market_accept_terms_v1", p_role=role, p_hotkey=hotkey, p_version=version,
                          p_terms_sha256=terms_sha256, p_host=host, p_signed_at=int(signed_at),
-                         p_body_sha256=body_sha256, p_signature=signature)
+                         p_signed_body=signed_body, p_signature=signature)
 
     def open_tab(self, *, tab_id: str, hotkey: str, token_hash: str, budget_microusd: int, seconds: int,
                  terms_sha256: Optional[str]) -> Dict[str, Any]:

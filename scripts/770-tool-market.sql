@@ -58,7 +58,8 @@ CREATE TABLE public.tool_market_nonces (
 );
 
 -- A signed acceptance of the terms text whose sha256 the gateway is
--- configured with. Kept whole so it can be verified again later.
+-- configured with. ``signed_body``, ``host``, ``signed_at`` and
+-- ``signature`` let anyone verify it again.
 CREATE TABLE public.tool_market_terms (
   role TEXT NOT NULL CHECK(role IN ('buyer','miner')),
   hotkey TEXT NOT NULL CHECK(hotkey ~ '^[1-9A-HJ-NP-Za-km-z]{46,48}$'),
@@ -66,7 +67,7 @@ CREATE TABLE public.tool_market_terms (
   terms_version TEXT NOT NULL CHECK(terms_version ~ '^[A-Za-z0-9._-]{1,32}$'),
   host TEXT NOT NULL CHECK(length(host) BETWEEN 1 AND 253),
   signed_at BIGINT NOT NULL,
-  body_sha256 TEXT NOT NULL CHECK(body_sha256 ~ '^[0-9a-f]{64}$'),
+  signed_body TEXT NOT NULL CHECK(length(signed_body) BETWEEN 2 AND 8192),
   signature TEXT NOT NULL CHECK(length(signature) BETWEEN 128 AND 130),
   accepted_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY(role,hotkey,terms_sha256)
@@ -382,11 +383,11 @@ END;
 $nonce770$;
 
 CREATE FUNCTION public.tool_market_accept_terms_v1(p_role TEXT,p_hotkey TEXT,p_version TEXT,p_terms_sha256 TEXT,
- p_host TEXT,p_signed_at BIGINT,p_body_sha256 TEXT,p_signature TEXT)
+ p_host TEXT,p_signed_at BIGINT,p_signed_body TEXT,p_signature TEXT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $terms770$
 BEGIN
- INSERT INTO public.tool_market_terms(role,hotkey,terms_sha256,terms_version,host,signed_at,body_sha256,signature)
- VALUES(p_role,p_hotkey,p_terms_sha256,p_version,p_host,p_signed_at,p_body_sha256,p_signature)
+ INSERT INTO public.tool_market_terms(role,hotkey,terms_sha256,terms_version,host,signed_at,signed_body,signature)
+ VALUES(p_role,p_hotkey,p_terms_sha256,p_version,p_host,p_signed_at,p_signed_body,p_signature)
  ON CONFLICT DO NOTHING;
  RETURN jsonb_build_object('status',CASE WHEN FOUND THEN 'accepted' ELSE 'exists' END);
 END;

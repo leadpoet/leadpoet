@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 from zipfile import ZipFile
 
 from lab_arena import collection_intake as intake, collection_judge as judge
@@ -22,6 +23,10 @@ from scripts.run_locked_collection import load_batch, verify_live_panel
 
 
 TERMINAL = {"accepted", "failed", "rejected"}
+
+
+class ExportWindowExpired(TimeoutError):
+    """The watcher's allotted export time has elapsed."""
 
 
 class OfferRows:
@@ -164,7 +169,7 @@ def _save(directory, data):
     return digest
 
 
-def observe(private_root, directory, db, objects, previous=None, *, max_groups=1):
+def observe(private_root, directory, db, objects, previous=None, *, max_groups=3, deadline=None):
     """One bounded watcher tick. Backfills and holds use the same public batch exporter."""
     intake.register_signatures()
     directory.mkdir(mode=0o700, exist_ok=True, parents=True)
@@ -260,19 +265,27 @@ def observe(private_root, directory, db, objects, previous=None, *, max_groups=1
         if pass_number % 4 == 0:
             work = [(1 - priority, batch, case) for priority, batch, case in work]
         work.sort(key=lambda item: (item[0], "/".join(item[1:]) <= cursor, item[1:]))
+        last_pack_seconds = None
         for _, batch, case in work[:max_groups]:
+            started = time.monotonic()
+            # Leave room to write the atomic index before the watch deadline.
+            if deadline is not None and last_pack_seconds is not None and deadline - started <= last_pack_seconds + 1:
+                break
             raw, data = inputs[batch]
             group = offers[batch][case]
-            offers[batch][case] = _pack(
-                raw,
-                prompt,
-                data,
-                objects,
-                directory / batch,
-                case,
-                group["members"],
-                old.get(batch, {}).get(case, {}),
-            )
+            try:
+                packed = _pack(
+                    raw, prompt, data, objects, directory / batch, case,
+                    group["members"], old.get(batch, {}).get(case, {}),
+                )
+            except ExportWindowExpired:
+                if last_pack_seconds is None:
+                    raise
+                # Publish earlier verified groups. The interrupted group retains
+                # its previous archive or queued state and is retried next time.
+                break
+            offers[batch][case] = packed
+            last_pack_seconds = time.monotonic() - started
             cursor = batch + "/" + case
 
         manifest = {"schema": "collection.private-export-index.v1", "offers": offers}

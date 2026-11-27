@@ -311,22 +311,25 @@ def main():
     # Leave time for billing reconciliation in the same three-minute systemd unit.
     window = min(45, 120 - int(time.monotonic() - started))
     if db is not None and window > 0 and (private_root / "paid" / "batch.json").is_file():
-        def timed_out(*_):
-            raise TimeoutError("private export tick exceeded its time budget")
-
-        prior_alarm = signal.signal(signal.SIGALRM, timed_out)
-        signal.alarm(window)
         try:
             from lab_arena.service import S3ObjectStore
-            from scripts.collection_export_snapshots import observe
+            from scripts.collection_export_snapshots import ExportWindowExpired, observe
 
-            objects = S3ObjectStore(env["LAB_ARENA_BUCKET"], prefix=env.get("LAB_ARENA_OBJECT_PREFIX", ""))
-            data["exports"] = observe(private_root, args.state_directory / "exports", db, objects, prior.get("exports"))
+            def timed_out(*_):
+                raise ExportWindowExpired("private export tick exceeded its time budget")
+
+            prior_alarm = signal.signal(signal.SIGALRM, timed_out)
+            try:
+                deadline = time.monotonic() + window
+                signal.alarm(window)
+                objects = S3ObjectStore(env["LAB_ARENA_BUCKET"], prefix=env.get("LAB_ARENA_OBJECT_PREFIX", ""))
+                data["exports"] = observe(private_root, args.state_directory / "exports", db, objects,
+                                          prior.get("exports"), deadline=deadline)
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, prior_alarm)
         except Exception as exc:
             data["read_errors"]["exports"] = type(exc).__name__
-        finally:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, prior_alarm)
     save(args.state_directory, data)
     # Archive or training publication retries must not skip billing reconciliation.
     return bool(data["read_errors"].keys() - {"settlement", "exports"})

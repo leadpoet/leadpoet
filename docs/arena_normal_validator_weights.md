@@ -610,6 +610,12 @@ transactions are unchanged.
 
 ## Locked collection settlement
 
+A miner signs one spending limit for the sales sandbox. When a run completes and its trace and provider receipts verify, the ledger credits the funding hotkey with 1.25 times its settled, authorized generator charges. Both passing and failing task outcomes qualify. An unresolved receipt holds that job. [Funding and withdrawal](locked-collection.md#enrollment).
+
+The signed weight basis retains the name `leadpoet.collection.fixed_run_quotes.v1`. For standing grants, its dollar amounts come from settled receipts. Historical fixed-price jobs retain their signed fees.
+
+### Historical fixed-price launch
+
 From the champion retirement epoch on Finney/71, the gateway signs a
 `leadpoet.collection.fixed_run_quotes.v1` basis in the existing accepted
 weight-state envelope. Update every participating validator's canonical
@@ -642,8 +648,9 @@ launch job must be resolved first. The read-only
 `collection_reward_schedule_v1()` shows the pilot-approved fees, limits
 and any pending launch job. After the first paid job, its `first_epoch` is the paid settlement boundary. `collection_reward_start_v1()` identifies the first epoch signed with the collection weight basis.
 
-For payout epoch E, sum the frozen prices of all accepted, live,
-miner-funded jobs whose accepted epoch was E−1. Code checks, provider
+### Epoch allocation and finalized payouts
+
+For weight epoch E, sum the dollar targets of all eligible live miner-funded jobs accepted in E−1. Code checks, provider
 receipts and a verified run artifact precede acceptance. Each run is counted
 in precisely this epoch. The signed state binds the job count, digest,
 beneficiary totals and valuation. Retrying a state read returns the first
@@ -662,6 +669,8 @@ go to burn. Quantization and consensus affect the eventual emission.
 The miner statement labels these as weight targets. Use finalized
 commitment/reveal and matching vectors for weight verification; reporting
 actual token income separately requires the subsequent chain distribution.
+
+### Historical pilot review
 
 Build the private batch review on the authorized gateway/worker host with the
 original private manifest and rubric. All outputs below are new private files.

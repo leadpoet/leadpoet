@@ -70,6 +70,8 @@ python -m lab_arena.tool_market.client key --budget 20 --days 30
 export SUBNET71_API_KEY=<token it printed>
 python -m lab_arena.tool_market.client call hunter email_finder domain=acme.com full_name="Ada Lee"
 python -m lab_arena.tool_market.client call exa search query="crm vendors" numResults:=5
+python -m lab_arena.tool_market.client key-status        # the key's spend and expiry
+python -m lab_arena.tool_market.client key-close         # unspent budget back to the balance
 ```
 
 `name=value` sends text and `name:=value` sends JSON. `--private` (or
@@ -80,8 +82,6 @@ to this machine.
 For an agent, `python -m lab_arena.tool_market.client mcp` is a stdio MCP
 server with two tools: `find_tool` (the catalog) and `call_tool`. It holds
 only the API key, so an agent can spend at most that key's budget.
-`key-status` shows a key's spend and `key-close` returns its unspent
-budget.
 
 ## Routes
 
@@ -308,8 +308,11 @@ deployment, exactly as lead orders do.
   whether a key is live. The miner sealed the key, so it holds it already;
   the check adds only Leadpoet's address. A read-only 30-day check before
   the vault would close this.
-- **A balance reads every tab the buyer ever opened.** Fine at launch;
-  keep a running total before buyers open thousands of tabs.
+- **Three reads grow with history.** A balance reads every tab the buyer
+  ever opened, each call sums its key's earlier calls, and the book
+  computes each key's last 24 h and last hour from the call ledger on
+  every call. Fine at launch volumes; keep running totals, and cache the
+  public catalog and books, before they grow.
 - **A lost API key holds its budget until it expires.** Only its token
   closes it, and the CLI makes 30-day keys by default; a signed "close my
   keys" route would let a buyer free a lost one.
@@ -320,9 +323,6 @@ deployment, exactly as lead orders do.
   once, and one that sends nothing holds its slot for 10 s, so a stranger
   can keep every call at `503 no_supply` (nothing is charged). Limit the
   vault port to the gateway's egress, leaving only `/v1/identity` public.
-- **The book is read on every call.** It computes each key's last 24 h
-  and last hour from the call ledger. That is fine at launch volumes;
-  cache the public catalog and books before heavy anonymous traffic.
 - **HarvestAPI prices are unconfirmed.** Its per-endpoint prices are not
   published, so launch keeps only its two profile reads.
 - **No vault receipts for miners.** Calls do not yet keep the vault's
@@ -332,9 +332,6 @@ deployment, exactly as lead orders do.
   `max_ask_microusd`; a delay on increases can follow.
 - **A key's budget is fixed.** Gamma spent later does not raise an open
   key's budget; create another key.
-- **Each call sums its key's earlier calls.** A 30-day key with many
-  thousands of calls makes each reserve slower; keep a running total if
-  keys get that busy.
 - **The terms name no governing law.** Subnet 71 has no legal entity
   yet; add one when an entity exists.
 - **Lead orders still exist.** They stay as they are, and off. Retiring them

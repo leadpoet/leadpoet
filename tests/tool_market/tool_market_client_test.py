@@ -66,7 +66,7 @@ def test_the_mcp_server_lists_two_tools_and_calls_with_the_api_key(monkeypatch):
     request = sent.sent[0]
     assert request.get_header("Authorization") == "Bearer tmt_key"
     assert json.loads(request.data) == {"tool": "hunter", "operation": "email_finder",
-                                        "params": {"domain": "acme.com"}}
+                                        "params": {"domain": "acme.com"}, "private": False}
 
 
 def test_a_refused_call_reaches_the_agent_as_an_error(monkeypatch):

@@ -88,11 +88,9 @@ class Client:
 
     def call(self, tool: str, operation: str, params: Dict[str, Any],
              max_ask_microusd: Optional[int] = None, private: Any = False) -> Dict[str, Any]:
-        body: Dict[str, Any] = {"tool": tool, "operation": operation, "params": params}
+        body: Dict[str, Any] = {"tool": tool, "operation": operation, "params": params, "private": private}
         if max_ask_microusd is not None:
             body["max_ask_microusd"] = max_ask_microusd
-        if private is not False:  # anything else is the gateway's to refuse, never dropped
-            body["private"] = private
         return self.request("POST", "/tool-market/call", body)
 
 
@@ -210,10 +208,10 @@ def main(argv: Optional[list] = None) -> int:
         answer = client.request("POST", "/tool-market/terms", {
             "role": "buyer", "terms_version": version, "terms_sha256": sha256}, signed=True)
         wanted = answer.get("terms_version")
-        if answer.get("error") == "terms_outdated" and PUBLISHED_TERMS.get(wanted) == answer.get("terms_sha256"):
+        if answer.get("error") == "terms_outdated" and wanted in PUBLISHED_TERMS:
             # The gateway trades on another published version: sign that one.
             answer = client.request("POST", "/tool-market/terms", {
-                "role": "buyer", "terms_version": wanted, "terms_sha256": answer["terms_sha256"]}, signed=True)
+                "role": "buyer", "terms_version": wanted, "terms_sha256": PUBLISHED_TERMS[wanted]}, signed=True)
     elif args.command == "balance":
         answer = client.request("GET", "/tool-market/balance", signed=True)
     elif args.command == "key":

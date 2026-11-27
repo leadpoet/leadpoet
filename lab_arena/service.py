@@ -1169,6 +1169,8 @@ class ArenaService:
         self._signer_lock = threading.Lock()
         self._clock = config.clock
         self._lock = threading.RLock()
+        self._collection_status_lock = threading.Lock()
+        self._collection_status_cache: Optional[Tuple[float, str, Dict[str, Any]]] = None
         self._hot_round_lock = threading.Lock()
         self._hot_rounds: Dict[str, Tuple[float, Dict[str, Any]]] = {}
         self._submission_request_limiter = (
@@ -2740,6 +2742,48 @@ class ArenaService:
             return collection_intake.mode_from_environment()
         except collection_intake.IntakeError as exc:
             raise ServiceError(exc.code, exc.status) from None
+
+    def public_collection_status(self) -> Dict[str, Any]:
+        """Only aggregate paid work is public. Never forward private participation records."""
+        from lab_arena.collection_intake import PAID_OFFER_ID
+
+        mode = self.collection_mode()
+        if mode == "off":
+            raise ServiceError("collection_inactive", 404)
+        with self._collection_status_lock:
+            cached = self._collection_status_cache
+            if cached is not None and time.monotonic() < cached[0] and cached[1] == mode:
+                return cached[2]
+            snapshot = self._store._transport.rpc("collection_participation_v1", {})
+            work = snapshot.get("work") if isinstance(snapshot, Mapping) else None
+            if not isinstance(work, list):
+                raise ArenaStoreUnavailable("collection work counts unavailable")
+            running = verified = 0
+            for row in work:
+                if not isinstance(row, Mapping) or row.get("mode") not in ("pilot", "live"):
+                    raise ArenaStoreUnavailable("invalid collection work counts")
+                if row["mode"] != "live":
+                    continue
+                counters = ("assigned", "accepted", "ready", "failed", "rejected", "expired")
+                if any(type(row.get(key)) is not int or row[key] < 0 for key in counters):
+                    raise ArenaStoreUnavailable("invalid collection work counts")
+                active = row["assigned"] - sum(row[key] for key in counters[1:])
+                if active < 0:
+                    raise ArenaStoreUnavailable("inconsistent collection work counts")
+                running += active
+                verified += row["accepted"]
+            offer = self.collection_terms() if mode == "live" else {}
+            epoch = self._config.chain.current_settlement_epoch()
+            result = {
+                "paid_enrollment_open": bool(offer.get("fixed_quotes") and
+                                             PAID_OFFER_ID.fullmatch(offer.get("offer_id") or "")),
+                "champion_rewards_off": self._collection_reward_active(int(epoch)),
+                "running_runs": running,
+                "verified_runs": verified,
+                "as_of": self.now().isoformat(),
+            }
+            self._collection_status_cache = (time.monotonic() + 30, mode, result)
+            return result
 
     def collection_terms(self, task_scope: str = "synthetic_workflows", offer_id: Optional[str] = None) -> Dict[str, Any]:
         from lab_arena import collection_intake

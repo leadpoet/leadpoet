@@ -98,7 +98,7 @@ These tools are good candidates once the launch set has run:
    charge.
 
 Both buyers and miners sign the configured terms (`POST /tool-market/terms`)
-before they trade. This change writes no terms text.
+before they trade. The text is `docs/tool-market-terms.md`.
 
 ## Order book and key health
 
@@ -192,7 +192,7 @@ All tool-market data is in `scripts/770-tool-market.sql`.
 | `LEADPOET_TOOL_MARKET_TOOLS_OFF` | comma-separated tools turned off; empty by default, so all trade |
 | `LEADPOET_TOOL_MARKET_BUYER_HOTKEYS` | optional allowlist of buyer hotkeys, for a staff rollout |
 | `LEADPOET_TOOL_MARKET_GAMMA_SERVICE` | the tool market's Gamma service SS58 hotkey; must differ from lead orders' |
-| `LEADPOET_TOOL_MARKET_TERMS_VERSION`, `LEADPOET_TOOL_MARKET_TERMS_SHA256` | the terms text both sides sign |
+| `LEADPOET_TOOL_MARKET_TERMS_VERSION`, `LEADPOET_TOOL_MARKET_TERMS_SHA256` | the terms both sides sign: `tool-market-terms-v1` and the SHA-256 of `docs/tool-market-terms.md`'s exact bytes (`PUBLISHED_TERMS` in `config.py`); live mode refuses any other pair |
 | `LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL` | the https host every signed request names |
 
 It reuses the Arena store and chain settings, and the key vault
@@ -240,5 +240,7 @@ deployment, exactly as lead orders do.
   `max_ask_microusd`; a delay on increases can follow.
 - **No MCP server yet.** Agents call the HTTP API with a tab token. An MCP
   server that lists the catalog's operations as tools is a separate package.
+- **The terms name no governing law.** The network has no legal entity
+  yet; add one when an entity exists.
 - **Lead orders still exist.** They stay as they are, and off. Retiring them
   is a separate decision.

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-import pathlib
-
 import json
+import pathlib
 from urllib.parse import parse_qs, urlsplit
 
 import pytest

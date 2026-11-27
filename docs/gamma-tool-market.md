@@ -127,16 +127,15 @@ Health events come from vault checks and from calls.
   balance; a tool with no check, or a key checked in the last minute, only
   skips the key. A 403 only skips it.
 - A key goes to the back of its book, still in it, after a 429 in the
-  last minute, a 402 that did not fail it in the last hour, or in the last
-  hour a 403 or unknown usage for 3 different buyers. A buyer can cause
-  those two, so one buyer cannot push a rival's key back.
+  last minute, or in the last hour a 402 that did not fail it, a 403 or
+  unknown usage for 3 different buyers. A buyer can shape each of those,
+  so one buyer cannot push a rival's key back.
 - A 429, with or without `Retry-After`, moves the call to the next key:
   the limit is the key's account, not the buyer's. Hunter's 403 is its rate
   limit, so it counts as a 429.
-- A key is checked when it is listed and after a 402, at most once a minute
-  per key in each gateway process. There is no scheduled re-check: a key
-  that dies in between is found by its next call, which moves to the next
-  key and costs the buyer nothing.
+- There is no scheduled re-check: a key that dies between checks is found
+  by its next call, which moves to the next key and costs the buyer
+  nothing.
 - After topping up a failed key, the miner calls
   `POST /tool-market/keys/{id}/check` to put it back in the book. Exa and HarvestAPI have no free check, so this is refused
   (`409 key_cannot_be_checked`): a key a call found dead there stays out,
@@ -153,7 +152,7 @@ no key asking more serves it.
 
 `GET /tool-market/catalog` lists every tool that trades: its operations,
 one line on what each does, their parameters, its price ceiling, and the
-first ask a call tries (the cheapest key not at the back) with what a buyer
+first ask a call tries with what a buyer
 pays for it. An agent can pick a tool by the
 job it needs done. A request with a bad parameter is refused before any
 charge.
@@ -202,8 +201,9 @@ All amounts are integer micro-USD.
 - **Unknown usage:** sometimes the usage is unknown, such as a 5xx answer,
   a timeout, or a 2xx with no cost in it. Then the buyer pays nothing and
   the miner is owed nothing. The miner bears that risk, at most the key's
-  daily cap a day. Each buyer's unknown usage counts toward the cap up to a
-  quarter of it, so one buyer cannot push a key out of the book for free.
+  daily cap a day. A buyer whose unknown usage on a key passes a quarter
+  of its cap skips that key for the day, so one buyer cannot push a key out
+  of the book for free.
   - A request that may have reached the vendor is never retried on another
     key, so it cannot be used twice.
   - A buyer shapes some of these, such as an answer too large to return.

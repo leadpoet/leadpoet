@@ -77,14 +77,6 @@ def key_failure(status: int) -> Optional[str]:
     return {401: "unauthorized", 402: "no_credit", 403: "forbidden"}.get(int(status))
 
 
-def rate_limited(status: int) -> bool:
-    """A 429: this key is spent for now, try the next one. With or without
-    Retry-After, the limit is the key's (its miner's account), not the
-    buyer's, so another key may serve."""
-
-    return int(status) == 429
-
-
 __all__ = [
     "Ask",
     "MARKUP_PPM",
@@ -92,7 +84,6 @@ __all__ = [
     "key_failure",
     "owed_microusd",
     "rank",
-    "rate_limited",
     "reserve_microusd",
     "valid_ask",
 ]

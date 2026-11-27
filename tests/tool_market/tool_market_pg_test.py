@@ -193,17 +193,19 @@ def test_a_call_goes_to_the_cheapest_key_and_pays_its_ask_plus_ten_percent(world
 
 def test_a_key_that_ran_out_fails_over_and_goes_to_the_back(world):
     # HarvestAPI has no free check, so a 402 cannot be confirmed: the key
-    # stays listed, behind keys that answered, for the hour.
+    # stays listed, and goes behind keys that answered once 3 buyers saw it.
     miner, _ = world.miner_key("empty-key", 9_000)
     world.miner_key("full-key", 10_000)
-    _, token = world.buyer()
     world.vendor.script["empty-key"] = [ok({"error": "no credits"}, status=402)]
-    result = world.market.call(token, PROFILE)
-    assert [s[0] for s in world.vendor.sent] == ["empty-key", "full-key"] and result["charge_microusd"] == 11_000
-    assert world.market.tab(token)["committed_microusd"] == 11_000  # the failed try costs nothing
+    for n in range(3):
+        _, token = world.buyer()
+        result = world.market.call(token, PROFILE)
+        assert result["charge_microusd"] == 11_000
+        assert world.market.tab(token)["committed_microusd"] == 11_000  # the failed try costs nothing
+    assert [s[0] for s in world.vendor.sent] == ["empty-key", "full-key"] * 3
     assert world.market.statement(miner)["keys"][0]["health"]["status"] != "failed"
     world.market.call(token, PROFILE)
-    assert world.vendor.sent[2][0] == "full-key"
+    assert world.vendor.sent[-1][0] == "full-key" and len(world.vendor.sent) == 7
 
 
 def test_unknown_usage_charges_the_buyer_nothing_and_the_miner_bears_it(world):
@@ -429,18 +431,22 @@ def test_a_key_stops_trading_at_its_daily_cap(world):
 def test_unknown_usage_counts_toward_a_keys_daily_cap_a_quarter_per_buyer(world):
     # Whatever buyers cause, a miner never bears more than their cap a day,
     # and no one buyer can fill it for free.
-    world.miner_key("uncertain-capped", 10_000, cap=80_000)
+    world.miner_key("uncertain-capped", 10_000, cap=60_000)
     world.vendor.script["uncertain-capped"] = [ok(status=500)]
     _, token = world.buyer()
-    for _ in range(5):
-        world.market.call(token, PROFILE)  # counts 20,000 at most, however many
-    for _ in range(3):
+    for _ in range(2):
+        world.market.call(token, PROFILE)  # 20,000 at risk: past a quarter of the cap
+    with pytest.raises(ToolMarketError) as share:
+        world.market.call(token, PROFILE)
+    assert share.value.code == "no_supply" and len(world.vendor.sent) == 2
+    for _ in range(2):
         _, token = world.buyer()
         world.market.call(token, PROFILE)
         world.market.call(token, PROFILE)
+    _, token = world.buyer()
     with pytest.raises(ToolMarketError) as capped:
-        world.market.call(token, PROFILE)  # 80,000 at risk: no room left
-    assert capped.value.code == "no_supply" and len(world.vendor.sent) == 11
+        world.market.call(token, PROFILE)  # 60,000 at risk: the cap holds for everyone
+    assert capped.value.code == "no_supply" and len(world.vendor.sent) == 6
 
 
 def test_keys_without_room_for_a_call_do_not_use_up_its_attempts(world):

@@ -396,7 +396,9 @@ class ToolMarket:
         document = json_document(response.body)
         status = op.status(response.status, document)
         failure = book.key_failure(status)
-        if failure is not None or book.rate_limited(status):
+        # A 429, Retry-After or not, is the key's limit (its miner's account),
+        # not the buyer's, so another key may serve.
+        if failure is not None or status == 429:
             settle("skipped", status)  # the real status, also when a 2xx body reported it
             if failure is not None:
                 self._key_failed(op.tool, ask, status, failure)

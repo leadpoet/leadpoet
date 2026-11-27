@@ -173,8 +173,13 @@ def test_validator_snapshot_authenticates_original_burn_hotkey(monkeypatch):
                                                    if k != "valuation"})
     snapshot = SimpleNamespace(current_block=1002, last_epoch_block=1000, block_hash="0x" + "b" * 64, network_genesis_hash="0x" + "1" * 64,
                                settlement_epoch_id=lambda _: epoch)
-    rpc = SimpleNamespace(call=lambda method, **kwargs: {"netuid": 71, "block": 1002, "hotkeys": hotkeys}
-                          if method == "state_call" else [(0, 65535)])
+    def reply(method, **kwargs):
+        if method == "chain_getFinalizedHead":
+            return snapshot.block_hash
+        if method == "state_call":
+            return {"netuid": 71, "block": 1002, "hotkeys": hotkeys}
+        return [(0, 65535)]
+    rpc = SimpleNamespace(call=reply, close=lambda: None)
     monkeypatch.setattr(chain, "connect_substrate", lambda _:None)
     monkeypatch.setattr(chain, "ArenaChain", lambda *_:SimpleNamespace(close=lambda:None))
     monkeypatch.setattr(chain, "finalized_epoch_snapshot", lambda _:snapshot)
@@ -349,3 +354,38 @@ def test_pending_reveal_needs_registered_recipient_signed_prior_vector_and_uniqu
     previous["burn_hotkey"] = keys[2]
     with pytest.raises(ValueError):
         sample()
+
+
+def test_monitor_uses_an_exact_block_finalized_by_both_sources(monkeypatch):
+    from types import SimpleNamespace
+    import pytest
+    from lab_arena import chain
+    from Leadpoet.utils import subnet_epoch
+    from scripts import collection_participation_watch as watch
+
+    live_hash, older_hash, other_hash = ("0x" + s * 64 for s in ("1", "2", "3"))
+    live = SimpleNamespace(current_block=120, block_hash=live_hash)
+    earlier = SimpleNamespace(current_block=99, block_hash=older_hash)
+    reader = SimpleNamespace(epoch_subtensor=lambda: "live", finalized_block_hash=lambda n: older_hash if n == 99 else live_hash)
+    monkeypatch.setattr(chain, "finalized_epoch_snapshot", lambda r: live)
+    def exact(reader, *, netuid, block_hash):
+        assert reader == "live" and netuid == 71 and block_hash == older_hash
+        return earlier
+    monkeypatch.setattr(subnet_epoch, "read_subnet_epoch_snapshot", exact)
+
+    def rpc(height, digest, live_at_height=live_hash):
+        def call(*, method, params, request_id):
+            if method == "chain_getFinalizedHead":
+                return digest
+            if method == "chain_getHeader":
+                assert params == [digest]
+                return {"number":hex(height)}
+            assert method == "chain_getBlockHash" and params == [120]
+            return live_at_height
+        return SimpleNamespace(call=call)
+    assert watch.shared_finalized_snapshot(reader, rpc(99, older_hash)) == (earlier, live, 99)
+    assert watch.shared_finalized_snapshot(reader, rpc(120, live_hash)) == (live, live, 120)
+    assert watch.shared_finalized_snapshot(reader, rpc(121, other_hash)) == (live, live, 121)
+    for archive in (rpc(99, other_hash), rpc(120, other_hash), rpc(121, other_hash, other_hash)):
+        with pytest.raises(ValueError, match="finalized hash"):
+            watch.shared_finalized_snapshot(reader, archive)

@@ -146,6 +146,11 @@ def _ensure_daily_round(service) -> str:
             ensured = service.ensure_daily_round()
             observed.idle = ensured.get("status") != "created"
             observed.count = 0 if observed.idle else 1
+            # "disabled" is the only status that means no round will ever be
+            # created again under the current configuration. Reported as plain
+            # "idle" it is indistinguishable from the healthy "existing" tick,
+            # so a deliberate cutover reads exactly like a wedged driver.
+            observed.disabled = ensured.get("status") == "disabled"
     except Exception as exc:
         return "failed ensure_daily_round: %s" % type(exc).__name__
     else:

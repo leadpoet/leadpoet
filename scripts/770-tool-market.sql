@@ -379,7 +379,8 @@ $close770$;
 -- One active listing per key: the same vendor key sealed twice, by one miner
 -- or two, is refused while the first is listed. For security, a hotkey
 -- registers at most one key per tool every 30 days, revoked keys included.
--- A revoked key that never took a call does not count.
+-- A revoked key that never took a call does not count, but only one such
+-- retry is allowed: at most 2 registrations per hotkey and tool in 30 days.
 CREATE FUNCTION public.tool_market_register_key_v1(p_key_id UUID,p_tool TEXT,p_hotkey TEXT,p_envelope TEXT,
  p_fingerprint TEXT,p_daily_cap BIGINT,p_status TEXT,p_host TEXT,p_signed_at BIGINT,
  p_signed_body TEXT,p_signature TEXT)
@@ -390,9 +391,12 @@ BEGIN
   RAISE EXCEPTION 'only a valid or unchecked key is registered' USING ERRCODE='22023';
  END IF;
  PERFORM public.tool_market__lock_v1('miner_tool',p_hotkey||':'||p_tool);
- SELECT max(k.registered_at)+interval '30 days' INTO next_at FROM public.tool_market_keys k
-  WHERE k.miner_hotkey=p_hotkey AND k.tool=p_tool AND (public.tool_market__key_active_v1(k.key_id) OR EXISTS(
-   SELECT 1 FROM public.tool_market_calls c WHERE c.key_id=k.key_id));
+ SELECT greatest(
+   max(k.registered_at) FILTER (WHERE public.tool_market__key_active_v1(k.key_id) OR EXISTS(
+    SELECT 1 FROM public.tool_market_calls c WHERE c.key_id=k.key_id)),
+   (SELECT r.registered_at FROM public.tool_market_keys r WHERE r.miner_hotkey=p_hotkey AND r.tool=p_tool
+    ORDER BY r.registered_at DESC OFFSET 1 LIMIT 1))+interval '30 days'
+  INTO next_at FROM public.tool_market_keys k WHERE k.miner_hotkey=p_hotkey AND k.tool=p_tool;
  IF next_at>clock_timestamp() THEN
   RETURN jsonb_build_object('status','too_soon','next_at',next_at);
  END IF;

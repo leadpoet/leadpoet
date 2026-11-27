@@ -753,9 +753,19 @@ def test_a_hotkey_registers_one_key_per_tool_every_30_days(world):
         world.register(miner, {"tool": "exa", "daily_cap_microusd": USD,
                                "envelope": world.vault.seal("exa", miner, "exa-stack-2")})
     assert again.value.code == "key_registration_too_soon" and world.vault.checks == checks
+    # A key revoked before any call is a one-off retry, not a loop.
+    for tag in ("zb-loop-1", "zb-loop-2"):
+        looped = world.register(miner, {"tool": "zerobounce", "daily_cap_microusd": USD,
+                                        "envelope": world.vault.seal("zerobounce", miner, tag)})
+        world.market.revoke_key(world.who(miner), looped["key_id"])
+    world.market._rechecked.clear()  # past the minute between refused probes
+    with pytest.raises(ToolMarketError) as loop:
+        world.register(miner, {"tool": "zerobounce", "daily_cap_microusd": USD,
+                               "envelope": world.vault.seal("zerobounce", miner, "zb-loop-3")})
+    assert loop.value.code == "key_registration_too_soon"
     # Another tool is its own 30 days.
-    world.register(miner, {"tool": "zerobounce", "daily_cap_microusd": USD,
-                           "envelope": world.vault.seal("zerobounce", miner, "zb-thirty-day-key")})
+    world.register(miner, {"tool": "hunter", "daily_cap_microusd": USD,
+                           "envelope": world.vault.seal("hunter", miner, "hu-thirty-day-key")})
 
 
 def test_asks_have_a_ceiling_and_a_buyer_can_cap_what_they_pay(world):

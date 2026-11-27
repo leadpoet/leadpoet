@@ -49,6 +49,8 @@ MAX_ASKS_PER_CALL = 10
 # every call thread with slow free answers (a no-match search, a timeout).
 MAX_CALLS_IN_FLIGHT_PER_BUYER = 8
 RECHECK_SPACING_SECONDS = 60
+# An envelope (4,096 characters), the attestation and the other fields.
+MAX_REGISTER_BODY_BYTES = 8192
 MAX_USAGE_PAGE = 500
 CALL_TIMEOUT_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -205,6 +207,8 @@ class ToolMarket:
 
         if set(body) != {"tool", "envelope", "daily_cap_microusd", "attestation"}:
             raise ToolMarketError(400, "request_invalid")
+        if len(signed_body) > MAX_REGISTER_BODY_BYTES:  # it is kept for good
+            raise ToolMarketError(413, "request_too_large")
         if body["attestation"] != ATTESTATION:
             raise ToolMarketError(400, "attestation_required", attestation=ATTESTATION)
         tool = body["tool"]

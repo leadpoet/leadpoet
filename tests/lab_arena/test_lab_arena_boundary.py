@@ -256,7 +256,7 @@ HOST_ARENA_IMPORTS = {
     "gateway/api/arena_proxy.py": {("lab_arena", name) for name in ("operations", "training_input", "training_observations")},
     # Gamma lead orders: one bridge module; routes are 404 while the mode is off.
     "gateway/api/lead_orders.py": {("lab_arena.lead_orders", "gateway_support")},
-    # Gamma tool market: the same one-bridge shape, 404 while the mode is off.
+    # Subnet 71 tool market: the same one-bridge shape, 404 while the mode is off.
     "gateway/api/tool_market.py": {("lab_arena.tool_market", "gateway_support")},
     "gateway/middleware/body_size.py": {("lab_arena", "training_observations")},
     "gateway/observability/otel_bootstrap.py": {("lab_arena.store", "safe_store_error_metadata")},

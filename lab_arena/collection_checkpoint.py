@@ -37,7 +37,7 @@ def digest(value):
 
 def correction_scenario(builders, source):
     spec = json.loads(source["original"]["trace.json"])
-    if not re.fullmatch(r"C\d{2}|K\d{2}|B[1-8]|E[1-7]|P[1-8]", spec["task"]):
+    if not re.fullmatch(r"C\d{2}|K\d{2}|B[1-8]|E[1-7]|P[1-9]|P10", spec["task"]):
         raise ValueError("unsupported student task")
     if type(spec["seed"]) is not int or not 0 < spec["seed"] <= 99999999:
         raise ValueError("invalid student seed")
@@ -369,6 +369,12 @@ def correction_checks(builders, task, source, messages, terminal_grade):
         "student_action_fatal": source["rejected_fatal"] is True,
         "expert_step_recoverable": False,
     }
+    if source.get("schema") == "collection.funded-student.v1":
+        checks["same_pre_state"] = prefix == source["checkpoint"]["messages"]
+        # A complete verified expert outcome demonstrates recoverability after
+        # this different first decision; the labelled checkpoint is unchanged.
+        checks["expert_step_recoverable"] = bool(terminal_grade["score"] == 1 and not terminal_grade.get("hard_fail"))
+        return checks
     if not (
         checks["same_pre_state"]
         and checks["different_action"]

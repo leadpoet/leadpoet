@@ -60,7 +60,9 @@ def admit_built_split(builders, task, shape, split):
     identity = scenario_split(builders, task, shape)
     if identity["template_id"] in builders.evaluation_templates:
         raise ValueError("scenario uses a frozen evaluation template")
-    if identity["template_id"] in {"P7", "P8"}:
+    from lab_arena.collection_workflow import NATIVE_PARTITIONS
+
+    if identity["template_id"] in NATIVE_PARTITIONS:
         if not hasattr(
             builders, "training_partition"
         ) or split != builders.training_partition(identity["template_id"]):
@@ -72,12 +74,8 @@ def admit_built_split(builders, task, shape, split):
 
 def require_release_partition(settings):
     """Historical C/K/B/E/P1–P6 are known evaluation templates at their original pins."""
-    from lab_arena.collection_workflow import (
-        TRAIN_ONLY_PARTITION_SHA256,
-        SALES_EVIDENCE_PARTITION_SHA256,
-    )
+    from lab_arena.collection_workflow import NATIVE_PARTITIONS as pins
 
-    pins = {"P7": TRAIN_ONLY_PARTITION_SHA256, "P8": SALES_EVIDENCE_PARTITION_SHA256}
     families = {case["scenario_id"].split("-s")[0] for case in settings["cases"]}
     if (
         len(families) != 1

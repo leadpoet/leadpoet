@@ -739,6 +739,86 @@ def evidence_stores():
     )
 
 
+def poll_pool_experiments(prompt, directory, database, run):
+    """Try a disjoint healthy program after a pre-lease refusal, never after an ambiguous claim."""
+    from lab_arena.collection_experiment import load_experiment
+    from scripts.collection_review import read_file
+    from scripts.prepare_collection_experiment import store_private_json
+
+    def unavailable(name, exc):
+        print(json.dumps({"batch": name, "status": "pool_unavailable", "reason": type(exc).__name__}),
+              file=sys.stderr, flush=True)
+
+    active = {}
+    failures = False
+    for path in sorted(directory.glob("pool-*.json")):
+        try:
+            raw = json.loads(read_file(path))
+            spec = load_experiment(raw, prompt)
+            if spec.batch_id != path.stem:
+                raise ValueError("pool manifest differs from its frozen identity")
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            unavailable(path.stem, exc)
+            failures = True
+            continue
+        # Old series members remain immutable for exports. Only the most recent
+        # published seed range can receive additional assignments.
+        group = judge.digest({k: v for k, v in raw.items() if k != "cases"}) if raw.get("successor_seeds") else spec.batch_id
+        seed = int(raw["cases"][0]["scenario_id"].split("-s")[1])
+        if group not in active or seed > active[group][0]:
+            active[group] = seed, spec
+    if not active:
+        raise ValueError("active standing pool requires a valid operator experiment")
+    cursor = directory / ".last-pool-program"
+    groups = sorted(active)
+    if cursor.exists():
+        previous = read_file(cursor, maximum=128).decode()
+        if previous in groups:
+            index = groups.index(previous) + 1
+            groups = groups[index:] + groups[:index]
+    for group in groups:
+        seed, spec = active[group]
+        attempted = False
+
+        def on_claim():
+            nonlocal attempted
+            attempted = True
+            with NamedTemporaryFile(dir=directory, delete=False) as out:
+                out.write(group.encode())
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(out.name, cursor)
+
+        try:
+            if run(spec.raw, before_claim=on_claim):
+                return 1
+            if attempted:
+                return 0
+            if not spec.raw.get("successor_seeds"):
+                continue
+            jobs = database.rpc("collection_batch_jobs_v1", {"p_batch": spec.batch_id})
+            finished = {j["slot"] for j in jobs if j["status"] in {"accepted", "rejected", "failed"}}
+            if finished != set(range(len(spec.slots))):
+                continue
+            size = len(spec.raw["cases"])
+            family = spec.raw["cases"][0]["scenario_id"].split("-s")[0]
+            raw = dict(spec.raw, cases=[{"scenario_id": f"{family}-s{i}"} for i in range(seed + size, seed + size * 2)])
+            successor = load_experiment(raw, prompt)
+            store_private_json(directory / (successor.batch_id + ".json"), raw)
+            if run(raw, before_claim=on_claim):
+                return 1
+            if attempted:
+                return 0
+        except Exception as exc:
+            if attempted:
+                raise
+            unavailable(spec.batch_id, exc)
+            failures = True
+    if failures:
+        raise ValueError("one or more standing programs could not be polled")
+    return 0
+
+
 def poll_paid_offers(baseline, prompt, directory, run):
     """Use one existing worker slot across the immutable manifests miners have signed."""
     from scripts.collection_review import read_file
@@ -834,15 +914,24 @@ def main(argv=None):
         from scripts.run_lab_arena_service import load_scoped_environment
 
         load_scoped_environment(args.environment_file)
-    if not 1 <= args.max_jobs <= 6:
-        p.error("select 1 to 6 jobs per invocation")
+    if not 1 <= args.max_jobs <= (8 if args.offer_directory else 6):
+        p.error("invalid job limit for this worker")
     baseline = json.loads(args.batch.read_text())
     if args.offer_directory:
-        if (args.max_jobs != 1 or args.preflight or args.pilot_only or args.next_reference or args.next_correction
+        if (args.preflight or args.pilot_only or args.next_reference or args.next_correction
                 or args.research_stdio or args.rejudge_ready or not args.offer_directory.is_dir()):
             p.error("offer-directory requires the bounded paid comparison worker")
-        poll_paid_offers(baseline, json.loads(args.prompt.read_text()), args.offer_directory,
-                         partial(_run_options, args, p))
+        prompt = json.loads(args.prompt.read_text())
+        database, _ = evidence_stores()
+        limit = args.max_jobs
+        args.max_jobs = 1  # Re-select the program and live funds after every actual job.
+        if database.rpc("collection_pool_active_v1", {}) is True:
+            args.experiment_inputs = args.experiment_inputs or args.offer_directory.parent / "experiment-inputs"
+            for _ in range(limit):
+                if not poll_pool_experiments(prompt, args.offer_directory, database, partial(_run_options, args, p)):
+                    break
+        else:
+            poll_paid_offers(baseline, prompt, args.offer_directory, partial(_run_options, args, p))
         return 0
     if args.next_reference and (
         args.max_jobs != 1
@@ -976,6 +1065,7 @@ def _run_options(args, p, raw, *, before_claim=None):
             )
         print(json.dumps({"job": job_id, "status": "verified"}))
         return 0
+    standing = bool(experiment and experiment.batch_id.startswith("pool-"))
     if not args.champion_repo or not args.poet_repo:
         p.error("running generators requires --champion-repo and --poet-repo")
     if args.pilot_only and (
@@ -1025,7 +1115,7 @@ def _run_options(args, p, raw, *, before_claim=None):
         else {}
     )
     with workflow_sources(args.champion_repo, args.poet_repo, **source_args) as sources:
-        experiment_inputs = experiments.read_inputs(experiment, args.experiment_inputs, sources) if experiment else None
+        experiment_inputs = experiments.read_inputs(experiment, args.experiment_inputs, sources, prompt=prompt) if experiment else None
         try:
             for sid in ([] if experiment else scenarios):
                 if not sid.startswith("research-"):
@@ -1089,12 +1179,13 @@ def _run_options(args, p, raw, *, before_claim=None):
             if args.research_stdio:
                 stack.enter_context(redirect_stdout(sys.stderr))
             if experiment:
-                if not judge_key:
+                if not standing and not judge_key:
                     raise ValueError("private claim-reader credential unavailable")
                 completed = experiments.run_experiment(
                     spec=experiment, sources=sources, inputs=experiment_inputs,
                     intake=CollectionIntake(db, cm, mode), database=db, objects=objects,
-                    transport=transport, pricing=prices_for_assignment(experiment.routes, policy),
+                    transport=transport, pricing=(lambda model: endpoint_prices(experiment.routes,models=[model]))
+                    if standing else prices_for_assignment(experiment.routes, policy),
                     owner_lookup=lambda hk: resolve_finalized_owner(client, hk), judge_key=judge_key,
                     max_jobs=args.max_jobs, epoch=lambda: chain.current_settlement_epoch(client, cutover),
                     before_claim=before_claim, prompt=prompt,

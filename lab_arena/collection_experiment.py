@@ -1,8 +1,8 @@
-"""A bounded, unpaid experiment in the existing collection queue."""
+"""Frozen experimental arms and repeat slots in the existing collection queue."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import partial
 import json
 import re
@@ -19,6 +19,7 @@ from lab_arena.collection_intake import (
     SYNTHETIC_SCENARIO,
     MAX_MICROUSD,
 )
+from lab_arena.collection_pool import POOL_PAYMENT_RULE, POOL_TERMS_HASH
 from lab_arena.collection_workflow import store_artifact
 from lab_arena.collection_journal import WorkflowJournal
 from lab_arena.collection_generation import (
@@ -67,9 +68,21 @@ def load_experiment(raw, prompt):
     from lab_arena.collection_claims import protocol_of
 
     protocol_of(raw)
+    pool = raw.get("payment_rule") == POOL_PAYMENT_RULE
+    if "payment_rule" in raw and not pool:
+        raise ValueError("unknown experiment payment rule")
 
     if (
-        set(raw) - {"claim_protocol", "min_pricing_runs", "pricing_pilot", "max_slots", "provenance_sha256", "capture_version"}
+        set(raw)
+        - ({"payment_rule", "routes", "successor_seeds"} if pool else set())
+        - {
+            "claim_protocol",
+            "min_pricing_runs",
+            "pricing_pilot",
+            "max_slots",
+            "provenance_sha256",
+            "capture_version",
+        }
         != {
             "schema",
             "id",
@@ -93,30 +106,54 @@ def load_experiment(raw, prompt):
             isinstance(raw[k], str) and 1 <= len(raw[k].strip()) <= 1024
             for k in ("question", "pass_mark")
         )
-        or not all(
-            SHA.fullmatch(raw[k])
-            for k in ("split_sha256", "terms_sha256")
-        )
+        or not all(SHA.fullmatch(raw[k]) for k in ("split_sha256", "terms_sha256"))
     ):
         raise ValueError("missing experiment question, pass mark, split or consent")
+    if pool and (
+        raw["mode"] != "live"
+        or raw["terms_sha256"] != POOL_TERMS_HASH
+        or raw.get("capture_version") != CAPTURE_V2
+        or "pricing_pilot" in raw
+        or "min_pricing_runs" in raw
+    ):
+        raise ValueError(
+            "standing experiments require their own live consent and capture"
+        )
     cases, arms = raw["cases"], raw["arms"]
     slot_limit = raw.get("max_slots", DEFAULT_MAX_SLOTS)
     if not _integer(slot_limit, 1, MAX_EXPERIMENT_SLOTS) or not all(
-        isinstance(items, list) and 1 <= len(items) <= slot_limit for items in (cases, arms)
+        isinstance(items, list) and 1 <= len(items) <= slot_limit
+        for items in (cases, arms)
     ):
         raise ValueError("invalid experiment size")
     for case in cases:
-        if (not isinstance(case, dict) or set(case) not in ({"scenario_id"}, {"scenario_id", "source_sha256"})
-                or not isinstance(case["scenario_id"], str) or not SYNTHETIC_SCENARIO.fullmatch(case["scenario_id"])
-                or ("source_sha256" in case and (not isinstance(case["source_sha256"], str)
-                    or not SHA.fullmatch(case["source_sha256"])))):
+        if (
+            not isinstance(case, dict)
+            or set(case) not in ({"scenario_id"}, {"scenario_id", "source_sha256"})
+            or not isinstance(case["scenario_id"], str)
+            or not (
+                re.fullmatch(r"(?:P7|P8|P9|P10)-s[1-9][0-9]{0,7}", case["scenario_id"])
+                if pool
+                else SYNTHETIC_SCENARIO.fullmatch(case["scenario_id"])
+            )
+            or (
+                "source_sha256" in case
+                and (
+                    not isinstance(case["source_sha256"], str)
+                    or not SHA.fullmatch(case["source_sha256"])
+                )
+            )
+        ):
             raise ValueError("invalid experiment source")
     source_ids = [case["source_sha256"] for case in cases if "source_sha256" in case]
     native_ids = [case["scenario_id"] for case in cases if "source_sha256" not in case]
-    if len(set(source_ids)) != len(source_ids) or len(set(native_ids)) != len(native_ids):
+    if len(set(source_ids)) != len(source_ids) or len(set(native_ids)) != len(
+        native_ids
+    ):
         raise ValueError("duplicate experiment case; use the arm repeat count")
-    if bool(source_ids) != ("provenance_sha256" in raw) or (
-        source_ids and not SHA.fullmatch(str(raw["provenance_sha256"]))
+    if (not pool and bool(source_ids) != ("provenance_sha256" in raw)) or (
+        "provenance_sha256" in raw
+        and (not source_ids or not SHA.fullmatch(str(raw["provenance_sha256"])))
     ):
         raise ValueError("student sources require their original provenance")
     caps = {}
@@ -150,11 +187,14 @@ def load_experiment(raw, prompt):
             or caps.setdefault(model, arm["budget_microusd"]) != arm["budget_microusd"]
             or arm["reasoning_effort"] not in {"low", "medium", "high"}
             or type(arm["capture_reasoning"]) is not bool
+            or (pool and (not arm["capture_reasoning"] or "max_run_tokens" not in arm))
         ):
             raise ValueError("invalid or unapproved experiment arm")
         arm_names.add(arm["id"])
     if native_ids and any(arm["role"] == "continuation" for arm in arms):
-        raise ValueError("a continuation requires a verified student failure for every case")
+        raise ValueError(
+            "a continuation requires a verified student failure for every case"
+        )
     if len(cases) * sum(arm["repeats"] for arm in arms) > slot_limit:
         raise ValueError("experiment exceeds its configured slot limit")
     # Present the same task to all arms before advancing to the next case.
@@ -175,7 +215,7 @@ def load_experiment(raw, prompt):
         raw["mode"] != "pilot" or not _integer(raw["min_pricing_runs"], 1, len(slots))
     ):
         raise ValueError("pricing requires a predeclared achievable sample size")
-    if raw["mode"] == "live" or "min_pricing_runs" in raw:
+    if (raw["mode"] == "live" and not pool) or "min_pricing_runs" in raw:
         if (
             len(arms) != 1
             or arms[0]["role"] != "continuation"
@@ -184,7 +224,7 @@ def load_experiment(raw, prompt):
             raise ValueError(
                 "paid calibration requires one comparable correction class"
             )
-    if raw["mode"] == "live":
+    if raw["mode"] == "live" and not pool:
         if not isinstance(raw.get("pricing_pilot"), str) or not re.fullmatch(
             r"xp-[0-9a-f]{64}", raw["pricing_pilot"]
         ):
@@ -193,6 +233,37 @@ def load_experiment(raw, prompt):
         raise ValueError("a pilot cannot spend an approved live tariff")
     routes = {m: r.tag for m, r in GENERATOR_ROUTES.items()}
     routes.update({m: r.route for m, r in judge.QUALIFICATION_JUDGES.items()})
+    if pool:
+        from lab_arena.collection_broker import REFERENCE_MODEL, REFERENCE_ROUTE
+        from lab_arena.collection_quality import require_release_partition
+
+        require_release_partition(raw)
+        selected = raw.get("routes")
+        if (
+            not isinstance(selected, dict)
+            or set(selected) != set(caps)
+            or not all(
+                route == GENERATOR_ROUTES[m].tag
+                or (m, route) == (REFERENCE_MODEL, REFERENCE_ROUTE)
+                for m, route in selected.items()
+            )
+        ):
+            raise ValueError(
+                "standing experiment routes differ from approved pinned endpoints"
+            )
+        routes.update(selected)
+        if "successor_seeds" in raw:
+            # A rolling full-task pack advances exactly one disjoint seed range. Private
+            # student checkpoint experiments can never silently turn into new cases.
+            seeds = [int(s.split("-s")[1]) for s in native_ids]
+            if (
+                raw["successor_seeds"] is not True
+                or source_ids
+                or not seeds
+                or seeds != list(range(seeds[0], seeds[0] + len(seeds)))
+                or seeds[0] < 300
+            ):
+                raise ValueError("invalid renewable training seed range")
     agent_revision, builder_revision = source_revisions(raw)
     identity = judge.digest(
         {
@@ -205,7 +276,7 @@ def load_experiment(raw, prompt):
             "prompt": judge.digest(prompt),
         }
     )
-    batch = "xp-" + identity
+    batch = ("pool-" if pool else "xp-") + identity
     policy = judge.BatchPolicy(
         batch,
         identity,
@@ -221,9 +292,16 @@ def verify_provenance(spec, receipt, sources, *, objects=None):
     from scripts.collection_review import read_file
     from cryptography.exceptions import InvalidSignature
 
-    from lab_arena.collection_gateway_student import RECEIPT, object_store, verify_gateway_source
+    from lab_arena.collection_gateway_student import (
+        RECEIPT,
+        object_store,
+        verify_gateway_source,
+    )
+
     if receipt.get("schema") == RECEIPT:
-        return verify_gateway_source(spec, receipt, sources, objects if objects is not None else object_store())
+        return verify_gateway_source(
+            spec, receipt, sources, objects if objects is not None else object_store()
+        )
 
     path = os.environ.get("LAB_ARENA_COLLECTION_TRAINER_PUBLIC_KEY_FILE")
     if not path:
@@ -242,7 +320,8 @@ def verify_provenance(spec, receipt, sources, *, objects=None):
         or not NAME.fullmatch(body["producer"])
         or body["split_sha256"] != spec.raw["split_sha256"]
         or not isinstance(body["sources"], dict)
-        or set(body["sources"]) != {c["source_sha256"] for c in spec.raw["cases"] if "source_sha256" in c}
+        or set(body["sources"])
+        != {c["source_sha256"] for c in spec.raw["cases"] if "source_sha256" in c}
         or _hash(receipt) != spec.raw["provenance_sha256"]
     ):
         raise ValueError("Poet source attestation differs from the experiment")
@@ -275,7 +354,7 @@ def verify_provenance(spec, receipt, sources, *, objects=None):
     return body
 
 
-def read_inputs(spec, directory, sources, *, objects=None):
+def read_inputs(spec, directory, sources, *, objects=None, database=None, prompt=None):
     """Verify every source and split before leasing or charging any key."""
     from scripts.collection_review import read_file
     from lab_arena.collection_workflow import (
@@ -306,7 +385,38 @@ def read_inputs(spec, directory, sources, *, objects=None):
             resolved[sid] = (None, admit_built_split(sources[1], task, None, split))
             continue
         source = read(case["source_sha256"])
-        validate_student_source(*sources, source)
+        from lab_arena.collection_pool_source import (
+            SCHEMA as POOL_STUDENT,
+            funded_source,
+        )
+
+        if source.get("schema") == POOL_STUDENT:
+            if (
+                not spec.batch_id.startswith("pool-")
+                or prompt is None
+                or "provenance_sha256" in spec.raw
+            ):
+                raise ValueError(
+                    "a funded source requires its original pool scope and rubric"
+                )
+            if database is None or objects is None:
+                from scripts.run_locked_collection import evidence_stores
+
+                database, objects = evidence_stores()
+            origin = source["origin"]
+            original = funded_source(
+                database, objects, origin["batch_id"], origin["job_id"], prompt
+            )
+            if original != source:
+                raise ValueError("funded checkpoint differs from its original paid run")
+            if any(a["role"] != "continuation" for a in spec.raw["arms"]):
+                raise ValueError("use a fresh native case for a fresh expert arm")
+        else:
+            validate_student_source(*sources, source)
+            if "provenance_sha256" not in spec.raw:
+                raise ValueError(
+                    "external student source requires its original provenance"
+                )
         if source["scenario_id"] != case["scenario_id"]:
             raise ValueError("student checkpoint origin differs from assignment")
         if any(
@@ -314,19 +424,33 @@ def read_inputs(spec, directory, sources, *, objects=None):
             for a in spec.raw["arms"]
         ):
             raise ValueError("a correction needs a distinct approved expert")
-        task = correction_scenario(sources[1], source)
+        native = source.get("schema") == POOL_STUDENT
+        task = (
+            build_scenario(sources[1], source["scenario_id"])
+            if native
+            else correction_scenario(sources[1], source)
+        )
         # These identities are re-derived from the pinned builder, never miner labels.
         stamp = admit_built_split(
             sources[1],
             task,
-            json.loads(source["original"]["trace.json"]).get("shape"),
+            (
+                None
+                if native
+                else json.loads(source["original"]["trace.json"]).get("shape")
+            ),
             split,
         )
         resolved[case["source_sha256"]] = (source, stamp)
     provenance = None
     if "provenance_sha256" in spec.raw:
         provenance = read(spec.raw["provenance_sha256"])
-        verify_provenance(spec, provenance, {k: v[0] for k, v in resolved.items() if v[0] is not None}, objects=objects)
+        verify_provenance(
+            spec,
+            provenance,
+            {k: v[0] for k, v in resolved.items() if v[0] is not None},
+            objects=objects,
+        )
     return resolved, split, provenance
 
 
@@ -360,6 +484,24 @@ class ExperimentMeter:
             self.remaining = 0
         else:
             self.remaining -= limit if counter is None else counter
+        # Only publish the numeric token details used by the recorder. Do not copy
+        # arbitrary provider metadata into the training-cost manifest.
+        captured_usage = {
+            k: usage[k]
+            for k in ("prompt_tokens", "completion_tokens", "total_tokens", "cost")
+            if k in usage
+        }
+        for name, fields in (
+            ("completion_tokens_details", ("reasoning_tokens",)),
+            ("prompt_tokens_details", ("cached_tokens", "cache_write_tokens")),
+        ):
+            detail = usage.get(name)
+            if isinstance(detail, dict):
+                captured_usage[name] = {
+                    k: detail[k]
+                    for k in fields
+                    if type(detail.get(k)) is int and detail[k] >= 0
+                }
         self.calls.append(
             {
                 "request_id": request_id,
@@ -368,19 +510,26 @@ class ExperimentMeter:
                 "revision": self.broker.versions[result["model"]],
                 "provider": result.get("provider"),
                 "output_allowance": limit,
-                "usage": {
-                    k: usage[k]
-                    for k in (
-                        "prompt_tokens",
-                        "completion_tokens",
-                        "total_tokens",
-                        "cost",
-                    )
-                    if k in usage
-                },
+                "usage": captured_usage,
             }
         )
         return result
+
+
+def finish_pool_job(intake, database, job, status, quality, artifact, epoch):
+    # A lost HTTP response or epoch-boundary race never warrants a second model
+    # call. Check for the immutable original completion before retrying settlement.
+    args = (job["job_id"], job["lease_token"], status, quality, artifact)
+    try:
+        return intake.complete(*args, epoch())
+    except Exception:
+        rows = database.rpc("collection_batch_jobs_v1", {"p_batch": job["batch_id"]})
+        prior = next((j for j in rows if j["job_id"] == job["job_id"]), {})
+        if prior.get("status") == status and prior.get("artifact_sha256") == artifact:
+            return prior
+        if prior.get("status") != "running":
+            raise
+        return intake.complete(*args, epoch())
 
 
 def run_experiment(
@@ -410,19 +559,27 @@ def run_experiment(
     agent, builder = source_revisions(spec.raw)
     stored, split, provenance = inputs
     live = spec.raw["mode"] == "live"
+    pool = spec.raw.get("payment_rule") == POOL_PAYMENT_RULE
     tariff = None
-    if live:
+    if live and not pool:
         from lab_arena.collection_correction_tariff import load_approved
 
         if prompt is None:
             raise ValueError("paid correction needs its frozen rubric")
         tariff = load_approved(spec, inputs, prompt, database, objects, epoch)
-    fixed_quote = tariff["measurement"]["quote_microusd"] if live else 0
+    fixed_quote = tariff["measurement"]["quote_microusd"] if tariff else 0
     count = 0
     for _ in range(max_jobs):
         job, job_prices = claim_at_current_price(
-            partial(intake.claim_experiment, spec, agent, fixed_quote=fixed_quote),
-            pricing, before_claim=before_claim,
+            (
+                partial(intake.claim_pool, spec, agent)
+                if pool
+                else partial(
+                    intake.claim_experiment, spec, agent, fixed_quote=fixed_quote
+                )
+            ),
+            pricing,
+            before_claim=before_claim,
         )
         if not job:
             break
@@ -474,7 +631,10 @@ def run_experiment(
             source_refs = {}
             if source is not None:
                 source_refs["student_source"] = save("student-source", source)
-                source_refs["producer_attestation"] = save("producer-attestation", provenance)
+                if provenance is not None:
+                    source_refs["producer_attestation"] = save(
+                        "producer-attestation", provenance
+                    )
             settings = save("settings", spec.raw)
             split_ref = save("split", split)
             save("split-stamp", stamp)
@@ -487,7 +647,7 @@ def run_experiment(
                 routes=spec.routes,
                 judge_key=judge_key,
             )
-            if live:
+            if tariff:
                 adapter.panel_qualification = tariff["panel_sha256"]
             meter = ExperimentMeter(adapter, arm)
             role_option = (
@@ -515,7 +675,7 @@ def run_experiment(
             row_ref = archived.get("generator") or save("generator", row)
             calls_ref = save("generation-receipts", meter.calls)
             save("pre-claim-input", packet)
-            if all(packet["checks"].values()):
+            if not pool and all(packet["checks"].values()):
                 packet = read_fresh(
                     packet,
                     policy=spec.policy,
@@ -526,6 +686,8 @@ def run_experiment(
                         "claim_protocol", "collection.fresh-claims.v1"
                     ),
                 )
+            if pool:
+                packet["split"] = stamp
             packet_ref = save("judge-input", packet)
             claim = judge.claim_verdict(packet)
             code_pass = all(packet["checks"].values())
@@ -549,32 +711,75 @@ def run_experiment(
                 "events": journal.hashes,
                 "claim_votes": vote_refs,
             }
-            if live:
+            if tariff:
                 manifest["tariff_sha256"] = _hash(tariff)
                 manifest["fixed_quote_microusd"] = fixed_quote
-            manifest_ref = save("manifest", manifest)
-            complete = all(
-                packet["checks"].get(k) is True
-                for k in ("answered", "shape", "privacy", "training_split")
-            )
-            status = "accepted" if complete else "rejected"
-            label = (
-                "code_rejected"
-                if not code_pass
-                else (
-                    "accepted"
-                    if claim in {"passed", "not_applicable"}
-                    else "needs_review"
+            if pool:
+                from lab_arena.collection_worker import native_payment_evidence
+
+                manifest.update(
+                    packet=packet_ref,
+                    payment_rule=POOL_PAYMENT_RULE,
+                    capture_version=CAPTURE_V2,
+                    judge_policy=asdict(spec.policy),
                 )
-            )
-            intake.complete(
-                run_id,
-                job["lease_token"],
-                status,
-                {"training_status": label},
-                manifest_ref["sha256"],
-                epoch(),
-            )
+                journal.finish("completed")
+                evidence = native_payment_evidence(objects, job, manifest)
+                usage = adapter.usage()
+                if (
+                    usage["settled_microusd"] != evidence["cost_microusd"]
+                    or usage["inflight_calls"]
+                    or usage["reserved_or_uncertain_microusd"]
+                    or usage["providers"]
+                    != {"openrouter": {"used": evidence["calls"], "inflight": 0}}
+                ):
+                    raise ValueError(
+                        "original transcript differs from miner-funded receipts"
+                    )
+                manifest["verification"] = save("native-verification", evidence)
+                status = "accepted" if evidence["complete_verified"] else "rejected"
+                label = "accepted" if evidence["task_pass"] else "code_rejected"
+                quality = (
+                    {"training_status": label, "payment_rule": POOL_PAYMENT_RULE}
+                    if status == "accepted"
+                    else {"training_status": label}
+                )
+            else:
+                complete = all(
+                    packet["checks"].get(k) is True
+                    for k in ("answered", "shape", "privacy", "training_split")
+                )
+                status = "accepted" if complete else "rejected"
+                label = (
+                    "code_rejected"
+                    if not code_pass
+                    else (
+                        "accepted"
+                        if claim in {"passed", "not_applicable"}
+                        else "needs_review"
+                    )
+                )
+                quality = {"training_status": label}
+            manifest_ref = save("manifest", manifest)
+            if pool:
+                finish_pool_job(
+                    intake,
+                    database,
+                    job,
+                    status,
+                    quality,
+                    manifest_ref["sha256"],
+                    epoch,
+                )
+            else:
+                intake.complete(
+                    run_id,
+                    job["lease_token"],
+                    status,
+                    quality,
+                    manifest_ref["sha256"],
+                    epoch(),
+                )
         except Exception as exc:
             # Keep the original recorder journal and charge receipts even when the
             # worker cannot construct a complete row. Never echo a provider exception.
@@ -608,3 +813,53 @@ def run_experiment(
         count += 1
         print(json.dumps({"job": run_id, "batch": batch, "status": status}), flush=True)
     return count
+
+
+def pool_verified_result(objects, job, spec):
+    """Independently rebuild a standing job's native outcome from its frozen experiment and original wires."""
+    from lab_arena.collection_workflow import read_artifact
+    from lab_arena.collection_worker import native_payment_evidence
+
+    if (
+        spec.raw.get("payment_rule") != POOL_PAYMENT_RULE
+        or spec.pilot
+        or job["mode"] != "live"
+        or job["batch_id"] != spec.batch_id
+        or not 0 <= job["slot"] < len(spec.slots)
+    ):
+        raise ValueError("incorrect standing experiment identity")
+    case, arm, repeat = spec.slots[job["slot"]]
+    batch, run = spec.batch_id, job["job_id"]
+    manifest = read_artifact(
+        objects, batch, run, "manifest", {"sha256": job["artifact_sha256"]}, 1 << 20
+    )
+    if (
+        manifest["schema"] != SCHEMA
+        or manifest["payment_rule"] != POOL_PAYMENT_RULE
+        or manifest["settings"]["sha256"] != _hash(spec.raw)
+        or manifest["experiment"]["settings_sha256"] != spec.settings_hash
+        or manifest["experiment"]["arm"] != arm["id"]
+        or manifest["experiment"]["repeat"] != repeat
+        or manifest["experiment"]["role"] != arm["role"]
+        or job["model"] != arm["model"]
+        or job["scenario_id"] != case["scenario_id"]
+        or manifest["judge_policy"] != asdict(spec.policy)
+        or case.get("source_sha256")
+        != (manifest.get("student_source") or {}).get("sha256")
+    ):
+        raise ValueError("standing assignment differs from its original manifest")
+    proof = native_payment_evidence(objects, job, manifest)
+    recorded = read_artifact(
+        objects, batch, run, "native-verification", manifest["verification"], 4 << 20
+    )
+    if proof != recorded or (
+        job["status"] == "accepted"
+        and (
+            not proof["complete_verified"]
+            or job["price_microusd"] != (proof["cost_microusd"] * 5 + 3) // 4
+        )
+    ):
+        raise ValueError(
+            "stored native result or earned reward differs from original compute"
+        )
+    return manifest, proof

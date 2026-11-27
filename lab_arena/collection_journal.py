@@ -75,7 +75,7 @@ class WorkflowJournal:
             raise ValueError("collection journal index failed readback")
 
     def comparison_index(
-        self, *, complete, model=None, manifest_events=None, generator=None
+        self, *, complete, model=None, manifest_events=None, generator=None, verify_terminal=False, checkpoint=None
     ):
         """Read the original private journal before signing its manifest or failed prefix."""
         raw = self.objects.get_optional_bounded(self.path + "index.json", 512 * 1024)
@@ -96,18 +96,20 @@ class WorkflowJournal:
             )
         expected = None if index is None else index["events"]
         hashes = self.transcript_hashes(
-            expected, model=model, generator=generator if complete else None
+            expected, model=model, generator=generator if complete else None,
+            verify_terminal=verify_terminal, checkpoint=checkpoint,
         )
         return {
             "status": index["status"] if index is not None else "unsealed",
             "events": hashes,
         }
 
-    def transcript_hashes(self, expected, *, model, generator=None):
+    def transcript_hashes(self, expected, *, model, generator=None, verify_terminal=False, checkpoint=None):
         """Check private events against the original assistant-visible transcript."""
         first = last = None
         hashes = []
         transcript = []
+        restored = False
         for data, digest in self.read(expected):
             event = json.loads(data)
             if not hashes:
@@ -115,7 +117,13 @@ class WorkflowJournal:
             if generator is not None:
                 kind = event["kind"]
                 if kind == "start":
+                    if checkpoint is not None and any(event[key] != checkpoint[key] for key in ("messages","tools")):
+                        raise ValueError("continuation start differs from the verified student transcript")
                     transcript.extend(event["messages"])
+                elif kind == "before" and checkpoint is not None and not restored:
+                    if any(event[key] != checkpoint[key] for key in ("files","state","log")):
+                        raise ValueError("continuation world differs from the verified student checkpoint")
+                    restored = True
                 elif kind == "reply":
                     reply = event["message"]
                     msg = {"role": reply["role"], "content": reply.get("content") or ""}
@@ -149,4 +157,13 @@ class WorkflowJournal:
             raise ValueError(
                 "complete comparison journal differs from generator evidence"
             )
+        if verify_terminal:
+            evidence = generator["evidence"]
+            # The original finish is stored before scoring. Bind the attested
+            # terminal state and the pinned code check embedded in that journal.
+            if (last != "finish" or (checkpoint is not None and not restored)
+                    or event["finish"] != evidence["finish"] or event["code_checks"] != evidence["grade"]
+                    or any(event[k] != evidence["out"][k] for k in ("log","state","answer"))
+                    or event["files"] != {**evidence["initial_files"], **evidence["out"]["files"]}):
+                raise ValueError("terminal evidence differs from the original completed journal")
         return hashes

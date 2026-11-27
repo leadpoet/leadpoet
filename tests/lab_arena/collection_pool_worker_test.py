@@ -1,0 +1,402 @@
+"""Execute the pool's real pinned experiment runner. Only provider I/O and ledger are fixtures."""
+
+from copy import deepcopy
+from pathlib import Path
+from types import SimpleNamespace
+from uuid import UUID, uuid4
+import json, os
+import pytest
+
+from lab_arena import collection_experiment as xp, collection_judge as judge, contracts
+from lab_arena.collection_generation import CAPTURE_V2
+from lab_arena.collection_intake import GENERATOR_ROUTES, SCOPE, scope_id
+from lab_arena.collection_pool import POOL_PAYMENT_RULE, POOL_SCOPE, POOL_TERMS_HASH
+from lab_arena.collection_workflow import (
+    CORRECTION_CHAMPION_REV,
+    OUTREACH_POET_REV,
+    NATIVE_PARTITIONS,
+    workflow_sources,
+)
+from lab_arena.service import LocalObjectStore
+from tests.lab_arena.collection_judge_test import PROMPT
+from tests.lab_arena.collection_sales_evidence_test import OriginalReply
+
+SMALL = "nvidia/nemotron-3.5-super-vl"
+EXPERT = "deepseek/deepseek-v4-pro-0813"
+
+
+def pool_raw(family="P9", model=SMALL, repeats=4):
+    return {
+        "schema": xp.SCHEMA,
+        "id": "native-eligibility",
+        "payment_rule": POOL_PAYMENT_RULE,
+        "mode": "live",
+        "question": "Which source-stop errors occur?",
+        "pass_mark": "All native decisions and evidence checks pass.",
+        "max_slots": repeats,
+        "budget_microusd": repeats * 100000,
+        "cases": [{"scenario_id": family + "-s81000"}],
+        "split_sha256": "sha256:" + NATIVE_PARTITIONS[family],
+        "terms_sha256": POOL_TERMS_HASH,
+        "routes": {
+            model: ("coreweave/fp8" if model == EXPERT else GENERATOR_ROUTES[model].tag)
+        },
+        "capture_version": CAPTURE_V2,
+        "successor_seeds": True,
+        "arms": [
+            {
+                "id": "student",
+                "role": "expert",
+                "model": model,
+                "repeats": repeats,
+                "max_steps": 32,
+                "max_tokens": 8192,
+                "max_run_tokens": 65536,
+                "reasoning_effort": "low",
+                "capture_reasoning": True,
+                "budget_microusd": 100000,
+            }
+        ],
+    }
+
+
+def test_pool_identity_repeats_and_safe_renewal(tmp_path):
+    from scripts.run_locked_collection import poll_pool_experiments
+    from scripts.prepare_collection_experiment import store_private_json
+
+    raw = pool_raw()
+    spec = xp.load_experiment(raw, PROMPT)
+    assert spec.batch_id.startswith("pool-") and [r for _, _, r in spec.slots] == [
+        1,
+        2,
+        3,
+        4,
+    ]
+    bad = deepcopy(raw)
+    bad["arms"][0].pop("max_run_tokens")
+    with pytest.raises(ValueError):
+        xp.load_experiment(bad, PROMPT)
+    for corrupt in (
+        dict(raw, terms_sha256="sha256:" + "a" * 64),
+        dict(raw, pricing_pilot="xp-" + "a" * 64),
+        dict(raw, routes={SMALL: "anything"}),
+    ):
+        with pytest.raises(ValueError):
+            xp.load_experiment(corrupt, PROMPT)
+    path = tmp_path / (spec.batch_id + ".json")
+    store_private_json(path, raw)
+    db = SimpleNamespace(
+        rpc=lambda *a: [{"status": "accepted", "slot": i} for i in range(4)]
+    )
+    got = []
+
+    def dispatch(manifest, *, before_claim):
+        got.append(manifest["cases"][0]["scenario_id"])
+        if manifest == raw:
+            return 0
+        before_claim()
+        return 1
+
+    assert poll_pool_experiments(PROMPT, tmp_path, db, dispatch) == 1
+    assert got == ["P9-s81000", "P9-s81001"] and path.is_file()
+    got.clear()
+    assert poll_pool_experiments(PROMPT, tmp_path, db, dispatch) == 1 and got == [
+        "P9-s81001"
+    ]
+
+
+@pytest.fixture
+def pool_fixture(tmp_path, monkeypatch):
+    from bittensor_wallet import Keypair
+    import lab_arena.collection_broker as cb
+
+    agent = os.environ.get("COLLECTION_TEST_AGENT_REPO")
+    poet = os.environ.get("COLLECTION_TEST_POET_REPO")
+    if not (agent and poet):
+        pytest.skip("private scenario checkout unavailable")
+    key = Keypair.create_from_uri("//StandingComputeFixture")
+    consent = contracts.build_signed_request(
+        scope=SCOPE["register"],
+        round_id=scope_id("live"),
+        hotkey=key.ss58_address,
+        body={
+            "task_scope": POOL_SCOPE,
+            "spend_limit_microusd": 1000000,
+            "priority": 1,
+            "terms_sha256": POOL_TERMS_HASH,
+            "credentials_sha256": "sha256:" + "b" * 64,
+        },
+        timestamp=1,
+        sign_message=lambda m: key.sign(m).hex(),
+    )
+    env = SimpleNamespace(
+        objects=LocalObjectStore(tmp_path / "bucket"),
+        jobs=[],
+        grants={},
+        scripts=[],
+        run_costs={},
+        inputs=tmp_path / "inputs",
+        key=key,
+        consent=consent,
+    )
+    env.inputs.mkdir()
+    from scripts.collection_review import write_new
+
+    class Intake:
+        def claim_pool(self, spec, harness, *, expected_model="*"):
+            slot = sum(j["batch_id"] == spec.batch_id for j in env.jobs)
+            if slot >= len(spec.slots):
+                return None
+            case, arm, _ = spec.slots[slot]
+            if expected_model is None:
+                return {"model": arm["model"]}
+            rid = str(uuid4())
+            j = {
+                "job_id": rid,
+                "batch_id": spec.batch_id,
+                "mode": "live",
+                "slot": slot,
+                "attempt": 1,
+                "scenario_id": case["scenario_id"],
+                "model": arm["model"],
+                "price_microusd": 0,
+                "budget_microusd": arm["budget_microusd"],
+                "lease_token": "f" * 64,
+                "miner_hotkey": key.ss58_address,
+                "owner_coldkey": key.ss58_address,
+                "harness_commit": harness,
+                "status": "running",
+            }
+            env.jobs.append(j)
+            return j
+
+        def complete(self, rid, token, status, quality, artifact, epoch):
+            j = next(j for j in env.jobs if j["job_id"] == rid)
+            count = env.run_costs.get(rid, 0)
+            cost = count * 10
+            j.update(
+                status=status,
+                quality=quality,
+                artifact_sha256=artifact,
+                price_microusd=(cost * 5 + 3) // 4 if status == "accepted" else 0,
+            )
+            env.grants[rid] = dict(
+                job_id=rid,
+                mode="live",
+                miner_hotkey=key.ss58_address,
+                registration_id=str(UUID(hex=consent["request_id"])),
+                consent=consent,
+                task_scope=POOL_SCOPE,
+                terms_sha256=POOL_TERMS_HASH,
+                spend_limit_microusd=1000000,
+                priority=1,
+                unresolved=0,
+                generator_calls=count,
+                miner_cost_microusd=cost,
+            )
+
+    class Db:
+        def rpc(self, name, params):
+            group = [j for j in env.jobs if j["batch_id"] == params["p_batch"]]
+            if name == "collection_batch_jobs_v1":
+                return group
+            if name == "collection_training_consents_v1":
+                return [env.grants[j["job_id"]] for j in group]
+            raise AssertionError(name)
+
+    def broker(_, db, transport, job, pricing, *, routes, judge_key):
+        rid = job["job_id"]
+        ad = OriginalReply(env.scripts.pop(0), rid)
+        ad.versions = {m: r.revision for m, r in GENERATOR_ROUTES.items()}
+
+        def usage():
+            used = len(ad.prefixes)
+            env.run_costs[rid] = used
+            return {
+                "settled_microusd": 10 * used,
+                "reserved_or_uncertain_microusd": 0,
+                "inflight_calls": 0,
+                "providers": {"openrouter": {"used": used, "inflight": 0}},
+            }
+
+        ad.usage = usage
+        return ad
+
+    monkeypatch.setattr(cb, "CollectionBroker", broker)
+    env.db = Db()
+    env.intake = Intake()
+    with workflow_sources(
+        agent, poet, corrections=True, builder_revision=OUTREACH_POET_REV
+    ) as src:
+        env.sources = src
+        for family in ("P9", "P10"):
+            split = src[1].training_partition(family)
+            write_new(env.inputs / (judge.digest(split) + ".json"), split)
+        yield env
+
+
+def simulation(env, raw, scripts):
+    spec = xp.load_experiment(raw, PROMPT)
+    env.scripts.extend(scripts)
+    sources = env.sources
+    inputs = xp.read_inputs(
+        spec, env.inputs, sources, objects=env.objects, database=env.db, prompt=PROMPT
+    )
+    count = xp.run_experiment(
+        spec=spec,
+        sources=sources,
+        inputs=inputs,
+        intake=env.intake,
+        database=env.db,
+        objects=env.objects,
+        transport=None,
+        pricing=lambda model: {},
+        owner_lookup=lambda _: SimpleNamespace(coldkey=env.key.ss58_address),
+        judge_key=None,
+        max_jobs=len(scripts),
+        epoch=lambda: 123,
+        prompt=PROMPT,
+    )
+    assert count == len(scripts)
+    return spec
+
+
+def scripts_for(env, family):
+    t = env.sources[1].build(family, 81000)
+    ref = env.sources[1].perfect(t)
+    correct = list(ref["calls"]) + [ref["answer"]]
+    wrong = deepcopy(correct)
+    for r in wrong[-2][1]["plan"]:
+        r["disposition"] = "release" if family == "P9" else "keep"
+    return correct, wrong
+
+
+@pytest.mark.parametrize("family", ["P9", "P10"])
+def test_pool_pass_and_fail_paid_and_genuine_continuation(pool_fixture, family):
+    from lab_arena.collection_pool_source import funded_source
+    from scripts.collection_review import write_new
+
+    e = pool_fixture
+    raw = pool_raw(family=family, repeats=2)
+    correct, bad = scripts_for(e, family)
+    spec = simulation(e, raw, [correct, bad])
+    for j, passed in zip(e.jobs, [True, False], strict=True):
+        manifest, proof = xp.pool_verified_result(e.objects, j, spec)
+        assert (
+            j["status"] == "accepted"
+            and proof["eligible"]
+            and proof["complete_verified"]
+            and proof["task_pass"] is passed
+        )
+        assert j["price_microusd"] == (5 * proof["cost_microusd"] + 3) // 4
+    j = e.jobs[-1]
+    source = funded_source(e.db, e.objects, spec.batch_id, j["job_id"], PROMPT)
+    assert (
+        source["rejected_fatal"]
+        and source["failure"]["reason"] == "incorrect_irreversible_plan"
+    )
+    assert "commit" in source["rejected"]["tool_calls"][0]["function"]["arguments"]
+    sid = xp._hash(source)
+    write_new(e.inputs / (sid[7:] + ".json"), source)
+    run = pool_raw(family, EXPERT, 1)
+    run.pop("successor_seeds")
+    run["arms"][0]["role"] = "continuation"
+    run["cases"][0]["source_sha256"] = sid
+    resumed = simulation(e, run, [correct[-2:]])
+    m, proof = xp.pool_verified_result(e.objects, e.jobs[-1], resumed)
+    assert proof["task_pass"] and proof["calls"] == 2
+    from lab_arena.collection_workflow import read_artifact
+
+    row = read_artifact(
+        e.objects,
+        resumed.batch_id,
+        e.jobs[-1]["job_id"],
+        "generator",
+        m["generator"],
+        16 << 20,
+    )
+    assert all(row["correction"]["correction_step_checks"].values())
+    assert (
+        row["messages"][: row["correction"]["prefix_messages"]]
+        == source["checkpoint"]["messages"]
+    )
+
+
+def test_healthy_program_survives_preflight_failure_but_never_replays_ambiguous_claim(
+    tmp_path,
+):
+    from scripts.prepare_collection_experiment import store_private_json
+    from scripts.run_locked_collection import poll_pool_experiments
+
+    for family in ("P9", "P10"):
+        raw = pool_raw(family=family)
+        path = tmp_path / (xp.load_experiment(raw, PROMPT).batch_id + ".json")
+        store_private_json(path, raw)
+    store_private_json(tmp_path / ("pool-" + "a" * 64 + ".json"), {})
+    calls = []
+
+    def available(raw, *, before_claim):
+        calls.append(raw["cases"][0]["scenario_id"])
+        if len(calls) == 1:
+            raise RuntimeError("provider unavailable")
+        before_claim()
+        return 1
+
+    assert (
+        poll_pool_experiments(PROMPT, tmp_path, None, available) == 1
+        and len(calls) == 2
+    )
+    calls.clear()
+
+    def ambiguous(raw, *, before_claim):
+        before_claim()
+        calls.append(raw["id"])
+        raise RuntimeError("unknown claim")
+
+    with pytest.raises(RuntimeError, match="unknown claim"):
+        poll_pool_experiments(PROMPT, tmp_path, None, ambiguous)
+    assert len(calls) == 1
+
+
+def test_completed_receipt_retry_never_repays_a_lost_response():
+    record = {
+        "job_id": "id",
+        "lease_token": "lease",
+        "batch_id": "batch",
+        "status": "running",
+    }
+    calls = []
+
+    def complete(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            raise ConnectionError("lost")
+        return True
+
+    db = SimpleNamespace(rpc=lambda *args: [record])
+    epochs = iter((200, 201))
+    assert xp.finish_pool_job(
+        SimpleNamespace(complete=complete),
+        db,
+        record,
+        "accepted",
+        {},
+        "artifact",
+        lambda: next(epochs),
+    )
+    assert [args[-1] for args in calls] == [200, 201]
+    record.update(status="accepted", artifact_sha256="artifact")
+    calls.clear()
+    assert (
+        xp.finish_pool_job(
+            SimpleNamespace(complete=complete),
+            db,
+            record,
+            "accepted",
+            {},
+            "artifact",
+            lambda: 200,
+        )
+        == record
+    )
+    assert len(calls) == 1

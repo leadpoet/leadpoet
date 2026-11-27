@@ -355,9 +355,18 @@ def test_polling_a_balance_adds_a_reading_only_when_the_total_changes(world, adm
     world.store.record_gamma_reading(**dict(read, block_number=9, spent_units=6))
     # Anyone may ask for any hotkey's balance: one that never spent adds nothing.
     world.store.record_gamma_reading(**dict(read, hotkey=hotkey(), spent_units=0))
+    # Gamma storage missing: one row marks the balance unavailable, and repeats add none.
+    for block in (10, 11):
+        down = world.store.record_gamma_reading(**dict(read, block_number=block, available=False))
+        assert (down["available"], down["balance_microusd"]) == (False, 0)
+    for _ in range(2):  # a stranger's hotkey while storage is missing
+        world.store.record_gamma_reading(**dict(read, hotkey=hotkey(), available=False))
     admin.execute("SELECT hotkey,count(*) FROM public.tool_market_gamma_readings WHERE hotkey=%s GROUP BY 1",
                   (buyer,))
-    assert admin.fetchall() == [(buyer, 2)]
+    assert admin.fetchall() == [(buyer, 3)]
+    admin.execute("SELECT count(*) FROM public.tool_market_gamma_readings WHERE NOT available AND hotkey<>%s",
+                  (buyer,))
+    assert admin.fetchone()[0] == 0
     admin.execute("SELECT count(*) FROM public.tool_market_gamma_readings WHERE spent_units=0 AND available")
     assert admin.fetchone()[0] == 0
 

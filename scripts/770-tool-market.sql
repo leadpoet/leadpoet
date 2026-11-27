@@ -293,9 +293,17 @@ BEGIN
  -- Each registration of the subnet has its own totals: its largest one.
  SELECT coalesce(sum(m),0) INTO spent FROM (SELECT max(g.spent_units) m FROM public.tool_market_gamma_readings g
   WHERE g.hotkey=p_hotkey AND g.available GROUP BY g.subnet_counter) totals;
- SELECT coalesce(sum(CASE WHEN public.tool_market__tab_open_v1(t) THEN t.budget_microusd
-   ELSE public.tool_market__committed_v1(t.tab_id) END),0)::BIGINT INTO held
-  FROM public.tool_market_tabs t WHERE t.hotkey=p_hotkey;
+ -- An open tab holds its budget; a closed one what its calls committed
+ -- (as tool_market__committed_v1), in one join, since each signed call is a tab.
+ WITH tabs AS (SELECT t.tab_id,t.budget_microusd,public.tool_market__tab_open_v1(t) open
+   FROM public.tool_market_tabs t WHERE t.hotkey=p_hotkey)
+ SELECT coalesce((SELECT sum(budget_microusd) FROM tabs WHERE open),0)
+  +coalesce((SELECT sum(coalesce(s.charge_microusd,
+    CASE WHEN c.opened_at>clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1())
+     THEN c.reserve_microusd ELSE 0 END))
+   FROM tabs JOIN public.tool_market_calls c ON c.tab_id=tabs.tab_id
+    LEFT JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id WHERE NOT tabs.open),0)
+  INTO held;
  -- 10^9 Gamma units per USD: 1000 units per micro-USD, rounded down.
  credit:=CASE WHEN r.available THEN floor(spent/1000)::BIGINT ELSE 0 END;
  RETURN jsonb_build_object('available',coalesce(r.available,FALSE),'block_number',r.block_number,
@@ -356,9 +364,14 @@ BEGIN
   RETURN jsonb_build_object('status','counter_backwards');
  END IF;
  -- The same total again (a client polling its balance) adds no row, nor
- -- does a hotkey that never spent here (anyone may ask for any balance).
+ -- does a hotkey that never spent here (anyone may ask for any balance),
+ -- nor an unavailable read when the latest reading is not an available one.
  IF p_available AND ((prior.subnet_counter=p_counter AND prior.spent_units=p_units)
    OR (prior.reading_id IS NULL AND p_units=0)) THEN
+  RETURN public.tool_market__balance_v1(p_hotkey);
+ END IF;
+ IF NOT p_available AND NOT coalesce((SELECT g.available FROM public.tool_market_gamma_readings g
+   WHERE g.hotkey=p_hotkey ORDER BY g.block_number DESC,g.reading_id DESC LIMIT 1),FALSE) THEN
   RETURN public.tool_market__balance_v1(p_hotkey);
  END IF;
  INSERT INTO public.tool_market_gamma_readings(hotkey,block_number,block_hash,spent_units,available,subnet_counter)

@@ -25,6 +25,12 @@ leadpoet collection-revoke --mode live --wallet-name miner --registration-id REG
 
 For unattended registration, read `leadpoet collection-terms` and pass the displayed `--accept-terms DIGEST` with your limit. The CLI reads `OPENROUTER_API_KEY` and `OPENROUTER_MANAGEMENT_KEY` from the process environment or prompts privately. A previous offer signature covers only its original work. To switch an existing active registration, revoke it and sign the new sandbox terms. Historical charges and finalized payments stay on the miner’s statement. The pool covers synthetic OpenRouter experiments; live web and Deepline have separate permission requirements.
 
+## Updating the collection worker or exporter
+
+Before changing the checkout for either service, stop its timer and let the current cycle finish. Both services use systemd `Type=oneshot`. While a funded run is executing, systemd can report `activating`.
+
+Use `systemctl show SERVICE -p ActiveState -p SubState -p MainPID -p ControlPID -p Job`. Wait for `inactive`, `dead`, both PIDs zero and an empty job. Change the checkout, restart the timer and confirm the next cycle completes on that revision. If a service fails, inspect the failed cycle before updating.
+
 ## Historical offers and operator reference
 
 The following sections document earlier fixed-price cohorts, pilots and their evidence. Their manifests and original signatures remain necessary to reproduce historical work.

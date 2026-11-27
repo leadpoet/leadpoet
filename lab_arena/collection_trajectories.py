@@ -21,7 +21,9 @@ def verified_grants(database, batch, jobs, *, mode, scope, digest, allow_pending
     from lab_arena import collection_intake as intake
     from lab_arena.chain import verify_hotkey_signature
 
-    permitted = {intake.SYNTHETIC_TRAINING_TERMS_HASH}
+    from lab_arena.collection_pool import POOL_SCOPE, POOL_TERMS_HASH
+    pool = mode == "live" and scope == POOL_SCOPE and re.fullmatch(r"pool-[0-9a-f]{64}", batch)
+    permitted = {POOL_TERMS_HASH} if pool else {intake.SYNTHETIC_TRAINING_TERMS_HASH}
     if mode == "live" and scope == intake.TASK_SCOPE and intake.PAID_OFFER_ID.fullmatch(batch):
         permitted = {intake.PAID_WORKFLOW_TERMS_HASH}
     if scope == intake.CORRECTION_SCOPE:
@@ -56,12 +58,15 @@ def verified_grants(database, batch, jobs, *, mode, scope, digest, allow_pending
             now=envelope["timestamp"],
             verify_signature=verify_hotkey_signature,
         )
-        signed_slots = intake.signed_daily_slots(signed["body"])
-        if (
-            signed_slots != auth.get("max_slots_per_utc_day", 1)
-            or type(signed["body"]["daily_cap_microusd"]) is not int
-            or signed["body"]["daily_cap_microusd"] <= 0
-        ):
+        body = signed["body"]
+        if pool:
+            cap = intake.standing_limit(body)
+            valid = (type(auth.get("spend_limit_microusd")) is int and cap == auth["spend_limit_microusd"]
+                     and type(auth.get("priority")) is int and body["priority"] == auth["priority"])
+        else:
+            valid = (intake.signed_daily_slots(body) == auth.get("max_slots_per_utc_day", 1)
+                     and type(body.get("daily_cap_microusd")) is int and body["daily_cap_microusd"] > 0)
+        if not valid:
             raise ValueError("invalid original enrollment body")
         if (
             auth["mode"] != mode
@@ -132,6 +137,36 @@ def _steps(evidence, messages):
     ]
 
 
+def experiment_calls(calls, events):
+    """Recover omitted usage details from the journal entry for the same provider generation."""
+    replies = {e["receipt"]: e for e in events if e.get("kind") == "reply" and e.get("receipt")}
+    result = []
+    for call in calls:
+        usage = dict(call.get("usage") or {})
+        original = replies.get(call.get("provider_id"))
+        if original:
+            if original["model"] != call["model"]:
+                raise ValueError("original usage model mismatch")
+            for key, value in (original.get("usage") or {}).items():
+                if key not in ("prompt_tokens", "completion_tokens", "total_tokens", "completion_tokens_details"):
+                    continue
+                if key in usage and usage[key] != value:
+                    raise ValueError("original generation usage mismatch")
+                usage[key] = value
+        result.append({**call, "usage": usage})
+    return result
+
+
+def _total_tokens(usage):
+    total = usage.get("total_tokens")
+    if type(total) is int and total >= 0:
+        return total
+    prompt, completion = usage.get("prompt_tokens"), usage.get("completion_tokens")
+    if all(type(v) is int and v >= 0 for v in (prompt, completion)):
+        return prompt + completion
+    return None
+
+
 def _tokens(calls, successful_calls):
     result = {}
     expected = max(len(calls), successful_calls)
@@ -147,7 +182,7 @@ def _tokens(calls, successful_calls):
             value = (
                 (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
                 if key == "reasoning_tokens"
-                else usage.get(key)
+                else _total_tokens(usage) if key == "total_tokens" else usage.get(key)
             )
             if type(value) is int and value >= 0:
                 values.append(value)
@@ -296,6 +331,14 @@ def trajectory_row(
             else None
         ),
     }
+    if experiment and job["batch_id"].startswith("pool-"):
+        # Contrast repeats of the same frozen arm. Never confound its outcome with a
+        # different model, checkpoint, reasoning setting or budget.
+        group.update(settings=settings_sha256, arm=experiment["arm"], model=revision, route=route)
+    final_context = _total_tokens(calls[-1].get("usage") or {}) if (
+        final and calls and len(calls) == job["generator_calls"]
+    ) else None
+    tokens = _tokens(calls, job["generator_calls"])
     ins = {
         "schema": "collection.trajectory.v1",
         "run_id": rid,
@@ -336,8 +379,13 @@ def trajectory_row(
         "opaque_sidecars_withheld": generation.get("opaque_sidecars_withheld"),
         "miner_cost_microusd": job["miner_cost_microusd"],
         "generator_calls": job["generator_calls"],
-        "tokens": _tokens(calls, job["generator_calls"]),
+        "tokens": tokens,
         "length": {
+            # Final context includes the final prompt (prior messages/tools) and completion.
+            # Summing every request would count the same conversation prefixes repeatedly.
+            "tokens": final_context,
+            "generated_tokens": tokens["completion_tokens"],
+            "token_basis": "provider_final_prompt_and_completion",
             "message_count": len(messages),
             "assistant_turns": len(steps),
             "message_bytes": len(judge._json(messages).encode()),
@@ -395,6 +443,24 @@ def trajectory_row(
     return ins
 
 
+def apply_native_labels(row, checked, reward_microusd=None):
+    """Take task and payment outcomes from the same replay of the original funded work."""
+    complete = row["final_turn_present"] and checked["complete_verified"]
+    row["verification_method"] = checked["payment_rule"]
+    row["verified_complete"] = bool(complete)
+    row["verified_task_pass"] = checked["task_pass"] if complete else None
+    row["payment_eligible"] = checked["eligible"]
+    if reward_microusd is not None:
+        row["earned_target_microusd"] = reward_microusd if checked["eligible"] else 0
+    if row["verified_task_pass"] is False and row.get("first_failed_check") is None:
+        row["first_failed_check"] = {"turn": None, "check": "native_task", "kind": "terminal_check"}
+    if "verified_decision" in checked:
+        row["sales_evidence"] = {k: checked[k] for k in (
+            "verified_decision", "field_evidence", "searches", "opened_sources",
+            "first_failed_decision", "observed_repair",
+        )}
+
+
 class TrajectoryArchive:
     """Write a deterministic release digest covering full runs and both sides of each preference."""
 
@@ -430,7 +496,8 @@ class TrajectoryArchive:
         self.stats["model_transcripts"] += bool(row["messages"])
         if (
             row["verified_task_pass"] is not None
-            and row["judgment_status"] != "cannot_judge"
+            and row["final_turn_present"] and not row["partial"] and not row.get("capture_hold")
+            and (row["judgment_status"] != "cannot_judge" or row.get("verified_complete") is True)
         ):
             self.groups[row["repeat_group_id"]][row["verified_task_pass"]].append(
                 dict(ref, run_id=run)

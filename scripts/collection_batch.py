@@ -377,25 +377,12 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None,
                     hold=hold,
                 )
                 if native:
-                    trajectory["verification_method"] = raw["payment_rule"]
-                    if packet and trajectory["final_turn_present"]:
-                        trajectory["verified_task_pass"] = all(packet["checks"][k] is True for k in (
-                            "answered", "shape", "code_grade", "no_hard_failure", "privacy", "training_split"
-                        ))
-                    checked = by_id.get(rid, {}).get("native") or {}
-                    if "verified_decision" in checked:
-                        # These are the replayed checks and model-visible observations. Private
-                        # source worlds, reference answers and undiscovered documents stay sealed.
-                        trajectory["sales_evidence"] = {
-                            key: checked[key] for key in (
-                                "verified_decision", "field_evidence", "searches", "opened_sources",
-                                "first_failed_decision", "observed_repair",
-                            )
-                        }
-                        if packet and trajectory["final_turn_present"]:
-                            trajectory["verified_task_pass"] = (
-                                trajectory["verified_task_pass"] and checked["verified_decision"]
-                            )
+                    checked = by_id.get(rid, {}).get("native")
+                    if checked is not None:
+                        traces.apply_native_labels(trajectory, checked, job.get("price_microusd"))
+                    else:
+                        trajectory.update(verification_method=raw["payment_rule"], verified_complete=False,
+                                          verified_task_pass=None, payment_eligible=False, earned_target_microusd=0)
                 if successor:
                     trajectory["reference_successor"] = dict(successor)
                 if witness and job["model"] == witness["model"]:
@@ -545,7 +532,10 @@ def main(argv=None):
     p.add_argument("--evaluation", type=Path)
     args = p.parse_args(argv)
     raw, prompt = (json.loads(read_file(path)) for path in (args.batch, args.prompt))
-    native_export = args.action == "export" and "payment_rule" in raw
+    from lab_arena.collection_pool import POOL_PAYMENT_RULE
+    native_export = (args.action == "export" and "payment_rule" in raw) or (
+        args.action == "corrections" and raw.get("payment_rule") == POOL_PAYMENT_RULE
+    )
     if args.action in {"prices", "export", "corrections"} and not native_export and args.receipt is None:
         p.error("--receipt is required")
     if not live_finney_arena():
@@ -615,6 +605,8 @@ def main(argv=None):
                 args.output,
                 qualification=qualification,
                 full_trajectories=args.action == "export",
+                corrections_only=args.action == "corrections",
+                prompt=prompt,
             )
         elif args.action == "export":
             result = write_exports(

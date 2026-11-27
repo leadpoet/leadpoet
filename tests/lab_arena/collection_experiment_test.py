@@ -609,15 +609,26 @@ def test_real_harness_checkpoint_and_archive_under_funded_job_contract(
         monkeypatch.setattr(
             exports, "verified_panel", lambda *a, **kw: {"test_panel": "verified"}
         )
+        # A sibling's unresolved call can be retried later without suppressing this original.
+        pending_id = "00000000-0000-4000-8000-000000000002"
+        def with_pending(name, args):
+            data = db.rpc(name, args)
+            if name in {"collection_pilot_costs_v1", "collection_training_consents_v1"}:
+                extra = dict(data[0], job_id=pending_id, unresolved=1)
+                if name == "collection_pilot_costs_v1":
+                    extra.update(attempt=2, status="failed", artifact_sha256=None)
+                return [*data, extra]
+            return data
         path = tmp_path / "full-negative.zip"
         metadata = exports.write_dataset(
             spec,
-            db,
+            SimpleNamespace(rpc=with_pending),
             objects,
             path,
             qualification={"test": True},
             full_trajectories=True,
         )
+        assert metadata["pending_runs"] == [{"run_id": pending_id, "slot": j["slot"], "reason": "billing_pending"}]
         assert (
             metadata["trajectory_rows"] == metadata["verified_failures"] == 1
             and metadata.get("correction_pairs", 0) == 0

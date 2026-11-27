@@ -31,6 +31,7 @@ from lab_arena.collection_workflow import store_artifact
 from lab_arena.collection_journal import WorkflowJournal
 from lab_arena import collection_trajectories as trajectories
 from lab_arena.collection_broker import batch_versions
+from lab_arena.collection_pool import POOL_SCOPE, POOL_PAYMENT_RULE, POOL_TERMS_HASH
 
 CORRECTIONS = "collection.correction-pairs.v1"
 AUDIT = "collection.experiment-private-audit.v1"
@@ -77,7 +78,7 @@ def verified_panel(
     return signed
 
 
-def _pair(row, packet, student):
+def _pair(row, packet, student, *, native=None):
     """Only the separately verified expert's action is a positive target."""
     link = row.get("correction")
     required_code = {
@@ -92,10 +93,13 @@ def _pair(row, packet, student):
         not link
         or not required_code <= set(packet["checks"])
         or not all(v is True for v in packet["checks"].values())
-        or packet.get("projection_error")
+        or (packet.get("projection_error") and native is None)
     ):
         return None
-    if judge.claim_verdict(packet) not in {"passed", "not_applicable"}:
+    if native is not None:
+        if not native["complete_verified"] or not native["task_pass"]:
+            return None
+    elif judge.claim_verdict(packet) not in {"passed", "not_applicable"}:
         return None
     checks = link.get("correction_step_checks", {})
     required = {
@@ -104,12 +108,18 @@ def _pair(row, packet, student):
         "student_action_fatal",
         "expert_step_recoverable",
     }
-    if set(checks) != required or not all(v is True for v in checks.values()):
+    from lab_arena.collection_pool_source import SCHEMA as FUNDED_STUDENT
+    funded_mistake = native is not None and student.get("schema") == FUNDED_STUDENT
+    # A wrong, revisable memo is still a genuine negative when its exact failed
+    # paid source was independently reconstructed and its expert branch passed.
+    needed = required - {"student_action_fatal"} if funded_mistake else required
+    if set(checks) != required or not all(checks[k] is True for k in needed):
         return None
     if (
         link["student_model"] != student["student_model"]
         or link["source_sha256"] != student["source_sha256"]
-        or link["rejected_fatal"] is not True
+        or link["rejected_fatal"] != student["rejected_fatal"]
+        or (not funded_mistake and link["rejected_fatal"] is not True)
         or link["rejected"] != student["rejected"]
         or link["checkpoint_sha256"] != judge.digest(student["checkpoint"])
     ):
@@ -147,8 +157,27 @@ def _pair(row, packet, student):
     }
 
 
+def _verify_student(spec, database, objects, prompt, student, proof):
+    from lab_arena.collection_pool_source import SCHEMA as FUNDED_STUDENT, funded_source
+    from lab_arena.collection_experiment import verify_provenance
+
+    if student.get("schema") == FUNDED_STUDENT:
+        if (spec.raw.get("payment_rule") != POOL_PAYMENT_RULE or prompt is None
+                or "provenance_sha256" in spec.raw or proof is not None):
+            raise ValueError("unexpected internal student source")
+        origin = student["origin"]
+        original = funded_source(database, objects, origin["batch_id"], origin["job_id"], prompt)
+        if original != student:
+            raise ValueError("correction source differs from the original signed funded work")
+    else:
+        if proof is None or "provenance_sha256" not in spec.raw:
+            raise ValueError("missing producer attestation")
+        verify_provenance(spec, proof, {_hash(student): student}, objects=objects)
+
+
 def write_dataset(
-    spec, database, objects, dest, *, qualification=None, full_trajectories=False
+    spec, database, objects, dest, *, qualification=None, full_trajectories=False,
+    corrections_only=False, only_jobs=None, publish=True, prompt=None,
 ):
     from scripts.collection_batch import read_artifact
     from lab_arena.collection_intake import (
@@ -159,7 +188,13 @@ def write_dataset(
     register_signatures()
 
     batch = spec.batch_id
-    trained = qualification is not None
+    pooled = spec.raw.get("payment_rule") == POOL_PAYMENT_RULE
+    if pooled and (not re.fullmatch(r"pool-[0-9a-f]{64}", batch) or spec.raw["mode"] != "live"
+                   or spec.raw["terms_sha256"] != POOL_TERMS_HASH):
+        raise ValueError("invalid standing training grant or batch")
+    trained = qualification is not None or (pooled and (full_trajectories or corrections_only))
+    if only_jobs is not None and not (pooled and full_trajectories):
+        raise ValueError("incremental experiment export requires a native paid batch")
     if full_trajectories and not trained:
         raise ValueError("trajectory release requires independent qualification")
     export = (
@@ -168,8 +203,9 @@ def write_dataset(
         else (CORRECTIONS if trained else AUDIT)
     )
     if trained:
-        require_correction_grant(spec.raw["mode"], spec.raw["terms_sha256"])
         require_release_partition(spec.raw)
+    if trained and not pooled:
+        require_correction_grant(spec.raw["mode"], spec.raw["terms_sha256"])
         # Qualification documents are reconstructed from authenticated DB + original immutable evidence.
         receipt = verified_panel(
             database, objects, spec.raw, spec.policy, **qualification
@@ -179,27 +215,28 @@ def write_dataset(
         if spec.raw["mode"] == "live"
         else "collection_pilot_costs_v1"
     )
+    if pooled and trained:
+        costs_rpc = "collection_batch_jobs_v1"
     rows = database.rpc(costs_rpc, {"p_batch": batch})
     if not isinstance(rows, list) or len(rows) > 2 * len(spec.slots) or not rows:
         raise ValueError("missing registered experiment runs")
-    if trained and (
-        any(j["status"] == "running" or j["unresolved"] for j in rows)
-        or {j["slot"] for j in rows} != set(range(len(spec.slots)))
-    ):
-        raise ValueError(
-            "correction batch has missing runs or unconfirmed miner charges"
-        )
-    if full_trajectories:
+    if only_jobs is not None:
+        rows = [row for row in rows if row["job_id"] in only_jobs]
+        if not only_jobs or len(rows) != len(only_jobs) or {r["job_id"] for r in rows} != set(only_jobs):
+            raise ValueError("snapshot jobs differ from registered experiment")
+    if full_trajectories or (pooled and trained):
         from lab_arena.collection_intake import CORRECTION_SCOPE
 
-        trajectories.verified_grants(
-            database,
-            batch,
-            rows,
-            mode=spec.raw["mode"],
-            scope=CORRECTION_SCOPE,
-            digest=spec.raw["terms_sha256"],
+        grants = trajectories.verified_grants(
+            database, batch, rows, mode=spec.raw["mode"],
+            scope=POOL_SCOPE if pooled else CORRECTION_SCOPE, digest=spec.raw["terms_sha256"],
+            allow_pending=True, subset=only_jobs is not None,
         )
+        if pooled:
+            rows = [{**j, **{k: grants[j["job_id"]][k] for k in (
+                "unresolved", "generator_calls", "miner_cost_microusd"
+            )}} for j in rows]
+    pending = []
     split = None
     stats = Counter()
     class_costs = {}
@@ -224,6 +261,10 @@ def write_dataset(
                     or job["harness_commit"] != source_revisions(spec.raw)[0]
                 ):
                     raise ValueError("job differs from frozen experiment")
+                if trained and (job["status"] not in {"accepted", "rejected", "failed"} or job["unresolved"]):
+                    pending.append({"run_id": rid, "slot": i,
+                                    "reason": "billing_pending" if job["unresolved"] else "execution_pending"})
+                    continue
                 stats["attempts"] += 1
                 stats["miner_cost_microusd"] += job["miner_cost_microusd"]
                 stats["unknown_miner_bills"] += job["unresolved"]
@@ -240,9 +281,10 @@ def write_dataset(
                     "reasoning_effort": arm["reasoning_effort"],
                 }
 
+                native = None
                 def project(generator, packet, calls, stamp, student, **kwargs):
                     agent, builder = source_revisions(spec.raw)
-                    return trajectories.trajectory_row(
+                    projected = trajectories.trajectory_row(
                         job=job,
                         generator=generator,
                         packet=packet,
@@ -258,17 +300,27 @@ def write_dataset(
                         source=student,
                         **kwargs,
                     )
+                    if pooled:
+                        if native is not None and not projected.get("capture_hold"):
+                            trajectories.apply_native_labels(projected, native, job["price_microusd"])
+                        else:
+                            projected.update(verification_method=POOL_PAYMENT_RULE, verified_complete=False,
+                                             verified_task_pass=None, payment_eligible=False, earned_target_microusd=0)
+                    return projected
 
                 event_hashes = []
                 if job.get("artifact_sha256") and job["status"] != "failed":
-                    manifest = read_artifact(
-                        objects,
-                        batch,
-                        rid,
-                        "manifest",
-                        {"sha256": job["artifact_sha256"]},
-                        LIMIT,
-                    )
+                    if pooled and trained:
+                        from lab_arena.collection_experiment import pool_verified_result
+
+                        manifest, native = pool_verified_result(objects, job, spec)
+                        if (native["eligible"] != (job["status"] == "accepted")
+                                or native["cost_microusd"] != job["miner_cost_microusd"]
+                                or native["calls"] != job["generator_calls"]):
+                            raise ValueError("native verification differs from funded experiment")
+                    else:
+                        manifest = read_artifact(objects, batch, rid, "manifest",
+                                                 {"sha256": job["artifact_sha256"]}, LIMIT)
                     event_hashes = manifest["events"]
                 else:
                     ref = objects.get_optional_bounded(
@@ -291,9 +343,14 @@ def write_dataset(
                 # A hard stop may leave a verified prefix, but no terminal event index.
                 incomplete = not job.get("artifact_sha256") and not event_hashes
                 journal = WorkflowJournal(objects, batch, rid)
+                replies = []
                 for idx, (event, _) in enumerate(
                     journal.read(None if incomplete else event_hashes)
                 ):
+                    if full_trajectories:
+                        observed_event = json.loads(event)
+                        if observed_event["kind"] == "reply":
+                            replies.append({k: observed_event.get(k) for k in ("kind", "receipt", "model", "usage")})
                     if not trained:
                         z.writestr(f"{rid}/events/{idx:05d}.json", event)
                 if job["status"] == "failed" or not job.get("artifact_sha256"):
@@ -342,20 +399,8 @@ def write_dataset(
                             ):
                                 hold = "missing_verified_student"
                             else:
-                                from lab_arena.collection_experiment import (
-                                    verify_provenance,
-                                )
-
-                                proof = saved("producer-attestation")
-                                if proof is None:
-                                    hold = "missing_producer_attestation"
-                                else:
-                                    verify_provenance(
-                                        spec,
-                                        proof,
-                                        {case["source_sha256"]: student},
-                                        objects=objects,
-                                    )
+                                _verify_student(spec, database, objects, prompt, student,
+                                                saved("producer-attestation"))
                         if stamp is None or split_doc is None:
                             hold = "missing_verified_split"
                         else:
@@ -428,6 +473,8 @@ def write_dataset(
                     raise ValueError("source-free case contains a student correction")
                 split = read("split", manifest["split"])
                 calls = read("generation-receipts", manifest["calls"])
+                if full_trajectories:
+                    calls = trajectories.experiment_calls(calls, replies)
                 settings = read("settings", manifest["settings"])
                 if (
                     row["run"] != rid
@@ -440,14 +487,9 @@ def write_dataset(
                 ):
                     raise ValueError("experiment evidence differs from assignment")
                 if trained and student is not None:
-                    from lab_arena.collection_experiment import verify_provenance
-
-                    provenance = read(
-                        "producer-attestation", manifest["producer_attestation"]
-                    )
-                    verify_provenance(
-                        spec, provenance, {case["source_sha256"]: student}, objects=objects
-                    )
+                    ref = manifest.get("producer_attestation")
+                    proof = read("producer-attestation", ref) if ref else None
+                    _verify_student(spec, database, objects, prompt, student, proof)
                 observed = {}
                 protocol = spec.raw.get("claim_protocol", "collection.fresh-claims.v1")
                 proofs = packet.get("fresh_claim_proof", {})
@@ -507,10 +549,9 @@ def write_dataset(
                 if seen != set(observed):
                     raise ValueError("claim vote count differs from source")
                 verify_split(manifest["split_stamp"], split)
-                if row.get("split") != packet.get("split") or row.get("split") != {
-                    k: manifest["split_stamp"][k]
-                    for k in ("template_id", "rule_pool", "tool_variant")
-                }:
+                origin = {k: manifest["split_stamp"][k] for k in ("template_id", "rule_pool", "tool_variant")}
+                packet_split = manifest["split_stamp"] if pooled else origin
+                if row.get("split") != origin or packet.get("split") != packet_split:
                     raise ValueError(
                         "recorded split differs from verified student source"
                     )
@@ -546,7 +587,7 @@ def write_dataset(
                     and arm["role"] == "continuation"
                     and student is not None
                 ):
-                    pair = _pair(row, packet, student)
+                    pair = _pair(row, packet, student, native=native)
                     if pair and pair["final_turn_retained"]:
                         pair.update(
                             run_id=rid,
@@ -593,6 +634,8 @@ def write_dataset(
                 stats["rows"] = stats["trajectory_rows"]
                 stats["endings_kept"] = stats["final_turns_present"]
             if trained and not stats["rows"]:
+                if pending and not source_ids:
+                    raise ValueError("no settled experiment runs available to export")
                 raise ValueError("no verified correction pairs")
             metadata = {
                 "schema": export,
@@ -604,27 +647,31 @@ def write_dataset(
                 **dict(stats),
                 "rows": stats["rows"],
                 "endings_kept": stats["endings_kept"],
+                "pending_runs": pending,
+                "unassigned_slot_count": len(spec.slots) - len({j["slot"] for j in rows}) if only_jobs is None else None,
                 "cost_per_kept_row_microusd": (
                     stats["miner_cost_microusd"] / stats["rows"]
                     if stats["rows"]
                     else None
                 ),
             }
-            metadata["price_observations"] = [
-                {
-                    "role": role,
-                    "task_class": family,
-                    "model": model,
-                    "measured_runs": n,
-                    "miner_cost_microusd": cost,
-                    "proposed_fixed_microusd": (5 * cost + 4 * n - 1) // (4 * n),
-                }
-                for (role, family, model), (n, cost) in sorted(class_costs.items())
-            ]
+            if not pooled:
+                metadata["price_observations"] = [
+                    {
+                        "role": role,
+                        "task_class": family,
+                        "model": model,
+                        "measured_runs": n,
+                        "miner_cost_microusd": cost,
+                        "proposed_fixed_microusd": (5 * cost + 4 * n - 1) // (4 * n),
+                    }
+                    for (role, family, model), (n, cost) in sorted(class_costs.items())
+                ]
             if trained:
                 metadata.update(
                     dataset_sha256="sha256:" + training_rows.hexdigest(),
-                    qualification_sha256=_hash(receipt),
+                    **({"verification_method": POOL_PAYMENT_RULE} if pooled else
+                       {"qualification_sha256": _hash(receipt)}),
                 )
             if full is not None:
                 if split is None:
@@ -632,7 +679,7 @@ def write_dataset(
                 metadata.update(full.finish())
             z.writestr("metadata.json", judge._json(metadata))
         os.chmod(stage, 0o600)
-        if trained:
+        if trained and publish:
             store_artifact(objects, batch, "export", "split", split)
             store_artifact(objects, batch, "export", "release", metadata)
         os.link(stage, dest)

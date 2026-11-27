@@ -368,3 +368,89 @@ def test_reverify_signed_optional_slots_against_persisted_admission(monkeypatch)
     original["max_slots_per_utc_day"] = 1
     with pytest.raises(ValueError, match="original enrollment body"):
         verify()
+
+
+def test_long_native_verified_pairs_survive_judge_size_limit_and_keep_same_arm():
+    from lab_arena.collection_trajectories import trajectory_row, TrajectoryArchive, apply_native_labels
+
+    kw = examples()
+    kw["job"]["batch_id"] = "pool-" + "b" * 64
+    kw["packet"]["projection_error"] = "full_evidence_exceeds_limit"
+    kw["calls"][1]["usage"].update(completion_tokens=9, total_tokens=17, completion_tokens_details={"reasoning_tokens": 2})
+    kw["calls"][0]["usage"]["completion_tokens_details"] = {"reasoning_tokens": 1}
+    meta = dict(id="repeats", arm="research", role="expert", repeat=1)
+    false = trajectory_row(**kw, experiment=meta)
+    true = trajectory_row(**kw, experiment=dict(meta, repeat=2))
+    true["run_id"] = "r2"
+    for row, passed in ((false, False), (true, True)):
+        apply_native_labels(row, {"task_pass": passed, "complete_verified": True, "eligible": True,
+                                  "payment_rule": "verified_actual_cost_v1"})
+        assert row["verified_task_pass"] is passed and row["payment_eligible"] is True
+        assert row["length"]["tokens"] == 17
+        assert row["tokens"]["reasoning_tokens"] == 3
+    buf = BytesIO()
+    with ZipFile(buf, "w") as z:
+        archive = TrajectoryArchive(z)
+        archive.write(false)
+        archive.write(true)
+        assert archive.finish()["preference_pairs"] == 1
+    with ZipFile(buf) as z:
+        pair = json.loads(z.read("preferences.jsonl"))
+        assert pair["chosen"]["run_id"] == "r2" and pair["rejected"]["run_id"] == "r1"
+
+    other = trajectory_row(**kw, experiment=dict(meta, arm="other"))
+    assert other["repeat_group_id"] != true["repeat_group_id"]
+    apply_native_labels(other, {"task_pass": True, "complete_verified": False, "eligible": False,
+                                "payment_rule": "verified_actual_cost_v1"})
+    assert other["verified_task_pass"] is None and not other["payment_eligible"]
+
+
+def test_experiment_counts_read_original_reply_usage_without_conflating_prefixes():
+    from lab_arena.collection_trajectories import experiment_calls, trajectory_row
+
+    kw = examples()
+    calls = [{"provider_id": "gen-one", "model":"test/model", "usage": {"completion_tokens":3}},
+             {"provider_id": "gen-two", "model":"test/model", "usage": {"completion_tokens":2}}]
+    replies = [{"kind":"reply","receipt":"gen-one","model":"test/model","usage":{"prompt_tokens":7,"completion_tokens":3,
+                  "completion_tokens_details":{"reasoning_tokens":2}}},
+               {"kind":"reply","receipt":"gen-two","model":"test/model","usage":{"prompt_tokens":13,"completion_tokens":2,
+                  "completion_tokens_details":{"reasoning_tokens":0}}}]
+    kw["calls"] = experiment_calls(calls,replies)
+    row = trajectory_row(**kw)
+    assert row["tokens"]["total_tokens"] == 25 and row["length"]["tokens"] == 15
+    assert row["tokens"]["reasoning_tokens"] == 2
+    del replies[1]["usage"]["completion_tokens_details"]
+    kw["calls"] = experiment_calls(calls,replies)
+    assert trajectory_row(**kw)["tokens"]["reasoning_tokens"] is None
+    replies[1]["usage"]["completion_tokens"]=10
+    with pytest.raises(ValueError,match="usage"):
+        experiment_calls(calls,replies)
+
+
+def test_pool_export_rechecks_original_standing_limit_and_priority(monkeypatch):
+    from types import SimpleNamespace
+    from uuid import UUID
+    from bittensor_wallet import Keypair
+    from lab_arena import chain, contracts, collection_intake as intake
+    from lab_arena.collection_pool import POOL_SCOPE, POOL_TERMS_HASH
+    from lab_arena.collection_trajectories import verified_grants
+
+    signer = Keypair.create_from_uri("//PoolExport")
+    body = {"task_scope": POOL_SCOPE, "terms_sha256": POOL_TERMS_HASH, "credentials_sha256": "sha256:" + "a" * 64,
+            "spend_limit_microusd": 20000, "priority": 0}
+    envelope = contracts.build_signed_request(scope=intake.SCOPE["register"], round_id=intake.scope_id("live"),
+            hotkey=signer.ss58_address, timestamp=1, sign_message=lambda m: signer.sign(m.encode()).hex(), body=body)
+    j = {"job_id": "run", "miner_hotkey": signer.ss58_address}
+    auth = dict(j, consent=envelope, registration_id=str(UUID(hex=envelope["request_id"])), mode="live",
+                generator_calls=1, unresolved=0, miner_cost_microusd=25, spend_limit_microusd=20000, priority=0)
+    monkeypatch.setattr(chain, "verify_hotkey_signature", chain.wallet_signature_verifier)
+    def verify():
+        return verified_grants(SimpleNamespace(rpc=lambda *a: [auth]), "pool-" + "1" * 64, [j],
+                               mode="live", scope=POOL_SCOPE, digest=POOL_TERMS_HASH)
+    assert verify()["run"]["priority"] == 0
+    auth["priority"] = 1
+    with pytest.raises(ValueError, match="original enrollment body"):
+        verify()
+    auth.update(priority=0, spend_limit_microusd=1000)
+    with pytest.raises(ValueError, match="original enrollment body"):
+        verify()

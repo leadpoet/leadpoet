@@ -77,9 +77,9 @@ def token_hash(token: str) -> str:
     return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def _int(value: Any, low: int, high: int, code: str) -> int:
+def _int(value: Any, low: int, high: int, code: str, **detail: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
-        raise ToolMarketError(400, code)
+        raise ToolMarketError(400, code, **detail)
     return value
 
 
@@ -182,7 +182,7 @@ class ToolMarket:
         if body["attestation"] != ATTESTATION:
             raise ToolMarketError(400, "attestation_required", attestation=ATTESTATION)
         tool = body["tool"]
-        if tool not in self._config.tools:
+        if not isinstance(tool, str) or tool not in self._config.tools:
             raise ToolMarketError(404, "tool_unavailable")
         cap = _int(body["daily_cap_microusd"], 1, MAX_KEY_DAILY_CAP_MICROUSD, "daily_cap_invalid")
         try:
@@ -245,13 +245,17 @@ class ToolMarket:
         ask = body["ask_microusd"]
         key = self._own_key(identity, body["key_id"])
         ceiling = catalog.MAX_ASK[catalog.TOOLS[key["tool"]]]
-        if ask is not None and not book.valid_ask(ask, ceiling):
-            raise ToolMarketError(400, "ask_invalid", max_ask_microusd=ceiling)
-        # A key's cap holds at least 4 of its largest calls, so each buyer's
-        # quarter of it (unknown usage and calls in flight) fits one call.
-        if ask is not None and any(4 * book.owed_microusd(op, op.max_units, ask) > key["daily_cap_microusd"]
-                                   for op in catalog.OPERATIONS.values() if op.tool == key["tool"]):
-            raise ToolMarketError(400, "ask_too_high_for_cap")
+        if ask is not None:
+            _int(ask, 1, ceiling, "ask_invalid", max_ask_microusd=ceiling)
+            # Each operation's largest call owes something, so every call
+            # reserves, and a key's cap holds 4 of them, so each buyer's
+            # quarter of it (unknown usage and calls in flight) fits one.
+            caps = [book.owed_microusd(op, op.max_units, ask)
+                    for op in catalog.OPERATIONS.values() if op.tool == key["tool"]]
+            if min(caps) < 1:
+                raise ToolMarketError(400, "ask_too_low")
+            if 4 * max(caps) > key["daily_cap_microusd"]:
+                raise ToolMarketError(400, "ask_too_high_for_cap")
         result = self._store.post_ask(key_id=key["key_id"], hotkey=identity.hotkey, ask_microusd=ask)
         if result["status"] == "not_found":
             raise ToolMarketError(404, "key_unknown")
@@ -304,12 +308,11 @@ class ToolMarket:
         # The most the buyer will let a key ask per unit; the book can move
         # between reading it and calling.
         tool = body["tool"]
-        if tool not in self._config.tools:
+        if not isinstance(tool, str) or tool not in self._config.tools:
             raise ToolMarketError(404, "tool_unavailable")
         ceiling = catalog.MAX_ASK[catalog.TOOLS[tool]]
         max_ask = body.get("max_ask_microusd", ceiling)
-        if not book.valid_ask(max_ask, ceiling):
-            raise ToolMarketError(400, "max_ask_invalid")
+        _int(max_ask, 1, ceiling, "max_ask_invalid")
         try:
             op = catalog.operation(tool, body["operation"])
             url, headers, payload = op.build(body.get("params", {}))

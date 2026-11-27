@@ -112,7 +112,8 @@ A key is in its tool's book only while all of these hold:
 - what it earned in the last 24 h, with unknown usage and calls in flight
   at the most they could owe, is under its daily cap. A miner picks the
   cap, at most $20 a day per key at launch, and it must hold 4 of the
-  key's largest calls at its ask (`400 ask_too_high_for_cap`). A call
+  key's largest calls at its ask (`400 ask_too_high_for_cap`). An ask at
+  which a call's largest size owes nothing is refused (`400 ask_too_low`). A call
   skips a key without room for it.
 
 Health events come from vault checks and from calls.
@@ -273,11 +274,16 @@ deployment, exactly as lead orders do.
   gets those keys. Removing an approval on Base does not stop a vault
   already running; its owner stops it.
 - **Exa's cost is an estimate.** Exa calls `costDollars` an estimate.
-- **Hunter's check reads no balance.** It proves the key only.
 - **Many buyers can still hold a key's cap or the call threads.** Four
   buyers causing unknown usage can keep a key out of its book for a day,
   and four buyers with slow calls can fill the call threads. Each needs its
   own funded hotkey; rate limits per coldkey would close this.
+- **A buyer can use up a key's vendor rate limit.** Answers that find
+  nothing, and requests the vendor refuses, are free, so one buyer with 8
+  calls in flight can hold a key at a small rate limit. Other buyers' calls
+  then move to the next key at no cost, and the key goes to the back only
+  once 3 buyers see a 429. A minimum charge per answered call would close
+  this.
 - **The book is read on every call.** It computes each key's last 24 h
   and last hour from the call ledger. That is fine at launch volumes;
   cache the public catalog and books before heavy anonymous traffic.

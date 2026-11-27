@@ -68,7 +68,6 @@ CREATE TABLE public.tool_market_terms (
 -- ``signed_at`` and ``signature`` let anyone verify it again.
 CREATE TABLE public.tool_market_keys (
   key_id UUID PRIMARY KEY,
-  sequence BIGSERIAL NOT NULL UNIQUE,
   tool TEXT NOT NULL CHECK(tool ~ '^[a-z_]{1,40}$'),
   miner_hotkey TEXT NOT NULL CHECK(miner_hotkey ~ '^[1-9A-HJ-NP-Za-km-z]{46,48}$'),
   envelope TEXT NOT NULL CHECK(envelope LIKE 'lov1.%' AND length(envelope)<=8192),
@@ -80,9 +79,9 @@ CREATE TABLE public.tool_market_keys (
   signature TEXT NOT NULL CHECK(length(signature) BETWEEN 128 AND 130),
   registered_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
-CREATE INDEX tool_market_keys_tool ON public.tool_market_keys(tool,sequence);
+CREATE INDEX tool_market_keys_tool ON public.tool_market_keys(tool);
 CREATE INDEX tool_market_keys_fingerprint ON public.tool_market_keys(key_fingerprint);
-CREATE INDEX tool_market_keys_miner ON public.tool_market_keys(miner_hotkey,sequence);
+CREATE INDEX tool_market_keys_miner ON public.tool_market_keys(miner_hotkey,tool);
 
 CREATE TABLE public.tool_market_key_revocations (
   key_id UUID PRIMARY KEY REFERENCES public.tool_market_keys(key_id),
@@ -177,7 +176,6 @@ BEGIN
 END;
 $tables770$;
 ALTER SEQUENCE public.tool_market_gamma_readings_reading_id_seq OWNER TO lab_arena_owner;
-ALTER SEQUENCE public.tool_market_keys_sequence_seq OWNER TO lab_arena_owner;
 ALTER SEQUENCE public.tool_market_key_events_event_id_seq OWNER TO lab_arena_owner;
 ALTER SEQUENCE public.tool_market_asks_ask_sequence_seq OWNER TO lab_arena_owner;
 ALTER SEQUENCE public.tool_market_calls_sequence_seq OWNER TO lab_arena_owner;
@@ -561,7 +559,7 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
    'health',(SELECT jsonb_build_object('status',e.status,'reason',e.reason,'at',e.recorded_at)
      FROM public.tool_market_key_events e WHERE e.key_id=k.key_id ORDER BY e.event_id DESC LIMIT 1),
    'calls',u.calls,'uncertain_calls',u.uncertain,'owed_microusd',u.owed)
-   ORDER BY k.sequence),'[]'::JSONB))
+   ORDER BY k.registered_at,k.key_id),'[]'::JSONB))
  FROM public.tool_market_keys k, LATERAL (
   SELECT count(*) calls,count(*) FILTER (WHERE s.status='uncertain') uncertain,
    coalesce(sum(s.owed_microusd),0) owed

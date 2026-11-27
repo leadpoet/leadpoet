@@ -33,11 +33,6 @@ def charge_microusd(owed: int) -> int:
     return _ceil_div(int(owed) * (PPM + MARKUP_PPM), PPM)
 
 
-def valid_ask(ask_microusd: object, ceiling: int) -> bool:
-    return isinstance(ask_microusd, int) and not isinstance(ask_microusd, bool) \
-        and 0 < ask_microusd <= ceiling
-
-
 @dataclass(frozen=True)
 class Ask:
     """One eligible key's standing price, as ``tool_market_book_v1`` returns it."""
@@ -78,5 +73,4 @@ __all__ = [
     "key_failure",
     "owed_microusd",
     "rank",
-    "valid_ask",
 ]

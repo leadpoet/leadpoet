@@ -367,6 +367,9 @@ def test_a_private_call_goes_only_to_a_private_supplier(world):
     with pytest.raises(ToolMarketError) as bad:
         world.market.call(token, dict(PROFILE, private="yes"))
     assert bad.value.code == "private_invalid"
+    with pytest.raises(ToolMarketError) as odd:  # not a crash
+        world.market.call(token, dict(PROFILE, tool=["harvestapi"]))
+    assert odd.value.code == "tool_unavailable"
 
 
 def test_tabs_need_terms_balance_and_budget(world):
@@ -429,6 +432,11 @@ def test_a_key_stops_trading_at_its_daily_cap(world):
     with pytest.raises(ToolMarketError) as dear:
         world.market.post_ask(world.who(miner), {"key_id": key_id, "ask_microusd": 11_250 + 1})
     assert dear.value.code == "ask_too_high_for_cap"  # the cap must hold 4 calls
+    _, exa = world.miner_key("exa-cheap", 900_000, tool="exa", miner=miner)
+    with pytest.raises(ToolMarketError) as cheap:  # its largest search would owe 0
+        world.market.post_ask(world.who(miner), {"key_id": exa, "ask_microusd": 19})
+    assert cheap.value.code == "ask_too_low"
+    world.market.post_ask(world.who(miner), {"key_id": exa, "ask_microusd": 20})
     _, token = world.buyer()
     for _ in range(4):
         world.market.call(token, PROFILE)
@@ -690,19 +698,6 @@ def test_only_a_registered_hotkey_lists_keys(world):
     world.register(miner, body)
 
 
-def test_a_revoked_key_with_any_call_starts_the_30_days(world):
-    # Even a call of unknown usage, so a dead key cannot be swapped at once.
-    miner, key_id = world.miner_key("swap-key", 900_000, tool="exa")
-    world.vendor.script["swap-key"] = [ok(status=500)]
-    _, token = world.buyer()
-    world.market.call(token, SEARCH)
-    world.market.revoke_key(world.who(miner), key_id)
-    with pytest.raises(ToolMarketError) as soon:
-        world.register(miner, {"tool": "exa", "daily_cap_microusd": USD,
-                               "envelope": world.vault.seal("exa", miner, "swap-key-2")})
-    assert soon.value.code == "key_registration_too_soon"
-
-
 def test_a_hotkey_registers_one_key_per_tool_every_30_days(world):
     miner, typo_id = world.miner_key("typo-key", 10_000)
     world.market.revoke_key(world.who(miner), typo_id)
@@ -710,6 +705,7 @@ def test_a_hotkey_registers_one_key_per_tool_every_30_days(world):
     key_id = world.register(miner, {"tool": "harvestapi", "daily_cap_microusd": USD,
                                     "envelope": world.vault.seal("harvestapi", miner, "first-key")})["key_id"]
     world.market.post_ask(world.who(miner), {"key_id": key_id, "ask_microusd": 10_000})
+    world.vendor.script["first-key"] = [ok(status=500)]  # even a call of unknown usage
     _, token = world.buyer()
     world.market.call(token, PROFILE)
     world.market.revoke_key(world.who(miner), key_id)

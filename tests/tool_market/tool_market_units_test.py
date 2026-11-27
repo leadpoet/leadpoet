@@ -47,11 +47,6 @@ def test_cheapest_ask_first_and_earlier_wins_a_tie():
     assert [a.key_id for a in book.rank(asks)] == ["b", "a", "c"]
 
 
-def test_ask_bounds():
-    assert book.valid_ask(1, 10) and book.valid_ask(10, 10)
-    assert not any(book.valid_ask(v, 10) for v in (0, -1, 11, True, 1.5, "10"))
-
-
 def test_key_failures_and_rate_limits():
     assert book.key_failure(402) == "no_credit" and book.key_failure(401) and book.key_failure(403)
     assert book.key_failure(400) is None and book.key_failure(429) is None
@@ -66,6 +61,8 @@ def test_get_operations_send_only_listed_params():
                    {"email": "\U0001d51e" * 320}):  # 320 characters, but past the vault's 2000 once encoded
         with pytest.raises(catalog.CatalogError):
             ZB.build(params)
+    with pytest.raises(catalog.CatalogError):  # each value fits, but the URL would pass the vault's 4096
+        HUNTER.build({name: "\u20ac" * 200 for name in ("first_name", "last_name", "full_name")})
     with pytest.raises(catalog.CatalogError):
         HUNTER.build({"domain": "acme.com", "max_duration": 21})
 
@@ -145,7 +142,6 @@ def test_config_is_off_by_default_and_strict_when_live():
     config = load_config(live)
     # Live means every catalog tool trades; one switch turns single tools off.
     assert config.enabled and config.tools == set(catalog.TOOLS) and config.public_host == "gw.example"
-    assert "zerobounce" in config.tools
     assert load_config(dict(live, LEADPOET_TOOL_MARKET_TOOLS_OFF="exa, hunter")).tools \
         == set(catalog.TOOLS) - {"exa", "hunter"}
     for bad in ({"LEADPOET_TOOL_MARKET_TOOLS_OFF": "deepline"},

@@ -36,8 +36,10 @@ UNIT_SCALE = {UNIT_CALL: 1, UNIT_VENDOR_USD: 1_000_000}
 # The highest ask a miner may post. Per credit: above every launch vendor's
 # own list price. Per vendor USD: the vendor's own price.
 MAX_ASK = {UNIT_CALL: 250_000, UNIT_VENDOR_USD: 1_000_000}
-# The vault refuses a query value longer than this once URL-encoded.
+# The vault refuses a query value longer than this once URL-encoded, and a
+# URL longer than MAX_URL.
 MAX_ENCODED_QUERY_VALUE = 2000
+MAX_URL = 4096
 
 
 class CatalogError(ValueError):
@@ -139,7 +141,10 @@ class Operation:
         if self.method == "GET":
             if any(len(quote_plus(str(v))) > MAX_ENCODED_QUERY_VALUE for v in values.values()):
                 raise CatalogError("param_invalid")
-            return self.url + ("?" + urlencode(sorted(values.items())) if values else ""), headers, b""
+            url = self.url + ("?" + urlencode(sorted(values.items())) if values else "")
+            if len(url) > MAX_URL:
+                raise CatalogError("param_invalid")
+            return url, headers, b""
         headers["content-type"] = "application/json"
         document = self.wrap(values) if self.wrap is not None else values
         return self.url, headers, json.dumps(document, separators=(",", ":")).encode("utf-8")

@@ -15,6 +15,8 @@ from lab_arena.tool_market import client as client_module
 
 
 class Recorder:
+    status = 200
+
     def __init__(self, answer):
         self.answer, self.sent = answer, []
 
@@ -129,3 +131,11 @@ def test_a_private_request_is_never_dropped_on_the_way(monkeypatch):
         client_module.mcp_answer(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
             "name": "call_tool", "arguments": {"tool": "hunter", "operation": "email_finder", "private": private}}})
         assert json.loads(sent.sent[-1].data)["private"] == private
+
+
+def test_an_answer_that_is_not_a_json_object_is_an_error(monkeypatch):
+    for body in (b"<html>proxy</html>", b"[1]"):
+        page = Recorder(None)
+        page.read = lambda body=body: body
+        monkeypatch.setattr(client_module, "_open", page)
+        assert client_module.Client("https://gw.example", api_key="k").tools() == {"error": "http_200", "status": 200}

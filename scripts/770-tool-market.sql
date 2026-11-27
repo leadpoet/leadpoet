@@ -302,7 +302,8 @@ CREATE FUNCTION public.tool_market_bind_gamma_source_v1(
 RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $bind770$
 DECLARE actual public.tool_market_gamma_source;
 BEGIN
- -- Only startup calls this RPC. Readings hold this lock shared.
+ -- Each gateway process calls this on its first tool-market request.
+ -- Readings hold this lock shared.
  PERFORM pg_advisory_xact_lock(hashtextextended('tool_market:gamma:source',0));
  SELECT * INTO actual FROM public.tool_market_gamma_source ORDER BY source_id DESC LIMIT 1;
  IF (actual.genesis,actual.netuid,actual.service,actual.registered_at)

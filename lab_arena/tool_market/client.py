@@ -71,14 +71,18 @@ class Client:
                                          headers=headers, method=method)
         try:
             with _open(request, timeout=TIMEOUT_SECONDS) as answer:
-                return json.loads(answer.read() or b"{}")
+                status, raw = answer.status, answer.read()
         except urllib.error.HTTPError as error:
-            try:
-                document = json.loads(error.read() or b"{}")
-            except ValueError:
-                document = {}
-            return {"error": "http_%d" % error.code, **(document if isinstance(document, dict) else {}),
-                    "status": error.code}
+            status, raw = error.code, error.read()
+        try:
+            document = json.loads(raw or b"{}")
+        except ValueError:
+            document = None
+        if not isinstance(document, dict):
+            document = None
+        if 200 <= status < 300 and document is not None:
+            return document
+        return {"error": "http_%d" % status, **(document or {}), "status": status}
 
     def tools(self) -> Dict[str, Any]:
         return self.request("GET", "/tool-market/catalog")

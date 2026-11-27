@@ -33,7 +33,9 @@ def test_a_vendor_usd_ask_is_a_share_of_the_reported_cost():
     # The reserve covers the operation's maximum: $0.05 x 90% x 1.1.
     assert book.charge_microusd(book.owed_microusd(EXA, EXA.max_units, 900_000)) == 49_500
     # Usage beyond the maximum is not counted, so a charge never passes the reserve.
-    assert book.owed_microusd(EXA, 10**9, 900_000) == 45_000
+    assert EXA.units(200, {"costDollars": {"total": 10**6}}) == EXA.max_units
+    # A 2xx the gateway cannot send back is unknown, not free or one credit.
+    assert ZB.units(200, None) is None and EXA.units(200, None) is None
 
 
 def test_markup_rounds_up_and_never_charges_less_than_owed():

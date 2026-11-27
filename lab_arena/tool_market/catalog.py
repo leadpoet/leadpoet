@@ -33,7 +33,7 @@ from urllib.parse import quote_plus, urlencode
 UNIT_CALL = "call"
 UNIT_VENDOR_USD = "vendor_usd"
 UNIT_SCALE = {UNIT_CALL: 1, UNIT_VENDOR_USD: 1_000_000}
-# The highest ask a miner may post. Per credit: above every launch vendor's
+# The highest ask a miner may post. Per call: above every launch vendor's
 # own list price. Per vendor USD: the vendor's own price.
 MAX_ASK = {UNIT_CALL: 250_000, UNIT_VENDOR_USD: 1_000_000}
 # The vault refuses a query value longer than this once URL-encoded, and a
@@ -168,8 +168,8 @@ class Operation:
 
         if 400 <= status < 500:
             return 0
-        if not 200 <= status < 300:
-            return None
+        if not 200 <= status < 300 or document is None:
+            return None  # a 2xx the gateway cannot send back is unknown too
         if self.cost is None:
             return 1
         reported = self.cost(document)

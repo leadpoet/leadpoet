@@ -21,12 +21,21 @@ It is off by default. Every route answers 404 until
    - The vault checks the key with the vendor's free balance call, if the
      vendor has one. A key with no credit is refused.
    - The same vendor key can be listed only once at a time.
+   - Only a hotkey registered on the subnet lists keys (`403
+     miner_not_registered`), and a miner's own tab never buys from their
+     own keys.
+   - For security, a hotkey registers at most one key per tool every 30
+     days, revoked keys included (`429 key_registration_too_soon` with
+     `next_at`). A key revoked before it took a call does not count, but a
+     hotkey still registers at most 2 keys per tool in any 30 days.
+   - A refused listing is not checked with the vendor again, for that
+     hotkey and tool, for a minute (`429 check_too_soon`).
 2. **Post an ask.** `POST /tool-market/asks` sets what the miner earns per
    unit. `ask_microusd: null` withdraws the ask.
    - For a per-call tool, the ask is micro-USD per call.
    - For a vendor-USD tool, the ask is micro-USD per vendor USD. For
      example, `900000` sells at 90% of the vendor's own price.
-   - An ask is at most $0.25 per credit, or 100% of the vendor's own price
+   - An ask is at most $0.25 per call, or 100% of the vendor's own price
      for a vendor-USD tool. Every operation's largest call must owe
      something at the ask (`400 ask_too_low`), and the key's daily cap must
      hold 4 of them (`400 ask_too_high_for_cap`).
@@ -57,6 +66,19 @@ All under `/tool-market`.
   `GET /usage`, and for miners `POST /keys`, `POST /keys/{id}/check`,
   `POST /keys/{id}/revoke`, `POST /asks` and `GET /statement` (their keys,
   health and what each earned).
+
+`GET /catalog` lists every tool that trades: its operations, one line on
+what each does, their parameters, its price ceiling, and the first ask a
+call tries with what a buyer pays for it, so an agent can pick a tool by
+the job it needs done. A request with a bad parameter is refused before
+any charge. `GET /books/{tool}` shows the asks and what a buyer pays for
+each, with no miner hotkeys and no key data.
+
+A buyer has at most 8 calls in flight at once in a gateway process
+(`429 too_many_calls_in_flight`), and calls run on their own 32 threads,
+so slow free answers cannot hold up the rest of the gateway. Key
+registrations and checks share 4 threads of their own, and a miner has
+one in flight at a time per process (`429 check_in_flight`).
 
 ## Launch set
 
@@ -124,26 +146,10 @@ Health events come from vault checks and from calls.
 - There is no scheduled re-check: a key that dies between checks is found
   by its next call.
 - After topping up an invalid key, the miner calls
-  `POST /tool-market/keys/{id}/check` to put it back in the book. Exa and HarvestAPI have no free check, so this is refused
+  `POST /tool-market/keys/{id}/check` to put it back in the book. Exa and
+  HarvestAPI have no free check, so this is refused
   (`409 key_cannot_be_checked`): a key a call found dead there stays out,
   and the miner lists a new key (the 30-day limit applies).
-
-Only a hotkey registered on the subnet lists keys (`403
-miner_not_registered`). A miner's own tab never buys from their own keys.
-For security, a hotkey registers at most one key per tool every 30 days,
-revoked keys included (`429 key_registration_too_soon` with `next_at`). A
-key revoked before it took a call does not count, but a hotkey still
-registers at most 2 keys per tool in any 30 days.
-A listing that is refused is not checked with the vendor again, for that
-hotkey and tool, for a minute (`429 check_too_soon`).
-
-`GET /tool-market/catalog` lists every tool that trades: its operations,
-one line on what each does, their parameters, its price ceiling, and the
-first ask a call tries with what a buyer
-pays for it. An agent can pick a tool by the
-job it needs done. A request with a bad parameter is refused before any
-charge. `GET /tool-market/books/{tool}` shows the asks and what a buyer
-pays for each. It shows no miner hotkeys and no key data.
 
 ## Privacy
 
@@ -196,11 +202,6 @@ All amounts are integer micro-USD.
     are in flight or ended with unknown usage in the last hour. Past that,
     calls to that tool are refused (`429 uncertain_limit`); other tools are
     not affected.
-  - A buyer has at most 8 calls in flight at once in a gateway process
-    (`429 too_many_calls_in_flight`), and calls run on their own 32
-    threads, so slow free answers cannot hold up the rest of the gateway.
-    Key registrations and checks share 4 threads of their own, and a
-    miner has one in flight at a time per process (`429 check_in_flight`).
 - **Late answers:** a call still open after 10 minutes holds nothing and
   can no longer settle.
 

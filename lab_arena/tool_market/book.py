@@ -21,10 +21,9 @@ def _ceil_div(numerator: int, denominator: int) -> int:
 
 
 def owed_microusd(operation: Operation, units: int, ask_microusd: int) -> int:
-    """What the miner earns for ``units`` (capped at the operation's maximum)."""
+    """What the miner earns for ``units`` (``Operation.units`` caps them)."""
 
-    counted = max(0, min(int(units), operation.max_units))
-    return counted * int(ask_microusd) // operation.unit_scale
+    return int(units) * int(ask_microusd) // operation.unit_scale
 
 
 def charge_microusd(owed: int) -> int:

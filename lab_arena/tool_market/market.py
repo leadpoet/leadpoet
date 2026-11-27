@@ -54,7 +54,7 @@ MAX_TAB_SECONDS = 24 * 3600
 MAX_TAB_MICROUSD = 1_000_000_000  # $1,000
 # Low at launch: what one key may earn in 24 h. Raising it is a code change.
 MAX_KEY_DAILY_CAP_MICROUSD = 20_000_000  # $20
-# Deeper vendor answers are unknown usage (the gateway could not render them).
+# Deeper vendor answers are unknown usage: the gateway could not send them back.
 MAX_ANSWER_DEPTH = 64
 # The open subnet's name, as miners and buyers sign it.
 NETWORK_NAME = "Subnet 71"
@@ -483,8 +483,8 @@ class ToolMarket:
         """Check a listed key with its vendor again and record the answer; None when the vault gave none."""
 
         try:
-            checked = self._vault.check(provider=tool, envelope=envelope, management_envelope=None)
-        except VaultUnavailable:
+            checked = self._check(tool, envelope)
+        except ToolMarketError:
             return None
         if checked.get("status") not in ("valid", "unchecked", "invalid"):
             return None

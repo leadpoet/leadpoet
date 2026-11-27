@@ -104,6 +104,15 @@ def test_editing_the_public_header_breaks_the_envelope(field, value):
         env.open_envelope(forged, ENCRYPTION)
 
 
+def test_an_encoded_key_after_a_stray_percent_is_still_an_echo():
+    from lead_order_vault.vault import echoes, header_echoes
+
+    secret = "1ab+c/=Z"
+    for body in (b"%41ab%2Bc%2F%3DZ", b'{"u":"%41ab%2Bc%2F%3DZ"}', b'{"u":"\u0025%41ab%2Bc%2F%3DZ"}'):
+        assert echoes(secret, body)
+    assert header_echoes(secret, [("location", "/x?k=%41ab%2Bc%2F%3DZ")])
+
+
 def test_an_envelope_opens_only_to_a_key_a_header_can_carry():
     for secret in ("sk-or\r\nx: y", "Bearer sk-or-v1-a", "kéy"):
         with pytest.raises(env.EnvelopeError, match="secret_invalid"):

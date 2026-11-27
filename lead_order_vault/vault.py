@@ -53,7 +53,7 @@ import uuid
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Dict, List, Mapping, Optional, Tuple
-from urllib.parse import unquote_to_bytes, urlsplit
+from urllib.parse import quote, unquote_to_bytes, urlsplit
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -138,7 +138,10 @@ def echoes(secret: str, data: bytes) -> bool:
     in one JSON body or in any ``data:`` line of a streamed one."""
 
     key = secret.encode("utf-8")
-    if key in data or key in unquote_to_bytes(data):
+    # The encoded form is searched as is too: decoding a whole body can pair
+    # a stray "%" before it with the key's first character.
+    spellings = (key, quote(secret, safe="").encode("ascii"))
+    if any(form in data for form in spellings) or key in unquote_to_bytes(data):
         return True
     if b"\\" not in data:  # without an escape, JSON decoding changes nothing
         return False
@@ -154,7 +157,7 @@ def echoes(secret: str, data: bytes) -> bool:
             value = pending.pop()
             if isinstance(value, str):
                 text = value.encode("utf-8", errors="surrogatepass")
-                if key in text or (b"%" in text and key in unquote_to_bytes(text)):
+                if any(form in text for form in spellings) or (b"%" in text and key in unquote_to_bytes(text)):
                     return True
             elif isinstance(value, (list, tuple)):
                 pending.extend(value)

@@ -15,12 +15,18 @@ A miner lists a key only by signing, with their hotkey, this exact
 statement inside the register request (`ATTESTATION` in
 `lab_arena/tool_market/market.py`):
 
-> tool-market-attestation-v1: This key is from my own account with this
-> tool's vendor. I may let it be used this way under that vendor's terms,
-> and I carry that risk.
+> tool-market-attestation-v1: My account with this tool's provider, and
+> this key, allow me to supply capacity through Gamma. I alone am
+> responsible for my account's compliance and hold the relationship with
+> the provider. Gamma makes no claim about any provider's terms and is not
+> liable for any action a provider takes on my account.
 
 The signed request body, its signature, host and time are stored with the
-key, so anyone can verify the attestation later.
+key, so anyone can verify the attestation later. The statement is
+versioned: a new version is asked for at the next listing. The market's
+terms (`POST /tool-market/terms`) are asked again whenever their version
+changes, and a key trades only while its miner accepted the current ones.
+This follows Bittensor subnet 28's miner terms.
 
 ## Launch set
 
@@ -128,7 +134,8 @@ All amounts are integer micro-USD.
   Units are capped at the operation's maximum.
 - **What the buyer pays:** `charge = ceil(owed × 1.10)`.
 - **Example:** a call asked at $0.01 charges the buyer $0.011, and the
-  miner is owed $0.01. The 10% difference is Leadpoet's.
+  miner is owed $0.01. The 10% is the subnet's margin; Leadpoet is one
+  buyer among others.
 - **Unknown usage:** sometimes the usage is unknown, such as a 5xx answer,
   a timeout, or a 2xx with no cost in it. Then the buyer pays nothing and
   the miner is owed nothing. The miner bears that risk.

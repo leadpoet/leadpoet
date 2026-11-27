@@ -42,8 +42,10 @@ CALL_TIMEOUT_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MIN_TAB_SECONDS = 60
 # What a miner signs, inside the register body, for every key they list.
-ATTESTATION = ("tool-market-attestation-v1: This key is from my own account with this tool's vendor. "
-               "I may let it be used this way under that vendor's terms, and I carry that risk.")
+ATTESTATION = ("tool-market-attestation-v1: My account with this tool's provider, and this key, allow me to "
+               "supply capacity through Gamma. I alone am responsible for my account's compliance and hold the "
+               "relationship with the provider. Gamma makes no claim about any provider's terms and is not liable "
+               "for any action a provider takes on my account.")
 
 
 class ToolMarketError(Exception):

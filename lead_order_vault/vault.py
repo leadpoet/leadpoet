@@ -14,12 +14,15 @@ Endpoints:
 
 The vault holds keys and proves their use; the gateway decides which models
 and tools to pay for. So the vault's rules are about request shapes, not
-names, and a new model or Deepline tool needs no vault change:
+names, and a new model or Deepline tool needs no vault change. Each tool's
+host, key placement, routes and free check are one entry in ``tools.py``:
 
 * OpenRouter: chat completions, Decisions, and the generation cost read-back.
 * Deepline: ``POST /api/v2/integrations/<tool>/execute``, any tool.
-* The key only in ``authorization``, no redirects, bounded sizes, only the
-  broker may call ``check`` and ``call``.
+* Tool market tools: their data endpoints only, never account, billing or
+  key management, nor a queued task that bills later.
+* The key only where its tool expects it, no redirects, bounded sizes, only
+  the broker may call ``check`` and ``call``.
 
 Every forwarded call gets a receipt with a per-key sequence number, so a call
 the gateway hides shows up as a gap. No database, files or request logs.
@@ -50,7 +53,7 @@ import uuid
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Dict, List, Mapping, Optional, Tuple
-from urllib.parse import unquote_to_bytes, urlsplit
+from urllib.parse import quote, unquote_to_bytes, urlsplit
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -58,6 +61,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from . import envelope as env
+from .tools import TOOLS, Tool
 from .envelope import (CALLER_HEADER, CHECK_TIMEOUT_SECONDS, ENCRYPTION_DOMAIN, HOSTS, IDENTITY_SCHEMA,
                        KEY_ALGORITHM, RECEIPT_SCHEMA, RECEIPTS_DOMAIN, TLS_SCHEMA, canonical, spki_sha256)
 
@@ -67,16 +71,6 @@ REQUEST_READ_SECONDS = 10.0
 REFUSED_BODY_DISCARD = 65536
 MAX_REQUEST_HEAD = 32 * 1024  # request line and headers; http.server alone allows about 6.4 MB
 
-# Request shapes a miner's key may take. Anything else, such as billing
-# top-ups, plays, monitors or key management, is refused.
-OPENROUTER_ROUTES = frozenset({
-    ("POST", "/api/v1/chat/completions"),
-    ("POST", "/api/alpha/decisions"),
-    ("GET", "/api/v1/generation"),  # free cost read-back by generation id
-})
-_DEEPLINE_TOOL = re.compile(r"[a-z0-9_]{1,64}")
-# The broker URL-encodes the id, which may hold "." and ":" (as %3A).
-_GENERATION_QUERY = re.compile(r"id=[A-Za-z0-9._~%-]{1,600}")
 _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}")
 METHODS = ("GET", "POST")
 DROPPED_HEADERS = frozenset({
@@ -100,7 +94,7 @@ MIN_CALLER_TOKEN = 32
 
 OPENROUTER_CURRENT_KEY_URL = "https://openrouter.ai/api/v1/key"
 OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/keys/{key_hash}"
-DEEPLINE_BALANCE_URL = "https://code.deepline.com/api/v2/billing/balance"
+
 
 
 class VaultError(Exception):
@@ -279,7 +273,18 @@ class Vault:
             else:
                 if request.get("management_envelope") is not None:
                     raise VaultError("request_invalid")
-                self._probe(DEEPLINE_BALANCE_URL, runtime, "deepline_api_key_invalid")
+                tool = TOOLS[provider]
+                if tool.balance_url is None:
+                    # No free check: opened and named only. Its calls prove it.
+                    return dict(result, status="unchecked")
+                balance = _field(self._probe(tool, tool.balance_url, runtime, provider + "_api_key_invalid"),
+                                 tool.balance_field)
+                if balance is not None:
+                    if balance < 0:  # ZeroBounce's answer for a key it does not know
+                        raise _Invalid(provider + "_api_key_invalid")
+                    if balance <= 0:
+                        raise _Invalid(provider + "_api_key_no_credit")
+                    result["balance"] = balance
         except _Invalid as invalid:
             return dict(result, status="invalid", reason=invalid.code)
         return dict(result, status="valid")
@@ -302,7 +307,10 @@ class Vault:
             return _refusal(401, "vault_key_unusable", None)
         key_fingerprint = env.fingerprint(provider, secret)
         target = parts.path + ("?" + parts.query if parts.query else "")
-        outbound = dict(headers, authorization="Bearer " + secret)
+        # The receipt hashes the target before the key is placed in it.
+        outbound, keyed_target = TOOLS[provider].place(secret, headers, target)
+        # Every spelling of the key the provider could send back.
+        forms = tuple({secret, quote(secret, safe="")})
         key_sequence, at = self._count(key_fingerprint)
         # Per key only: a global count would show each miner everyone's volume.
         receipt = {"schema": RECEIPT_SCHEMA, "boot_id": self.boot_id,
@@ -315,19 +323,20 @@ class Vault:
                    "headers_sha256": hashlib.sha256(canonical(headers)).hexdigest(),
                    "request_sha256": hashlib.sha256(body).hexdigest()}
         try:
-            response = self._upstream(method, parts.hostname, target, outbound, body, timeout, max_bytes)
+            response = self._upstream(method, parts.hostname, keyed_target, outbound, body, timeout, max_bytes)
         except Exception as caught:  # the call is counted, so every failure must get a receipt
             error = caught if isinstance(caught, UpstreamError) else UpstreamError("upstream_unavailable")
             receipt.update(outcome="transport_error", response_status=error.observed_status, response_sha256=None)
             observed = _kept_headers(error.observed_headers)
             return {"transport_error": str(error), "observed_status": error.observed_status,
-                    "observed_headers": [] if header_echoes(secret, observed) else observed,
+                    "observed_headers": [] if any(header_echoes(form, observed) for form in forms) else observed,
                     "receipt": self._signed(receipt)}
         response_headers = _kept_headers(response.headers)
-        if echoes(secret, response.body) or header_echoes(secret, response_headers):
+        if any(echoes(form, response.body) or header_echoes(form, response_headers) for form in forms):
             receipt.update(outcome="key_echo_withheld", response_status=response.status, response_sha256=None)
             ids = [[name, value] for name, value in response_headers
-                   if name in REQUEST_ID_HEADERS and not echoes(secret, value.encode("utf-8", errors="surrogatepass"))]
+                   if name in REQUEST_ID_HEADERS
+                   and not any(echoes(form, value.encode("utf-8", errors="surrogatepass")) for form in forms)]
             return _refusal(502, "vault_response_withheld", self._signed(receipt), ids)
         receipt.update(outcome="response", response_status=response.status,
                        response_sha256=hashlib.sha256(response.body).hexdigest())
@@ -360,16 +369,18 @@ class Vault:
         signature = self._receipts_key.sign(canonical(document), ec.ECDSA(hashes.SHA256()))
         return {"document": document, "signature": signature.hex(), "public_key": self.receipts_public_key}
 
-    def _probe(self, url: str, secret: str, invalid_code: str) -> Mapping:
+    def _probe(self, tool: Tool, url: str, secret: str, invalid_code: str) -> Mapping:
         parts = urlsplit(url)
-        headers = {"authorization": "Bearer " + secret, "accept": "application/json",
-                   "user-agent": "leadpoet-lead-order-vault/1"}
+        headers, target = tool.place(secret, {"accept": "application/json", "user-agent": "leadpoet-lead-order-vault/1"},
+                                     parts.path + ("?" + parts.query if parts.query else ""))
         try:
-            response = self._upstream("GET", parts.hostname, parts.path, headers, b"", CHECK_TIMEOUT_SECONDS, 65536)
+            response = self._upstream("GET", parts.hostname, target, headers, b"", CHECK_TIMEOUT_SECONDS, 65536)
         except UpstreamError:
             raise VaultError("check_unavailable", 503) from None
-        if response.status in (401, 403, 404):
+        if response.status in tool.invalid_statuses:
             raise _Invalid(invalid_code)
+        if response.status == 402:
+            raise _Invalid(invalid_code.replace("_invalid", "_no_credit"))
         if response.status != 200:
             raise VaultError("check_unavailable", 503)
         try:
@@ -379,14 +390,15 @@ class Vault:
         return document if isinstance(document, Mapping) else {}
 
     def _check_openrouter(self, runtime: str, management: str) -> None:
-        current = self._probe(OPENROUTER_CURRENT_KEY_URL, runtime, "openrouter_api_key_invalid").get("data")
+        openrouter = TOOLS["openrouter"]
+        current = self._probe(openrouter, OPENROUTER_CURRENT_KEY_URL, runtime, "openrouter_api_key_invalid").get("data")
         if not isinstance(current, Mapping) or current.get("disabled") is True or current.get("is_management_key") is not False:
             raise _Invalid("openrouter_api_key_invalid")
         remaining = current.get("limit_remaining")
         if isinstance(remaining, (int, float)) and not isinstance(remaining, bool) and remaining <= 0:
             raise _Invalid("openrouter_api_key_no_credit")
         runtime_hash = hashlib.sha256(runtime.encode("utf-8")).hexdigest()
-        managed = self._probe(OPENROUTER_KEY_URL.format(key_hash=runtime_hash), management,
+        managed = self._probe(openrouter, OPENROUTER_KEY_URL.format(key_hash=runtime_hash), management,
                               "openrouter_management_key_invalid").get("data")
         if not isinstance(managed, Mapping) or managed.get("hash") != runtime_hash or managed.get("disabled") is True:
             raise _Invalid("openrouter_management_key_invalid")
@@ -398,14 +410,27 @@ class _Invalid(Exception):
         self.code = code
 
 
+_NUMBER = re.compile(r"-?[0-9]{1,15}(?:\.[0-9]{1,6})?")
+
+
+def _field(document, path: Tuple):
+    """The number at ``path`` in a probe's answer, or None when it is not there."""
+
+    value = document
+    for step in path:
+        if isinstance(step, int):
+            value = value[step] if isinstance(value, list) and len(value) > step else None
+        else:
+            value = value.get(step) if isinstance(value, Mapping) else None
+    if isinstance(value, str) and _NUMBER.fullmatch(value):  # ZeroBounce sends its credits as text
+        value = float(value)
+    if path and type(value) in (int, float) and value == value:
+        return value
+    return None
+
+
 def _route_allowed(provider: str, method: str, path: str, query: str) -> bool:
-    if provider == "openrouter":
-        if (method, path) not in OPENROUTER_ROUTES:
-            return False
-        return _GENERATION_QUERY.fullmatch(query) is not None if method == "GET" else query == ""
-    parts = path.split("/")
-    return (method == "POST" and query == "" and len(parts) == 6 and parts[:4] == ["", "api", "v2", "integrations"]
-            and _DEEPLINE_TOOL.fullmatch(parts[4]) is not None and parts[5] == "execute")
+    return TOOLS[provider].route(method, path, query)
 
 
 def _refusal(status: int, code: str, receipt: Optional[Mapping], headers=()) -> Mapping:
@@ -435,7 +460,8 @@ def _parse_call(request: Mapping):
             or parts.username is not None or parts.password is not None or parts.fragment
             or parts.netloc.lower() not in (parts.hostname, parts.hostname + ":443")):
         raise VaultError("host_not_allowed")
-    if not _route_allowed(HOSTS[parts.hostname], method, parts.path, parts.query):
+    provider = HOSTS[parts.hostname]
+    if not _route_allowed(provider, method, parts.path, parts.query) or TOOLS[provider].caller_sets_key(parts.query):
         raise VaultError("path_not_allowed")
     raw_headers = request["headers"]
     if not isinstance(raw_headers, Mapping) or len(raw_headers) > 64:
@@ -521,15 +547,14 @@ def make_handler(vault: Vault):
         def do_POST(self) -> None:
             routes = {"/v1/call": vault.call, "/v1/check": vault.check}
             route = routes.get(urlsplit(self.path).path)
-            if route is None:
-                self._handle(_not_found)
-                return
 
             def action() -> Mapping:
                 length = self.headers.get("content-length", "")
                 if not length.isdigit() or int(length) > MAX_REQUEST_BODY:
                     raise VaultError("request_too_large", 413)
                 try:
+                    if route is None:
+                        _not_found()
                     vault.authorize(self.headers.get(CALLER_HEADER))
                 except VaultError:
                     # Closing on unread data resets the connection, and the

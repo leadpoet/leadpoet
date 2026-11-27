@@ -28,6 +28,7 @@ from lab_arena.lead_orders.config import LeadOrdersConfig, is_valid_hotkey
 
 TIMESTAMP_WINDOW_SECONDS = 60
 _SIG_RE = re.compile(r"^(?:0x)?[0-9a-fA-F]{128}$")
+_TIMESTAMP_RE = re.compile(r"[1-9][0-9]{0,11}")
 
 SignatureVerifier = Callable[[str, str, str], bool]
 NonceSink = Callable[[str, str, int], bool]
@@ -93,7 +94,8 @@ def verify_buyer_request(
         raise AuthError(401, "host_unconfigured")
     if not hotkey or not is_valid_hotkey(hotkey):
         raise AuthError(401, "hotkey_invalid")
-    if not timestamp or not timestamp.isdigit() or len(timestamp) > 12:
+    # ASCII digits, no leading zero: the stored int rebuilds the signed text exactly.
+    if not timestamp or not _TIMESTAMP_RE.fullmatch(timestamp):
         raise AuthError(401, "timestamp_invalid")
     signed_at = int(timestamp)
     if abs(now() - signed_at) > TIMESTAMP_WINDOW_SECONDS:

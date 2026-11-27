@@ -182,12 +182,13 @@ class VaultTransport:
             # Request ids from headers that arrived before the failure, as the
             # direct transport reports them, so the cost can be read back.
             seen = _headers(result.get("observed_headers"))
-            deepline = HOSTS.get(urlsplit(url).hostname or "") == "deepline"
+            provider = HOSTS.get(urlsplit(url).hostname or "")
             raise VaultTransportError(
                 "provider_unreachable", forwarded=True, vault_receipt=receipt,
                 observed_status=observed if isinstance(observed, int) else None,
-                openrouter_generation_id=None if deepline else arena_broker._openrouter_generation_identity(None, seen)[1],
-                deepline_job_id=arena_broker._deepline_response_header_request_id(seen) if deepline else None)
+                openrouter_generation_id=(arena_broker._openrouter_generation_identity(None, seen)[1]
+                                          if provider == "openrouter" else None),
+                deepline_job_id=arena_broker._deepline_response_header_request_id(seen) if provider == "deepline" else None)
         try:
             status = int(result["status"])
             response_headers = _headers(result.get("headers"))

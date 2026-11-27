@@ -31,9 +31,11 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from .tools import HOSTS, TOOLS
+
 PREFIX = "lov1."
-PROVIDERS = ("openrouter", "deepline")
-HOSTS = {"openrouter.ai": "openrouter", "code.deepline.com": "deepline"}
+# One entry per tool in tools.py; lead orders use OpenRouter and Deepline.
+PROVIDERS = tuple(TOOLS)
 ENCRYPTION_DOMAIN = "leadpoet/lead-order-vault/encryption/v1"
 RECEIPTS_DOMAIN = "leadpoet/lead-order-vault/receipts/v1"
 KEY_ALGORITHM = "secp256k1"

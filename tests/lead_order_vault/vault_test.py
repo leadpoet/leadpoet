@@ -440,6 +440,158 @@ def test_check_deepline_reads_the_balance():
     assert result["status"] == "valid" and provider.requests[0]["target"] == "/api/v2/billing/balance"
 
 
+# -- tool market tools ---------------------------------------------------------------
+
+ZEROBOUNCE_KEY = "zb" + "a" * 30
+TOOL_CALLS = {
+    # ZeroBounce takes its key only as the ``api_key`` query parameter.
+    "zerobounce": ("GET", "https://api.zerobounce.net/v2/validate?email=ada%40acme.com", None, ZEROBOUNCE_KEY),
+    "prospeo": ("POST", "https://api.prospeo.io/enrich-person", "x-key", "pr_" + "b" * 30),
+    "findymail": ("POST", "https://app.findymail.com/api/search/name", "authorization", "fm_" + "c" * 30),
+    "hunter": ("GET", "https://api.hunter.io/v2/email-finder?domain=acme.com&full_name=Ada+Lovelace", "x-api-key",
+               "hu_" + "d" * 30),
+    "exa": ("POST", "https://api.exa.ai/search", "x-api-key", "exa_" + "e" * 30),
+    "harvestapi": ("GET", "https://api.harvestapi.io/linkedin/profile?query=a", "x-api-key", "hv_" + "f" * 30),
+}
+
+
+def _tool_call(tool, **extra):
+    method, url, _, key = TOOL_CALLS[tool]
+    request = _call(url=url, sealed=_seal(key, provider=tool), method=method)
+    if method == "GET":
+        request.pop("body_b64")
+    request.update(extra)
+    return request
+
+
+@pytest.mark.parametrize("tool", sorted(TOOL_CALLS))
+def test_each_tool_gets_its_key_where_it_expects_it(tool):
+    method, url, header, key = TOOL_CALLS[tool]
+    provider = FakeProvider()
+    result = _vault(provider).call(_tool_call(tool))
+    sent = provider.requests[0]
+    target = url[url.index("/", len("https://")):]
+    if header is None:
+        assert sent["target"] == target + "&api_key=" + key and set(sent["headers"]) == {"content-type"}
+    else:
+        expected = ("Bearer " if header == "authorization" else "") + key
+        assert sent["target"] == target and sent["headers"][header] == expected
+        assert set(sent["headers"]) == {header, "content-type"}
+    receipt = _check_receipt(result["receipt"])
+    assert receipt["provider"] == tool and receipt["key_fingerprint"] == env.fingerprint(tool, key)
+    # The receipt names the request the caller made, not the one with the key in it.
+    assert receipt["target_sha256"] == hashlib.sha256(target.encode()).hexdigest()
+    assert key not in json.dumps(result)
+
+
+@pytest.mark.parametrize("tool,method,url", [
+    ("zerobounce", "GET", "https://api.zerobounce.net/v2/getcredits"),
+    ("zerobounce", "GET", "https://api.zerobounce.net/v2/validate?email=a&api_key=someone-elses"),
+    ("zerobounce", "GET", "https://api.zerobounce.net/v2/validate?email=a&API_KEY=someone-elses"),
+    ("zerobounce", "GET", "https://api.zerobounce.net/v2/validatebatch?email=a"),
+    ("zerobounce", "POST", "https://api.zerobounce.net/v2/validate"),
+    ("prospeo", "GET", "https://api.prospeo.io/account-information"),
+    ("prospeo", "POST", "https://api.prospeo.io/enrich-person?x=1"),
+    ("prospeo", "POST", "https://api.prospeo.io/bulk-enrich-person"),
+    ("findymail", "GET", "https://app.findymail.com/api/credits"),
+    ("findymail", "POST", "https://app.findymail.com/api/verify"),
+    ("hunter", "GET", "https://api.hunter.io/v2/account"),
+    ("hunter", "GET", "https://api.hunter.io/v2/domain-search?domain=acme.com"),
+    ("exa", "POST", "https://api.exa.ai/websets/v0/websets"),
+    ("exa", "GET", "https://api.exa.ai/search"),
+    ("harvestapi", "GET", "https://api.harvestapi.io/users/my-api-user"),
+    ("harvestapi", "GET", "https://api.harvestapi.io/linkedin/profile?query=a b"),
+    ("harvestapi", "POST", "https://api.harvestapi.io/linkedin/profile"),
+])
+def test_a_tool_key_reaches_only_data_endpoints(tool, method, url):
+    upstream = FakeProvider()
+    request = _tool_call(tool, url=url, method=method)
+    if method == "GET":
+        request.pop("body_b64", None)
+    else:
+        request.setdefault("body_b64", base64.b64encode(b"{}").decode())
+    with pytest.raises(VaultError, match="path_not_allowed|host_not_allowed|url_invalid"):
+        _vault(upstream).call(request)
+    assert upstream.requests == []
+
+
+def test_a_caller_cannot_set_the_header_the_key_goes_in():
+    provider = FakeProvider()
+    _vault(provider).call(_tool_call("exa", headers={"authorization": "Bearer " + _seal(TOOL_CALLS["exa"][3], provider="exa"),
+                                                     "x-api-key": "someone-elses"}))
+    assert provider.requests[0]["headers"]["x-api-key"] == TOOL_CALLS["exa"][3]
+
+
+def test_a_query_key_is_url_encoded_and_its_echo_withheld():
+    key = "zb+key/with=odd&chars"
+    encoded = "zb%2Bkey%2Fwith%3Dodd%26chars"
+    echo = UpstreamResponse(200, [], json.dumps({"url": "/v2/validate?api_key=" + encoded}).encode())
+    provider = FakeProvider({"/v2/validate?email=ada%40acme.com&api_key=" + encoded: echo})
+    result = _vault(provider).call(_tool_call("zerobounce", headers={
+        "authorization": "Bearer " + _seal(key, provider="zerobounce")}))
+    assert provider.requests[0]["target"].endswith("&api_key=" + encoded)
+    assert result["status"] == 502 and encoded not in json.dumps(result) and key not in json.dumps(result)
+
+
+def _balance(target, status, document):
+    return FakeProvider({target: UpstreamResponse(status, [], json.dumps(document).encode())})
+
+
+ZB_CREDITS = "/v2/getcredits?api_key=" + ZEROBOUNCE_KEY
+
+
+@pytest.mark.parametrize("tool,provider,expected", [
+    # ZeroBounce sends its credits as text, and -1 for a key it does not know.
+    ("zerobounce", lambda: _balance(ZB_CREDITS, 200, {"Credits": "2500"}), {"status": "valid", "balance": 2500}),
+    ("zerobounce", lambda: _balance(ZB_CREDITS, 200, {"Credits": "-1"}),
+     {"status": "invalid", "reason": "zerobounce_api_key_invalid"}),
+    ("zerobounce", lambda: _balance(ZB_CREDITS, 200, {"Credits": "0"}),
+     {"status": "invalid", "reason": "zerobounce_api_key_no_credit"}),
+    ("prospeo", lambda: _balance("/account-information", 200, {"error": False, "response": {"remaining_credits": 99}}),
+     {"status": "valid", "balance": 99}),
+    # Prospeo answers 400 to a key it does not know.
+    ("prospeo", lambda: _balance("/account-information", 400, {"error": True, "error_code": "INVALID_API_KEY"}),
+     {"status": "invalid", "reason": "prospeo_api_key_invalid"}),
+    ("findymail", lambda: _balance("/api/credits", 200, {"credits": 40}), {"status": "valid", "balance": 40}),
+    ("findymail", lambda: _balance("/api/credits", 401, {}), {"status": "invalid", "reason": "findymail_api_key_invalid"}),
+    ("findymail", lambda: _balance("/api/credits", 402, {}),
+     {"status": "invalid", "reason": "findymail_api_key_no_credit"}),
+    # Hunter's account answer proves the key but gives no balance.
+    ("hunter", lambda: _balance("/v2/account", 200, {"data": {"requests": {"searches": {"used": 3, "available": 50}}}}),
+     {"status": "valid"}),
+    ("exa", FakeProvider, {"status": "unchecked"}),
+    ("harvestapi", FakeProvider, {"status": "unchecked"}),
+    # Lead orders: a stray 400 from Deepline's check is not a bad key.
+    ("deepline", lambda: _balance("/api/v2/billing/balance", 400, {}), None),
+])
+def test_check_reads_a_tool_balance_where_it_has_a_free_one(tool, provider, expected):
+    upstream = provider()
+    key = TOOL_CALLS[tool][3] if tool in TOOL_CALLS else "dl_" + "g" * 30
+    if expected is None:
+        with pytest.raises(VaultError, match="check_unavailable"):
+            _vault(upstream).check({"provider": tool, "envelope": _seal(key, provider=tool)})
+        return
+    result = _vault(upstream).check({"provider": tool, "envelope": _seal(key, provider=tool)})
+    assert {k: result[k] for k in expected} == expected and result["key_fingerprint"] == env.fingerprint(tool, key)
+    if expected["status"] == "unchecked":
+        assert upstream.requests == []  # no free check: nothing is spent to check it
+    if tool == "hunter":
+        assert "balance" not in result
+
+
+def test_a_non_number_balance_is_not_read():
+    from lead_order_vault.vault import _field
+    for value in ("", "1e9", "12abc", " 5", True, None, float("nan"), "9" * 16):
+        assert _field({"credits": value}, ("credits",)) is None
+    assert _field({"credits": "12.5"}, ("credits",)) == 12.5
+
+
+def test_every_tool_has_a_rule():
+    from lead_order_vault.tools import HOSTS, TOOLS
+    assert tuple(TOOLS) == env.PROVIDERS and set(HOSTS.values()) == set(TOOLS)
+    assert env.HOSTS is HOSTS
+
+
 def test_identity_reveals_no_key():
     vault = _vault()
     vault.call(_call())

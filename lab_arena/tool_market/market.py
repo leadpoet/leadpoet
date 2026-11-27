@@ -133,7 +133,8 @@ class ToolMarket:
         if role not in ("buyer", "miner") or set(body) != {"role", "terms_version", "terms_sha256"}:
             raise ToolMarketError(400, "request_invalid")
         if body["terms_version"] != self._config.terms_version or body["terms_sha256"] != self._config.terms_sha256:
-            raise ToolMarketError(409, "terms_outdated")
+            raise ToolMarketError(409, "terms_outdated", terms_version=self._config.terms_version,
+                                  terms_sha256=self._config.terms_sha256)
         return self._store.accept_terms(
             role=role, hotkey=identity.hotkey, version=self._config.terms_version,
             terms_sha256=self._config.terms_sha256, host=identity.host, signed_at=identity.signed_at,

@@ -34,6 +34,10 @@ BUILD_RETRY_SECONDS = 30.0
 # queue the catalog, signed routes or the rest of the gateway behind them.
 CALL_THREADS = 32
 _call_threads = anyio.CapacityLimiter(CALL_THREADS)
+# Key checks wait on the vault and a vendor (up to 45 s), so they share a
+# few threads: a miner re-posting a key cannot hold up other routes.
+CHECK_THREADS = 4
+_check_threads = anyio.CapacityLimiter(CHECK_THREADS)
 
 _lock = threading.Lock()
 _state: Optional[Tuple[Any, Any]] = None
@@ -185,12 +189,14 @@ async def open_tab(request: Request) -> Response:
 
 @router.post("/tool-market/keys")
 async def register_key(request: Request) -> Response:
-    return await _handle(request, lambda m, who, body: m.register_key(who, _json(body), body), signed=True)
+    return await _handle(request, lambda m, who, body: m.register_key(who, _json(body), body), signed=True,
+                         limiter=_check_threads)
 
 
 @router.post("/tool-market/keys/{key_id}/check")
 async def check_key(key_id: str, request: Request) -> Response:
-    return await _handle(request, lambda m, who, body: m.check_key(who, key_id), signed=True)
+    return await _handle(request, lambda m, who, body: m.check_key(who, key_id), signed=True,
+                         limiter=_check_threads)
 
 
 @router.post("/tool-market/keys/{key_id}/revoke")

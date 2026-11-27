@@ -16,6 +16,7 @@ the miner is owed nothing (``uncertain``).
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import threading
 import time
@@ -74,6 +75,19 @@ class ToolMarketError(Exception):
 
 def token_hash(token: str) -> str:
     return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _document(body: bytes) -> Any:
+    """A vendor's JSON answer, or None when it is not JSON the gateway can
+    send back as is (NaN, an infinite number or a lone surrogate): then the
+    cost readers see what the buyer gets."""
+
+    document = json_document(body)
+    try:
+        json.dumps(document, allow_nan=False, ensure_ascii=False).encode("utf-8")
+    except (ValueError, UnicodeEncodeError):
+        return None
+    return document
 
 
 def _int(value: Any, low: int, high: int, code: str, **detail: Any) -> int:
@@ -400,7 +414,7 @@ class ToolMarket:
             # bears it, and a retry could use it twice.
             settle("uncertain", error.observed_status)
             raise ToolMarketError(502, "vendor_unreachable", call_id=call_id) from None
-        document = json_document(response.body)
+        document = _document(response.body)
         status = op.status(response.status, document)
         failure = book.key_failure(status)
         # A 429, Retry-After or not, is the key's limit (its miner's account),

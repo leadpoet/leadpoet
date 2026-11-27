@@ -198,7 +198,8 @@ def _zerobounce_cost(document: Any) -> Optional[int]:
 
 
 def _prospeo_status(status: int, document: Any) -> int:
-    return {"INSUFFICIENT_CREDITS": 402, "INVALID_API_KEY": 401}.get(_get(document, "error_code"), status)
+    code = _get(document, "error_code")
+    return {"INSUFFICIENT_CREDITS": 402, "INVALID_API_KEY": 401}.get(code, status) if isinstance(code, str) else status
 
 
 def _prospeo_cost(document: Any) -> Optional[int]:

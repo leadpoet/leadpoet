@@ -503,6 +503,15 @@ def test_keys_without_room_for_a_call_do_not_use_up_its_attempts(world):
     assert [s[0] for s in world.vendor.sent] == ["roomy-key"]
 
 
+def test_an_answer_the_gateway_cannot_send_back_is_free(world):
+    world.miner_key("odd-answer", 900_000, tool="exa")
+    world.vendor.script["odd-answer"] = [ProviderResponse(
+        200, {"content-type": "application/json"}, b'{"costDollars":{"total":0.005},"results":[{"score":NaN}]}')]
+    _, token = world.buyer()
+    result = world.market.call(token, SEARCH)
+    assert result["body"] is None and result["charge_microusd"] == 0  # unknown usage: the miner bears it
+
+
 def test_a_buyer_who_keeps_causing_unknown_usage_is_stopped(world):
     miner, _ = world.miner_key("drained-key", 10_000)
     _, token = world.buyer()

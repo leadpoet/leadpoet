@@ -213,6 +213,7 @@ All amounts are integer micro-USD.
   - A buyer has at most 8 calls in flight at once in a gateway process
     (`429 too_many_calls_in_flight`), and calls run on their own 32
     threads, so slow free answers cannot hold up the rest of the gateway.
+    Key registrations and checks share 4 threads of their own.
 - **Late answers:** a call still open after 10 minutes holds nothing and
   can no longer settle.
 

@@ -116,6 +116,17 @@ def test_units_count_only_what_the_vendor_charges():
         assert EXA.units(200, answer) is None  # unknown usage: nobody pays
 
 
+def test_vendor_answer_readers_never_raise():
+    # A vendor answer is any JSON; a reader that raises leaves the call unsettled.
+    odd = [None, True, 1, "x", [], [1], {}, {"error_code": ["X"]}, {"error_code": {"a": 1}}, {"error": [1]},
+           {"status": ["valid"]}, {"data": [1]}, {"data": {"email": ["a"]}}, {"contact": "x"},
+           {"costDollars": [1]}, {"costDollars": {"total": [1]}}, {"error": False, "free_enrichment": [1]}]
+    for op in catalog.OPERATIONS.values():
+        for status in (200, 400, 402, 500):
+            for document in odd:
+                op.units(op.status(status, document), document)
+
+
 def test_every_operation_fits_its_vault_route():
     for op in catalog.OPERATIONS.values():
         url, headers, body = op.build({name: _sample(p) for name, p in op.params.items() if p.required})

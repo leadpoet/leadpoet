@@ -60,20 +60,55 @@ def pending_reveals(rpc, store, signing_key, cutover, snapshot, current, hotkeys
     return result
 
 
+def shared_finalized_snapshot(reader, rpc):
+    """Bind both sources to the same finalized block before reading its validator weights."""
+    from lab_arena import chain
+    from Leadpoet.utils.subnet_epoch import read_subnet_epoch_snapshot
+
+    live = chain.finalized_epoch_snapshot(reader)
+    archive_hash = chain.normalize_block_hash(rpc.call(method="chain_getFinalizedHead", params=[], request_id=5))
+    if archive_hash == live.block_hash:
+        return live, live, live.current_block
+    header = rpc.call(method="chain_getHeader", params=[archive_hash], request_id=6)
+    archive_height = int(header["number"], 16)
+    if archive_height < live.current_block:
+        if reader.finalized_block_hash(archive_height) != archive_hash:
+            raise ValueError("sources disagree on finalized hash")
+        snap = read_subnet_epoch_snapshot(reader.epoch_subtensor(), netuid=71, block_hash=archive_hash)
+        if snap.current_block != archive_height or snap.block_hash != archive_hash:
+            raise ValueError("scheduler returned a different finalized block")
+        return snap, live, archive_height
+    at_live = (archive_hash if archive_height == live.current_block else
+               rpc.call(method="chain_getBlockHash", params=[live.current_block], request_id=7))
+    if chain.normalize_block_hash(at_live) != live.block_hash:
+        raise ValueError("sources disagree on finalized hash")
+    return live, live, archive_height
+
+
 def validator_snapshot(env, db):
-    from lab_arena import chain, signing
-    from lab_arena.store import ArenaStore
+    from contextlib import closing
+    from lab_arena import chain
     from lab_arena.local_weight_signer import HttpsJsonRpcTransport
     from Leadpoet.utils.subnet_epoch import OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
-    from leadpoet_canonical.arena_weights import COLLECTION_BASIS_SCHEMA, derive_arena_weights, verify_accepted_weight_state_signature
 
     config = chain.ArenaChainConfig(env["LAB_ARENA_CHAIN_ENDPOINT"], 71, "finney", 15)
-    reader = chain.ArenaChain(config, chain.connect_substrate(config))
-    try:
-        snap = chain.finalized_epoch_snapshot(reader)
-    finally:
-        reader.close()
     cutover = chain.load_arena_cutover(env)
+    with closing(HttpsJsonRpcTransport(OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT, timeout_seconds=15)) as rpc:
+        with closing(chain.ArenaChain(config, chain.connect_substrate(config))) as reader:
+            snap, live, archive_height = shared_finalized_snapshot(reader, rpc)
+        result = _signed_validator_snapshot(env, db, rpc, cutover, snap)
+        result.update(live_finalized_block=live.current_block, archive_finalized_block=archive_height,
+                      live_epoch=live.settlement_epoch_id(cutover))
+        return result
+
+
+def _signed_validator_snapshot(env, db, rpc, cutover, snap):
+    from lab_arena import signing
+    from lab_arena.store import ArenaStore
+    from leadpoet_canonical.arena_weights import (
+        COLLECTION_BASIS_SCHEMA, derive_arena_weights, verify_accepted_weight_state_signature,
+    )
+
     epoch = snap.settlement_epoch_id(cutover)
     store = ArenaStore(db)
     weight_start = store.collection_reward_start_epoch()
@@ -86,7 +121,6 @@ def validator_snapshot(env, db):
     scope = ("finney", 71, snap.network_genesis_hash.removeprefix("0x"))
     if (doc["network"], doc["netuid"], doc["genesis_hash"]) != scope or doc["epoch"] != epoch:
         raise ValueError("signed state does not belong to this finalized epoch")
-    rpc = HttpsJsonRpcTransport(OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT, timeout_seconds=15)
     block = snap.block_hash
     hotkeys = collection_distributions.registry_at(rpc, snap.current_block, block)
     expected = derive_arena_weights(doc, hotkeys)
@@ -233,6 +267,8 @@ def notices(data):
             signals["no queue readback in 20 minutes"] = 1
     weights = data.get("weights")
     if weights:
+        if weights.get("live_epoch") is not None and weights["live_epoch"] > weights["epoch"]:
+            signals["archive validator readback is an earlier finalized epoch"] = 1
         if not weights["signed_state"]:
             signals["current signed state pending; inspect validator publication"] = 1
         for validator, state in weights.get("validators", {}).items():

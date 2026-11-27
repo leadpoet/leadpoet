@@ -215,10 +215,13 @@ All amounts are integer micro-USD.
   a timeout, or a 2xx with no cost in it. Then the buyer pays nothing and
   the miner is owed nothing. The miner bears that risk, at most the key's
   daily cap a day valued at the ask: a key asked below the vendor's price
-  can lose more in vendor spend. A call cut off before it settles, by a
-  restart, counts as unknown usage. A buyer whose unknown usage and calls in flight on a
-  key pass a quarter of its cap skips that key, so one buyer cannot push a
-  key out of the book for free.
+  can lose more in vendor spend. A buyer skips a key when the next call
+  would take their unknown usage and calls in flight past a quarter of its
+  cap, so one buyer cannot push a key out of the book for free.
+  - A call cut off before it settles, by a restart, counts as unknown
+    usage, since it may have reached the vendor. Restarts that cut calls
+    can shut a buyer out of a key for a day, or out of a tool for an hour.
+    Give the gateway a stop grace above 45 s so a restart drains calls.
   - A request that may have reached the vendor is never retried on another
     key, so it cannot be used twice.
   - A buyer shapes some of these, such as an answer too large to return.

@@ -62,9 +62,10 @@ def verify(headers: Mapping[str, str], body: bytes, *, method: str, target: str,
         raise AuthError(401, "btauth_unsupported_scheme")
     if not is_valid_hotkey(hotkey) or not _NONCE_RE.fullmatch(nonce) or not _SIGNATURE_RE.fullmatch(signature):
         raise AuthError(401, "btauth_bad_header")
-    if not receiver or sent_to != receiver:
+    if sent_to != receiver:
         raise AuthError(401, "btauth_wrong_receiver")
     age = now_ns() - int(nonce)
+    body_sha256, signed_at = hashlib.sha256(body).hexdigest(), int(nonce) // 10**9
     if age > MAX_AGE_NS or age < -MAX_SKEW_NS:
         raise AuthError(401, "btauth_stale_nonce")
     try:
@@ -76,10 +77,10 @@ def verify(headers: Mapping[str, str], body: bytes, *, method: str, target: str,
     # Recorded only once the signature verifies. sr25519 signatures are
     # randomized, so the nonce, not the signature, is what is used once.
     if not use_nonce(hotkey, "sha256:" + hashlib.sha256((SCHEME + ":" + nonce).encode()).hexdigest(),
-                     int(nonce) // 10**9):
+                     signed_at):
         raise AuthError(401, "btauth_replayed_nonce")
-    return BuyerIdentity(hotkey=hotkey, signed_at=int(nonce) // 10**9, host=receiver, signature=signature,
-                         body_sha256=hashlib.sha256(body).hexdigest())
+    return BuyerIdentity(hotkey=hotkey, signed_at=signed_at, host=receiver, signature=signature,
+                         body_sha256=body_sha256)
 
 
 __all__ = ["SCHEME", "VERSION_HEADER", "payload", "sign", "verify"]

@@ -125,19 +125,29 @@ def test_vendor_answer_readers_never_raise():
 
 def test_every_operation_fits_its_vault_route():
     for op in catalog.OPERATIONS.values():
-        url, headers, body = op.build({name: _sample(p) for name, p in op.params.items() if p.required})
-        parts = urlsplit(url)
-        assert tools.HOSTS[parts.hostname] == op.tool
-        assert tools.TOOLS[op.tool].route(op.method, parts.path, parts.query), (op.tool, op.name)
-        assert not tools.TOOLS[op.tool].caller_sets_key(parts.query)
+        # The required parameters, then every parameter at its lowest and highest
+        # (skipping a combination the operation itself refuses, such as Exa's).
+        for required_only, chosen in ((True, {n: _sample(p) for n, p in op.params.items() if p.required}),
+                                      (False, {n: _sample(p) for n, p in op.params.items()}),
+                                      (False, {n: _sample(p, high=True) for n, p in op.params.items()})):
+            try:
+                url, headers, body = op.build(chosen)
+            except catalog.CatalogError:
+                assert not required_only, (op.tool, op.name)
+                continue
+            parts = urlsplit(url)
+            assert tools.HOSTS[parts.hostname] == op.tool
+            assert tools.TOOLS[op.tool].route(op.method, parts.path, parts.query), (op.tool, op.name, chosen)
+            assert not tools.TOOLS[op.tool].caller_sets_key(parts.query)
     assert set(catalog.TOOLS) <= set(tools.TOOLS)
     # The vault allows only the routes the catalog prices.
     assert not tools.TOOLS["harvestapi"].route("GET", "/linkedin/profile-search", "search=a")
 
 
-def _sample(param):
-    return {"str": "https://www.linkedin.com/in/someone", "int": param.low, "bool": True,
-            "str_list": ["a"] * max(param.low, 1), "enum": param.choices[:1] and param.choices[0]}[param.kind]
+def _sample(param, high=False):
+    count = param.high if high else param.low
+    return {"str": "https://www.linkedin.com/in/someone", "int": count, "bool": True,
+            "str_list": ["a"] * max(count, 1), "enum": param.choices[-1 if high else 0] if param.choices else None}[param.kind]
 
 
 def test_config_is_off_by_default_and_strict_when_live():

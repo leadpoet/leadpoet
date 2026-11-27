@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 
 import pytest
@@ -130,10 +131,31 @@ def test_a_failed_build_is_not_retried_on_every_request(client, monkeypatch):
     assert len(builds) == 2
 
 
+def test_a_slow_build_does_not_hold_other_requests(client):
+    started, release = threading.Event(), threading.Event()
+
+    def chain_hangs():
+        started.set()
+        release.wait(10)
+        raise RuntimeError("chain timed out")
+
+    routes.configure(builder=chain_hangs)
+    building = threading.Thread(target=lambda: client.get("/tool-market/catalog"))
+    building.start()
+    try:
+        assert started.wait(10)
+        began = time.monotonic()
+        assert client.get("/tool-market/books/exa").json() == {"error": "tool_market_unavailable"}
+        assert time.monotonic() - began < 5  # answered at once, not after the build
+    finally:
+        release.set()
+        building.join(10)
+
+
 def test_a_store_outage_answers_503(client):
     market = enable()
 
-    def store_down(token, body):
+    def store_down(token, body, identity=None):
         raise ArenaStoreError("store unavailable")
 
     market.call = store_down

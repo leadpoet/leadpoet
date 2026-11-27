@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from lab_arena.tool_market import catalog
-from lab_arena.tool_market.config import PUBLISHED_TERMS, TERMS_URL, ToolMarketConfig
+from lab_arena.tool_market.config import TERMS_URL, ToolMarketConfig
 
 _KINDS = {"str": {"type": "string"}, "int": {"type": "integer"}, "bool": {"type": "boolean"},
           "str_list": {"type": "array", "items": {"type": "string"}}, "enum": {"type": "string"}}
@@ -32,7 +32,7 @@ def services_document(config: ToolMarketConfig) -> Dict[str, Any]:
         "payments": [{"type": "gamma", "signature": "btauth/1", "balance": base + "/tool-market/gamma/balance"}],
         "pricing": base + "/tool-market/catalog",
         # A paid request accepts these terms; their text's SHA-256 pins the version.
-        "terms": {"version": config.terms_version, "sha256": PUBLISHED_TERMS[config.terms_version],
+        "terms": {"version": config.terms_version, "sha256": config.terms_sha256,
                   "url": TERMS_URL},
     }
 

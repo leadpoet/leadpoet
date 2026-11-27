@@ -31,8 +31,9 @@ from lab_arena.tool_market import gateway_support as support
 router = APIRouter(tags=["tool-market"])
 
 MAX_BODY_BYTES = 64 * 1024
-# A failed build (the chain or the vault down) is not retried for this long,
-# so an outage does not queue every request behind the build lock.
+# A failed build (the chain or the vault down) is not retried for this long.
+# While a build runs, other requests answer 503 at once instead of holding a
+# shared thread behind it (one build can wait minutes on a hung chain).
 BUILD_RETRY_SECONDS = 30.0
 # Calls wait on vendors, so they get their own threads: slow calls cannot
 # queue the catalog, signed routes or the rest of the gateway behind them.
@@ -67,7 +68,11 @@ def configure(*, builder: Optional[Callable[[], Tuple[Any, Any]]] = None,
 
 def _get_state() -> Tuple[Any, Any]:
     global _state, _failed
-    with _lock:
+    if _state is not None:
+        return _state
+    if not _lock.acquire(blocking=False):
+        raise RuntimeError("tool market state is being built")
+    try:
         if _state is not None:
             return _state
         if _failed is not None and time.monotonic() - _failed[0] < BUILD_RETRY_SECONDS:
@@ -81,6 +86,8 @@ def _get_state() -> Tuple[Any, Any]:
         if built[1] is not None:
             _state = built  # off builds nothing and caches nothing
         return built
+    finally:
+        _lock.release()
 
 
 def _error(status: int, code: str, **detail: Any) -> JSONResponse:
@@ -210,11 +217,9 @@ async def gamma_balance(request: Request, hotkey: str = "") -> Response:
 
 @router.post("/tool-market/call")
 async def call(request: Request) -> Response:
-    if support.btauth.VERSION_HEADER in request.headers:
-        return await _handle(request, lambda m, who, body: m.call("", _json(body), who), signed=True,
-                             limiter=_call_threads)
-    token = _bearer(request)
-    return await _handle(request, lambda m, who, body: m.call(token, _json(body)), signed=False,
+    signed = support.btauth.VERSION_HEADER in request.headers
+    token = "" if signed else _bearer(request)
+    return await _handle(request, lambda m, who, body: m.call(token, _json(body), who), signed=signed,
                          limiter=_call_threads)
 
 
@@ -274,7 +279,7 @@ async def post_ask(request: Request) -> Response:
 
 @router.get("/tool-market/usage")
 async def usage(request: Request, after: str = "0", limit: str = "100") -> Response:
-    # The query is not signed; it only pages the signer's own calls.
+    # Under the lead-order scheme the query is not signed; it only pages the signer's own calls.
     return await _handle(request, lambda m, who, body: m.usage(who, _digits(after), _digits(limit)), signed=True)
 
 

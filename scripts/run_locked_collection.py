@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import time
+from tempfile import NamedTemporaryFile
 from functools import partial
 from contextlib import closing, contextmanager, redirect_stdout, ExitStack
 from pathlib import Path
@@ -25,7 +26,7 @@ from lab_arena.collection_broker import (
 )
 from lab_arena.collection_intake import (
     GENERATOR_ROUTES, LEGACY_COMPARISON_TERMS_HASH, MODELS, SYNTHETIC_TRAINING_TERMS_HASH,
-    PAID_WORKFLOW_TERMS_HASH, VERIFIED_PRICE_SCHEMA, CollectionIntake, live_finney_arena,
+    PAID_TASK_FAMILIES, PAID_WORKFLOW_TERMS_HASH, VERIFIED_PRICE_SCHEMA, VERIFIED_TASK_PRICE_SCHEMA, CollectionIntake, live_finney_arena,
 )
 from lab_arena.collection_worker import P7_PAYMENT_RULE, process_job, verify_paid_job
 from lab_arena.collection_workflow import (
@@ -39,6 +40,12 @@ from lab_arena.credentials import CredentialManager
 from lab_arena.owner_admission import resolve_finalized_owner
 from lab_arena.service import S3ObjectStore
 from lab_arena.store import PostgrestTransport
+
+
+def paid_family(rule):
+    if rule not in PAID_TASK_FAMILIES:
+        raise ValueError("unknown verified workflow payment rule")
+    return PAID_TASK_FAMILIES[rule]
 
 
 def load_batch(raw, prompt):
@@ -101,21 +108,23 @@ def load_batch(raw, prompt):
     models = set(raw["budgets_microusd"])
     if paid:
         from lab_arena.collection_generation import CAPTURE_V2
+        family = paid_family(raw["payment_rule"])
+        task = "P7" if family == "P" else family
         quotes = raw.get("fixed_quotes_microusd")
         if (
-            raw["payment_rule"] != P7_PAYMENT_RULE or raw["mode"] != "live"
+            raw["mode"] != "live"
             or not models or not models <= set(MODELS)
             or not isinstance(quotes, dict) or set(quotes) != models
             or any(type(v) is not int or not 0 < v <= 10**10 for v in quotes.values())
             or raw.get("terms_sha256") != terms or raw.get("capture_version") != CAPTURE_V2
             or not raw.get("split_manifest")
-            or not all(re.fullmatch(r"P7-s[1-9][0-9]{0,7}", sid) for sid in scenarios)
+            or not all(re.fullmatch(task + r"-s[1-9][0-9]{0,7}", sid) for sid in scenarios)
             or raw["control_slots"] or raw["drift_slots"] or raw.get("control_artifacts")
             or any(k in raw for k in ("panel_qualification_sha256", "route_witness_sha256",
                                       "reference_successor", "pricing_pilot", "claim_pack_sha256",
                                       "research_index_sha256", "thresholds"))
         ):
-            raise ValueError("invalid deterministic P7 payment offer")
+            raise ValueError("invalid deterministic workflow payment offer")
     elif "fixed_quotes_microusd" in raw or models != set(MODELS):
         raise ValueError("every model needs a bounded positive budget")
     if any(
@@ -521,16 +530,18 @@ def report_split_hold(policy, exc):
 
 
 def verify_live_panel(raw, policy, approved):
-    if "payment_rule" in raw or approved.get("schema") == VERIFIED_PRICE_SCHEMA:
+    schemas = (VERIFIED_PRICE_SCHEMA, VERIFIED_TASK_PRICE_SCHEMA)
+    if "payment_rule" in raw or approved.get("schema") in schemas:
+        family = paid_family(raw.get("payment_rule"))
         if (
-            approved.get("schema") != VERIFIED_PRICE_SCHEMA
-            or raw.get("payment_rule") != P7_PAYMENT_RULE
+            approved.get("schema") not in schemas
+            or (approved["schema"] == VERIFIED_PRICE_SCHEMA and family != "P")
             or approved.get("payment_rule") != raw["payment_rule"]
             or approved.get("live_batch_id") != policy.batch_id
             or approved.get("terms_sha256") != raw["terms_sha256"]
             or approved.get("routes") != {m: raw["routes"][m] for m in raw["budgets_microusd"]}
-            or approved.get("prices") != {"P": raw["fixed_quotes_microusd"]}
-            or approved.get("budgets") != {"P": raw["budgets_microusd"]}
+            or approved.get("prices") != {family: raw["fixed_quotes_microusd"]}
+            or approved.get("budgets") != {family: raw["budgets_microusd"]}
             or approved.get("capture_version") != raw["capture_version"]
             or approved.get("split_manifest_sha256") != judge.digest(raw["split_manifest"])
             or approved.get("judge_prompt_sha256") != policy.prompt_sha256
@@ -583,6 +594,7 @@ def run_cohort(
     controls=None,
     claim_pack=None,
     recover_idle_pilot=False,
+    before_claim=None,
 ):
     if raw.get("route_witness_sha256"):
         from lab_arena.collection_route_witness import verified_witness
@@ -600,7 +612,11 @@ def run_cohort(
     if not judge_key and not raw.get("payment_rule"):
         raise ValueError("private verifier credential unavailable")
     if not policy.pilot:
-        schedule = database.rpc("collection_reward_schedule_v1", {})
+        schedule = (
+            database.rpc("collection_offer_schedule_v1", {"p_offer": policy.batch_id})
+            if raw.get("payment_rule")
+            else database.rpc("collection_reward_schedule_v1", {})
+        )
         if not schedule or epoch() < schedule["first_epoch"] - 1:
             raise ValueError("payout cutover not ready")
         verify_live_panel(raw, policy, schedule["pilot_evidence"])
@@ -611,10 +627,10 @@ def run_cohort(
                 finish_launch(database, pending, objects, policy, schedule["pilot_evidence"])
             return 0
         approved = schedule["pilot_evidence"]
-        (family,) = {
-            ("research" if sid.startswith("research-") else sid[0])
-            for sid in raw["scenario_ids"]
-        }
+        if raw.get("payment_rule"):
+            family = paid_family(raw["payment_rule"])
+        else:
+            (family,) = {("research" if sid.startswith("research-") else sid[0]) for sid in raw["scenario_ids"]}
         if (
             approved["harness_commit"] != agent
             or approved["builder_commit"] != builder
@@ -640,7 +656,7 @@ def run_cohort(
             intake.claim, policy.batch_id, raw["scenario_ids"], agent, fees, ceiling,
             terms_hash=raw.get("terms_sha256", LEGACY_COMPARISON_TERMS_HASH),
         )
-        job, job_prices = claim_at_current_price(claim, pricing)
+        job, job_prices = claim_at_current_price(claim, pricing, before_claim=before_claim)
         if not job:
             if recover_idle_pilot and policy.pilot and raw.get("capture_version") and raw.get("split_manifest"):
                 recover_idle_judge(database, objects, transport, raw, policy, prompt, judge_key)
@@ -723,12 +739,67 @@ def evidence_stores():
     )
 
 
+def poll_paid_offers(baseline, prompt, directory, run):
+    """Use one existing worker slot across the immutable manifests miners have signed."""
+    from scripts.collection_review import read_file
+
+    base_id = load_batch(baseline, prompt).batch_id
+    if baseline.get("mode") != "live" or "payment_rule" not in baseline:
+        raise ValueError("paid offer polling requires a verified live batch")
+    paths = {p.stem: p for p in directory.glob("dv-*.json")}
+    paths.setdefault(base_id, None)
+    order = sorted(paths)
+    cursor = directory / ".last-claimed-offer"
+    if cursor.exists():
+        previous = read_file(cursor, maximum=128).decode()
+        if previous in paths:
+            cut = order.index(previous) + 1
+            order = order[cut:] + order[:cut]
+
+    failures = []
+    for offer_id in order:
+        attempted = False
+
+        def before_claim():
+            nonlocal attempted
+            # A lost claim response cannot authorize a second dispatch in this poll.
+            attempted = True
+            with NamedTemporaryFile(dir=directory, delete=False) as f:
+                f.write(offer_id.encode())
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(f.name, cursor)
+
+        try:
+            manifest = baseline if paths[offer_id] is None else json.loads(read_file(paths[offer_id]))
+            if (
+                manifest.get("mode") != "live" or "payment_rule" not in manifest
+                or load_batch(manifest, prompt).batch_id != offer_id
+            ):
+                raise ValueError("paid manifest differs from its immutable offer ID")
+            if run(manifest, before_claim=before_claim):
+                return 1
+            if attempted:
+                break
+        except Exception as exc:
+            if attempted:
+                raise
+            failures.append(type(exc).__name__)
+            print(json.dumps({"offer": offer_id, "status": "offer_unavailable", "reason": type(exc).__name__}),
+                  file=sys.stderr, flush=True)
+    if failures:
+        raise ValueError("one or more paid offers could not be polled")
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--environment-file", type=Path, help="Protected Arena gateway environment"
     )
     p.add_argument("--batch", type=Path, required=True)
+    p.add_argument("--offer-directory", type=Path,
+                   help="Private directory of subsequent paid manifests named by their signed offer ID")
     p.add_argument("--prompt", type=Path, required=True)
     p.add_argument("--champion-repo", type=Path)
     p.add_argument("--poet-repo", type=Path)
@@ -766,6 +837,13 @@ def main(argv=None):
     if not 1 <= args.max_jobs <= 6:
         p.error("select 1 to 6 jobs per invocation")
     baseline = json.loads(args.batch.read_text())
+    if args.offer_directory:
+        if (args.max_jobs != 1 or args.preflight or args.pilot_only or args.next_reference or args.next_correction
+                or args.research_stdio or args.rejudge_ready or not args.offer_directory.is_dir()):
+            p.error("offer-directory requires the bounded paid comparison worker")
+        poll_paid_offers(baseline, json.loads(args.prompt.read_text()), args.offer_directory,
+                         partial(_run_options, args, p))
+        return 0
     if args.next_reference and (
         args.max_jobs != 1
         or not args.pilot_only
@@ -1043,6 +1121,7 @@ def _run_options(args, p, raw, *, before_claim=None):
                     controls=controls,
                     claim_pack=claim_pack,
                     recover_idle_pilot=args.pilot_only and args.max_jobs == 1,
+                    before_claim=before_claim,
                 )
             if completed == 0 and not args.research_stdio:
                 print(json.dumps({"batch": policy.batch_id, "status": "idle"}), flush=True)

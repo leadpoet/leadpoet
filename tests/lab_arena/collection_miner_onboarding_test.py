@@ -195,7 +195,7 @@ def test_gateway_denies_inactive_or_stale_paid_offer_before_key_validation(chang
         signed['body'].pop('offer_id')
     else:
         signed['body']['task_scope'] = intake.CORRECTION_SCOPE
-    transport = SimpleNamespace(rpc=lambda name, _: schedule if name == 'collection_reward_schedule_v1' else pytest.fail(name))
+    transport = SimpleNamespace(rpc=lambda name, _: schedule if name in {'collection_reward_schedule_v1','collection_offer_schedule_v1'} else pytest.fail(name))
     offer = {**intake.terms('live'), **intake.comparison_offer(transport)}
     service = intake.CollectionIntake(transport, SimpleNamespace(
         validate_openrouter_funding=lambda *a, **kw: pytest.fail('contacted provider before verifying consent')), 'live')

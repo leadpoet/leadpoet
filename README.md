@@ -20,7 +20,9 @@ Subnet 71 is a Bittensor subnet where miners fund experiments to improve open sa
 
 Miners fund our public sales agent with a dedicated OpenRouter key. We run the task, record its reasoning and tool calls, and verify the result. Each eligible paid assignment earns a fixed quote based on 1.25× the measured cost of that model and task. Validators convert those quotes to weights. If emissions fall short, all quotes scale proportionally. Final payments also depend on network validator votes and the token price. Champion rewards have ended.
 
-After installing the miner CLI and registering your SN71 hotkey, run the command below. It shows the current paid offer before asking for funding keys. Choose your own rolling 24-hour cap and substitute your wallet name.
+Use `leadpoet collection-terms` to see the available work and its prices. Offers can cover a partner-credit workflow or a research task where the agent checks sources and cites evidence for a sales decision. The first seven jobs had combined quotes of $0.03418 and received about $0.02812 in emissions at the quoted exchange rate.
+
+After installing the miner CLI and registering your SN71 hotkey, use the command below to review the default offer and set your rolling 24-hour spending cap. To choose another listed offer, add `--accept-offer OFFER_ID`.
 
 ```bash
 leadpoet collection-register --mode live --wallet-name miner --daily-cap-usd 0.30

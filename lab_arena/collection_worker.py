@@ -9,9 +9,12 @@ import re
 
 from lab_arena import collection_judge as judge
 from lab_arena.collection_intake import MODELS
+from lab_arena.collection_sales_evidence import sales_correction_source
 from lab_arena.collection_workflow import (
     COMPARISON_CAPTURE,
     TRAIN_ONLY_PARTITION_SHA256,
+    SALES_EVIDENCE_PARTITION_SHA256,
+    SALES_EVIDENCE_RULE,
     comparison_revisions,
     read_artifact,
     play_workflow,
@@ -39,6 +42,7 @@ def process_job(
     claim_protocol="collection.fresh-claims.v1",
     capture_version=None,
     payment_rule=None,
+    correction_source_job=None,
 ):
     """The journal stores judge bytes separately. Only scores and tags reach the public statement."""
     from lab_arena.collection_journal import WorkflowJournal
@@ -47,7 +51,31 @@ def process_job(
     capture = (
         {"capture_version": capture_version} if capture_version is not None else {}
     )
-    agent, builder = comparison_revisions(capture)
+    agent, builder = comparison_revisions(
+        {**capture, "scenario_ids": [job["scenario_id"]]}
+    )
+    owner = job.get("mode") == "owner"
+    if owner and (
+        not policy.pilot
+        or intake is not None
+        or prepare_launch
+        or payment_rule != SALES_EVIDENCE_RULE
+        or not re.fullmatch(r"owner-p8-[0-9a-f]{64}", batch)
+        or any(
+            job.get(k)
+            for k in (
+                "miner_hotkey",
+                "registration_id",
+                "openrouter_key_id",
+                "deepline_key_id",
+                "price_microusd",
+                "lease_token",
+            )
+        )
+    ):
+        raise ValueError("owner reference cannot access miner enrollment or settlement")
+    if correction_source_job is not None and not owner:
+        raise ValueError("a native counterfactual run requires separate owner funding")
     journal = None
     if job.get("deepline_key_id") is None and job["scenario_id"].startswith(
         "research-"
@@ -56,18 +84,19 @@ def process_job(
     if (
         job["harness_commit"] != agent
         or job["model"] not in MODELS
-        or job["mode"] != ("pilot" if policy.pilot else "live")
+        or (not owner and job["mode"] != ("pilot" if policy.pilot else "live"))
         or batch != policy.batch_id
         or assignment["run_id"] != run_id
     ):
         raise ValueError("frozen collection assignment mismatch")
+    if re.fullmatch(r"dv-[a-f0-9]{64}", batch) and payment_rule is None:
+        raise ValueError("an approved funded offer requires its native payment rule")
     if payment_rule is not None:
         if (
-            payment_rule != P7_PAYMENT_RULE
-            or policy.pilot
+            payment_rule != task_payment_rule(job)
+            or (policy.pilot and not owner)
             or capture_version != COMPARISON_CAPTURE
-            or not re.fullmatch(r"dv-[a-f0-9]{64}", batch)
-            or not _p7(job)
+            or (not owner and not re.fullmatch(r"dv-[a-f0-9]{64}", batch))
             or control_packet is not None
             or claim_pack is not None
             or split is None
@@ -103,6 +132,11 @@ def process_job(
             journal = WorkflowJournal(objects, batch, run_id)
             if split is not None:
                 journal.save("split", split)
+            source = (
+                sales_correction_source(objects, correction_source_job)
+                if correction_source_job is not None
+                else None
+            )
             try:
                 row, packet = play_workflow(
                     *sources,
@@ -111,6 +145,7 @@ def process_job(
                     record=journal.append,
                     save=journal.save,
                     capture_version=capture_version,
+                    **({"native_continuation": source} if source else {}),
                 )
             except Exception as exc:
                 journal.finish("interrupted")
@@ -176,6 +211,21 @@ def process_job(
         "generator": row_ref,
         "packet": packet_ref,
     }
+    if owner:
+        manifest["funding_mode"] = "owner"
+    if correction_source_job:
+        manifest["correction_source"] = {
+            k: correction_source_job[k]
+            for k in (
+                "job_id",
+                "batch_id",
+                "scenario_id",
+                "model",
+                "harness_commit",
+                "mode",
+                "artifact_sha256",
+            )
+        }
     if payment_rule:
         evidence = native_payment_evidence(objects, job, manifest)
         manifest["payment_rule"] = payment_rule
@@ -183,6 +233,8 @@ def process_job(
             objects, batch, run_id, "native-verification", evidence
         )
         receipt = persist(objects, batch, run_id, "manifest", manifest)
+        if owner:
+            return manifest
         accepted = evidence["eligible"]
         quality = (
             {"training_status": "needs_review", "payment_rule": payment_rule}
@@ -258,10 +310,11 @@ def process_job(
 P7_PAYMENT_RULE = "verified_p7_v1"
 
 
-def _p7(job):
-    return re.fullmatch(r"P7-s[1-9]\d{0,7}", job["scenario_id"]) and not job.get(
-        "experiment"
-    )
+def task_payment_rule(job):
+    match = re.fullmatch(r"(P7|P8)-s[1-9]\d{0,7}", job["scenario_id"])
+    if not match or job.get("experiment"):
+        return None
+    return P7_PAYMENT_RULE if match[1] == "P7" else SALES_EVIDENCE_RULE
 
 
 def _paid_reply(objects, job, index, event, message):
@@ -327,15 +380,19 @@ def _paid_reply(objects, job, index, event, message):
     return generation, wire["miner_cost_microusd"], json.loads(pointer)["sha256"]
 
 
-def native_payment_evidence(objects, job, manifest):
+def native_payment_evidence(objects, job, manifest, *, receipts_out=None):
     """Verify a locked ordinary P7 trajectory using the pinned producer's sealed ledger answer."""
     from lab_arena.collection_journal import WorkflowJournal
 
     run, batch, model = job["job_id"], job["batch_id"], job["model"]
-    capture = {"capture_version": COMPARISON_CAPTURE}
+    rule = task_payment_rule(job)
+    capture = {
+        "capture_version": COMPARISON_CAPTURE,
+        "scenario_ids": [job["scenario_id"]],
+    }
     agent, builder = comparison_revisions(capture)
     if (
-        not _p7(job)
+        not rule
         or manifest.get("control")
         or manifest["job_id"] != run
         or manifest["batch_id"] != batch
@@ -362,8 +419,16 @@ def native_payment_evidence(objects, job, manifest):
         or row["task"] != job["scenario_id"]
         or packet["scenario_id"] != job["scenario_id"]
         or not isinstance(split, dict)
-        or split != {**row["split"], "manifest_sha256": TRAIN_ONLY_PARTITION_SHA256}
-        or row["split"]["template_id"] != "P7"
+        or split
+        != {
+            **row["split"],
+            "manifest_sha256": (
+                SALES_EVIDENCE_PARTITION_SHA256
+                if rule == SALES_EVIDENCE_RULE
+                else TRAIN_ONLY_PARTITION_SHA256
+            ),
+        }
+        or row["split"]["template_id"] != job["scenario_id"].split("-s")[0]
     ):
         raise ValueError("generator, scenario or training partition mismatch")
     WorkflowJournal(objects, batch, run).comparison_index(
@@ -371,7 +436,12 @@ def native_payment_evidence(objects, job, manifest):
     )
     ev = row["evidence"]
     replies = [e for e in ev["events"] if e["kind"] == "reply"]
-    messages = [m for m in row["messages"] if m["role"] == "assistant"]
+    if bool(manifest.get("correction_source")) != ("native_correction" in row):
+        raise ValueError(
+            "correction prefix must be tied to its original observed source"
+        )
+    prefix = row.get("native_correction", {}).get("prefix_messages", 0)
+    messages = [m for m in row["messages"][prefix:] if m["role"] == "assistant"]
     if (
         len(replies) != len(messages)
         or len(replies) != ev["generation"]["generated_calls"]
@@ -407,19 +477,31 @@ def native_payment_evidence(objects, job, manifest):
             packet["full_evidence"],
             128 * 1024 * 1024,
         )
-    posting = (ev["out"]["state"] or {}).get("posting") or {}
     expected = json.loads(packet["reference_answer"])["answer"]
+    additional = {}
+    if rule == SALES_EVIDENCE_RULE:
+        from lab_arena.collection_sales_evidence import verify_account_memo
+
+        additional = verify_account_memo(objects, job, manifest, row, packet)
+        task_pass = additional["verified_decision"]
+    else:
+        posting = (ev["out"]["state"] or {}).get("posting") or {}
+        task_pass = native["credits"] == {
+            "sealed": 1,
+            "charter": 1,
+            "receipt": 1,
+        } and expected == posting.get("receipt")
     eligible = bool(
         eligible
         and total > 0
         and ev["finish"] == "answered"
         and not native.get("hard_fail")
         and native["score"] == 1
-        and native["credits"] == {"sealed": 1, "charter": 1, "receipt": 1}
         and isinstance(expected, str)
         and expected
-        and expected == posting.get("receipt")
+        and task_pass
         and expected == ev["out"]["answer"].strip()
+        and messages
         and expected == messages[-1]["content"].strip()
         and any(
             (m.get("reasoning") or m.get("reasoning_content") or "").strip()
@@ -427,9 +509,16 @@ def native_payment_evidence(objects, job, manifest):
         )
         and any(m["role"] == "tool" for m in row["messages"])
     )
+    if manifest.get("correction_source"):
+        additional["verified_counterfactual"] = (
+            eligible and additional["changed_first_action"]
+        )
+    if receipts_out is not None:
+        receipts_out.extend(receipts)
     return {
-        "payment_rule": P7_PAYMENT_RULE,
-        "eligible": eligible,
+        **additional,
+        "payment_rule": rule,
+        "eligible": eligible and not manifest.get("correction_source"),
         "calls": len(receipts),
         "cost_microusd": total,
         "provider_calls_sha256": judge.digest([sha for _, _, sha in receipts]),
@@ -441,7 +530,8 @@ def registered_native_result(pending, objects, policy, approved):
         policy.pilot
         or pending["batch_id"] != policy.batch_id
         or not re.fullmatch(r"dv-[a-f0-9]{64}", policy.batch_id)
-        or approved.get("payment_rule") != P7_PAYMENT_RULE
+        or not task_payment_rule(pending)
+        or approved.get("payment_rule") != task_payment_rule(pending)
         or approved.get("capture_version") != COMPARISON_CAPTURE
     ):
         raise ValueError("incorrect deterministic payment policy")
@@ -455,7 +545,7 @@ def registered_native_result(pending, objects, policy, approved):
         1024 * 1024,
     )
     if (
-        manifest.get("payment_rule") != P7_PAYMENT_RULE
+        manifest.get("payment_rule") != approved["payment_rule"]
         or manifest["judge_policy"] != asdict(policy)
         or any(manifest[k] != approved[k] for k in ("builder_commit", "harness_commit"))
     ):

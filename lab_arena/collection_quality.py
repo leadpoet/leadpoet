@@ -60,20 +60,29 @@ def admit_built_split(builders, task, shape, split):
     identity = scenario_split(builders, task, shape)
     if identity["template_id"] in builders.evaluation_templates:
         raise ValueError("scenario uses a frozen evaluation template")
-    if identity["template_id"] == "P7":
+    if identity["template_id"] in {"P7", "P8"}:
         if not hasattr(
             builders, "training_partition"
-        ) or split != builders.training_partition("P7"):
-            raise ValueError("split differs from the producer-approved P7 partition")
+        ) or split != builders.training_partition(identity["template_id"]):
+            raise ValueError(
+                f"split differs from the producer-approved {identity['template_id']} partition"
+            )
     return admit_split(identity, split)
 
 
 def require_release_partition(settings):
     """Historical C/K/B/E/P1–P6 are known evaluation templates at their original pins."""
-    from lab_arena.collection_workflow import TRAIN_ONLY_PARTITION_SHA256
+    from lab_arena.collection_workflow import (
+        TRAIN_ONLY_PARTITION_SHA256,
+        SALES_EVIDENCE_PARTITION_SHA256,
+    )
 
-    if settings["split_sha256"] != "sha256:" + TRAIN_ONLY_PARTITION_SHA256 or any(
-        not c["scenario_id"].startswith("P7-s") for c in settings["cases"]
+    pins = {"P7": TRAIN_ONLY_PARTITION_SHA256, "P8": SALES_EVIDENCE_PARTITION_SHA256}
+    families = {case["scenario_id"].split("-s")[0] for case in settings["cases"]}
+    if (
+        len(families) != 1
+        or not families <= pins.keys()
+        or settings["split_sha256"] != "sha256:" + pins[next(iter(families))]
     ):
         raise ValueError(
             "historical or unverified evaluation partition is private audit only"

@@ -2741,17 +2741,19 @@ class ArenaService:
         except collection_intake.IntakeError as exc:
             raise ServiceError(exc.code, exc.status) from None
 
-    def collection_terms(self, task_scope: str = "synthetic_workflows") -> Dict[str, Any]:
+    def collection_terms(self, task_scope: str = "synthetic_workflows", offer_id: Optional[str] = None) -> Dict[str, Any]:
         from lab_arena import collection_intake
         mode = self.collection_mode()
         if mode == "off":
             raise ServiceError("collection_inactive", 404)
         try:
+            if offer_id is not None and (mode != "live" or task_scope != collection_intake.TASK_SCOPE):
+                raise ServiceError("collection_offer_unknown", 404)
             document = collection_intake.terms(mode, task_scope)
             if mode == "live" and task_scope == collection_intake.CORRECTION_SCOPE:
                 document["fixed_quotes"] = collection_intake.open_correction_quotes(self._store._transport)
             elif mode == "live":
-                document.update(collection_intake.comparison_offer(self._store._transport))
+                document.update(collection_intake.comparison_offer(self._store._transport, offer_id))
             return document
         except collection_intake.IntakeError as exc:
             raise ServiceError(exc.code, exc.status) from None
@@ -2791,7 +2793,7 @@ class ArenaService:
                 if self._config.credential_manager is None:
                     raise ServiceError("credential_validation_unavailable", 503)
                 owner = resolve_finalized_owner(self._config.chain, hk)
-                published = self.collection_terms(signed["body"].get("task_scope")) if mode == "live" else None
+                published = self.collection_terms(signed["body"].get("task_scope"), signed["body"].get("offer_id")) if mode == "live" else None
                 return intake.register(signed, owner.coldkey, request["credentials"], published=published)
             if operation == "revoke" and set(signed["body"]) == {"registration_id"}:
                 return intake.revoke(hk, signed["body"]["registration_id"])

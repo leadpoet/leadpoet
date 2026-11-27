@@ -229,7 +229,8 @@ def test_native_export_checks_settlement_and_keeps_only_model_visible_data(
     )
 
     def rpc(name, args):
-        if name == "collection_reward_schedule_v1":
+        if name == "collection_offer_schedule_v1":
+            assert args == {"p_offer": policy.batch_id}
             return {"pilot_evidence": tariffs}
         assert name == "collection_batch_jobs_v1"
         return [job]

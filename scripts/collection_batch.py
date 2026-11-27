@@ -145,7 +145,7 @@ def _registered_projection(raw, prompt, transport, objects, *, export_successor=
     return {**bundle, "split_manifest_sha256": judge.digest(raw["split_manifest"])}
 
 
-def write_exports(raw, prompt, database, objects, output, *, qualification=None):
+def write_exports(raw, prompt, database, objects, output, *, qualification=None, only_jobs=None, publish=True):
     """Publish authorized, originally funded comparison traces against a separately qualified panel."""
     from lab_arena import collection_intake as intake, collection_trajectories as traces
     from lab_arena.collection_broker import batch_versions
@@ -157,11 +157,13 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
     )
     from lab_arena.collection_workflow import store_artifact
 
-    from lab_arena.collection_worker import P7_PAYMENT_RULE, registered_native_result
+    from lab_arena.collection_worker import registered_native_result
     from scripts.run_locked_collection import verify_live_panel
 
     terms = raw.get("terms_sha256")
-    native = raw.get("payment_rule") == P7_PAYMENT_RULE
+    native = "payment_rule" in raw
+    if only_jobs is not None and not native:
+        raise ValueError("incremental comparison release requires an approved native offer")
     expected_terms = intake.PAID_WORKFLOW_TERMS_HASH if native else intake.SYNTHETIC_TRAINING_TERMS_HASH
     if not terms or terms != expected_terms:
         raise ValueError("comparison enrollment did not grant training release rights")
@@ -177,7 +179,7 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
         }
     )
     if native:
-        schedule = database.rpc("collection_reward_schedule_v1", {})
+        schedule = database.rpc("collection_offer_schedule_v1", {"p_offer": policy.batch_id})
         approved = (schedule or {}).get("pilot_evidence") or {}
         verify_live_panel(raw, policy, approved)
     else:
@@ -207,6 +209,10 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
         raw, prompt, database, objects, export_successor=bool(successor)
     )
     rows = database.rpc("collection_batch_jobs_v1", {"p_batch": policy.batch_id})
+    if only_jobs is not None:
+        rows = [row for row in rows if row["job_id"] in only_jobs]
+        if not only_jobs or len(rows) != len(only_jobs) or {row["job_id"] for row in rows} != set(only_jobs):
+            raise ValueError("snapshot jobs differ from registered work")
     grants = traces.verified_grants(
         database,
         policy.batch_id,
@@ -215,6 +221,7 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
         scope=intake.TASK_SCOPE,
         digest=terms,
         allow_pending=native or bool(successor),
+        **({"subset": True} if only_jobs is not None else {}),
     )
     by_id = {item["packet"]["run_id"]: item for item in bundle.get("runs", ())}
     failed = {item["run_id"] for item in bundle.get("failed_attempts", ())}
@@ -223,8 +230,15 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
                 and not grants[job["job_id"]]["unresolved"]]
         if not rows:
             raise ValueError("no settled native collection runs available to export")
+        roster = [m for m in MODELS if m in raw["budgets_microusd"]]
         for job in rows:
             rid = job["job_id"]
+            slot = job["slot"]
+            if (job["batch_id"] != policy.batch_id or job["mode"] != raw["mode"]
+                    or type(slot) is not int or not 0 <= slot < len(raw["scenario_ids"]) * len(roster)
+                    or job["scenario_id"] != raw["scenario_ids"][slot // len(roster)]
+                    or job["model"] != roster[slot % len(roster)] or job["harness_commit"] != comparison_revisions(raw)[0]):
+                raise ValueError("registered native job differs from the frozen assignment")
             if job["status"] == "failed":
                 failed.add(rid)
                 continue
@@ -234,7 +248,8 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
                     or checked["calls"] != grants[rid]["generator_calls"]):
                 raise ValueError("verified native run differs from the funded outcome")
             packet = read_artifact(objects, policy.batch_id, rid, "judge-input", manifest["packet"], 16 * 1024 * 1024)
-            by_id[rid] = {"packet": packet, "assessment": None, "manifest_sha256":job["artifact_sha256"]}
+            by_id[rid] = {"packet": packet, "assessment": None,
+                          "manifest_sha256": job["artifact_sha256"], "native": checked}
 
     if successor:
         allowed = set(by_id) | failed
@@ -362,11 +377,25 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
                     hold=hold,
                 )
                 if native:
-                    trajectory["verification_method"] = P7_PAYMENT_RULE
+                    trajectory["verification_method"] = raw["payment_rule"]
                     if packet and trajectory["final_turn_present"]:
                         trajectory["verified_task_pass"] = all(packet["checks"][k] is True for k in (
                             "answered", "shape", "code_grade", "no_hard_failure", "privacy", "training_split"
                         ))
+                    checked = by_id.get(rid, {}).get("native") or {}
+                    if "verified_decision" in checked:
+                        # These are the replayed checks and model-visible observations. Private
+                        # source worlds, reference answers and undiscovered documents stay sealed.
+                        trajectory["sales_evidence"] = {
+                            key: checked[key] for key in (
+                                "verified_decision", "field_evidence", "searches", "opened_sources",
+                                "first_failed_decision", "observed_repair",
+                            )
+                        }
+                        if packet and trajectory["final_turn_present"]:
+                            trajectory["verified_task_pass"] = (
+                                trajectory["verified_task_pass"] and checked["verified_decision"]
+                            )
                 if successor:
                     trajectory["reference_successor"] = dict(successor)
                 if witness and job["model"] == witness["model"]:
@@ -390,8 +419,9 @@ def write_exports(raw, prompt, database, objects, output, *, qualification=None)
                 metadata["route_witness"] = witness
             z.writestr("metadata.json", judge._json(metadata))
         os.chmod(stage, 0o600)
-        store_artifact(objects, policy.batch_id, "export", "split", split)
-        store_artifact(objects, policy.batch_id, "export", "release", metadata)
+        if publish:
+            store_artifact(objects, policy.batch_id, "export", "split", split)
+            store_artifact(objects, policy.batch_id, "export", "release", metadata)
         os.link(stage, output)
     return metadata
 
@@ -515,8 +545,7 @@ def main(argv=None):
     p.add_argument("--evaluation", type=Path)
     args = p.parse_args(argv)
     raw, prompt = (json.loads(read_file(path)) for path in (args.batch, args.prompt))
-    from lab_arena.collection_worker import P7_PAYMENT_RULE
-    native_export = args.action == "export" and raw.get("payment_rule") == P7_PAYMENT_RULE
+    native_export = args.action == "export" and "payment_rule" in raw
     if args.action in {"prices", "export", "corrections"} and not native_export and args.receipt is None:
         p.error("--receipt is required")
     if not live_finney_arena():

@@ -46,7 +46,21 @@ TRAIN_ONLY_PARTITION_SHA256 = (
 )
 
 
+SALES_EVIDENCE_POET_REV = "f836afcc4f9f6a469254fa66cbb404f24626296f"
+SALES_EVIDENCE_PARTITION_SHA256 = (
+    "b47688a062b513c8aded66bbdfe6fcd1799565bc08b8c4833becda76c2cbd42e"
+)
+SALES_EVIDENCE_RULE = "verified_sales_evidence_v1"
+
+
 def experiment_revisions(scenarios=()):
+    scenarios = tuple(scenarios)
+    if any(s.startswith("P8-s") for s in scenarios):
+        if not all(s.startswith("P8-s") for s in scenarios):
+            raise ValueError(
+                "account evidence requires its own frozen source and partition"
+            )
+        return CORRECTION_CHAMPION_REV, SALES_EVIDENCE_POET_REV
     builder = (
         TRAIN_ONLY_POET_REV
         if any(s.startswith("P7-s") for s in scenarios)
@@ -60,6 +74,10 @@ def comparison_revisions(settings):
         return CHAMPION_REV, POET_REV
     if settings["capture_version"] not in (LEGACY_CAPTURE, COMPARISON_CAPTURE):
         raise ValueError("unknown comparison capture version")
+    if settings.get("payment_rule") == SALES_EVIDENCE_RULE or any(
+        s.startswith("P8-s") for s in settings.get("scenario_ids", ())
+    ):
+        return CORRECTION_CHAMPION_REV, SALES_EVIDENCE_POET_REV
     return CORRECTION_CHAMPION_REV, TRAIN_ONLY_POET_REV
 
 
@@ -100,7 +118,11 @@ def workflow_sources(
     """Enter once in a dedicated worker process: Poet9B uses flat sibling imports."""
     if builder_revision is None:
         builder_revision = CORRECTION_POET_REV if corrections else POET_REV
-    allowed = {CORRECTION_POET_REV, TRAIN_ONLY_POET_REV} if corrections else {POET_REV}
+    allowed = (
+        {CORRECTION_POET_REV, TRAIN_ONLY_POET_REV, SALES_EVIDENCE_POET_REV}
+        if corrections
+        else {POET_REV}
+    )
     if builder_revision not in allowed:
         raise ValueError("unapproved workflow builder revision")
     with tempfile.TemporaryDirectory(prefix="collection-pinned-") as temp:
@@ -149,7 +171,7 @@ def workflow_sources(
 
 def build_scenario(builders, scenario_id):
     match = re.fullmatch(
-        r"(C\d{2}|K\d{2}|B[1-8]|E[1-7]|P[1-7])-s([1-9]\d{0,7})", scenario_id
+        r"(C\d{2}|K\d{2}|B[1-8]|E[1-7]|P[1-8])-s([1-9]\d{0,7})", scenario_id
     )
     if not match:
         raise ValueError("unknown workflow scenario id")
@@ -300,18 +322,26 @@ def play_workflow(
     *,
     continuation=None,
     student_source=None,
+    native_continuation=None,
     max_steps=90,
     max_tokens=8192,
     record=None,
     save=None,
     capture_version=None,
 ):
-    if continuation is not None and student_source is not None:
+    if (
+        sum(
+            value is not None
+            for value in (continuation, student_source, native_continuation)
+        )
+        > 1
+    ):
         raise ValueError("a run has one starting state")
     source = continuation if continuation is not None else student_source
     extended = hasattr(builders, "branch")
     if not extended and (
         source is not None
+        or native_continuation is not None
         or max_steps != 90
         or max_tokens != 8192
     ):
@@ -325,6 +355,14 @@ def play_workflow(
         shape = json.loads(source["original"]["trace.json"]).get("shape")
     else:
         task = build_scenario(builders, job["scenario_id"])
+    if native_continuation is not None:
+        if (
+            job.get("mode") != "owner"
+            or job["scenario_id"] != native_continuation["scenario_id"]
+            or native_continuation["student_model"] == job["model"]
+            or task["id"] != "P8"
+        ):
+            raise ValueError("invalid owner-funded sales continuation")
     capture = GenerationCapture(job["job_id"], builders, save)
     capture.check(
         {k: task.get(k) for k in ("prompt", "state", "files", "tools")}, "scenario"
@@ -501,7 +539,9 @@ def play_workflow(
             world=world,
             **(
                 {
-                    "resume": continuation["checkpoint"] if continuation else None,
+                    "resume": (continuation or native_continuation or {}).get(
+                        "checkpoint"
+                    ),
                     "record": observe,
                     "max_steps": max_steps,
                     "max_tokens": max_tokens,
@@ -681,6 +721,15 @@ def play_workflow(
             "initial_files": task["files"],
             "initial_state": task.get("state"),
         }
+        if native_continuation is not None:
+            cut = len(native_continuation["checkpoint"]["messages"])
+            row["native_correction"] = {
+                k: v for k, v in native_continuation.items() if k != "checkpoint"
+            }
+            row["native_correction"]["prefix_messages"] = cut
+            row["no_loss_turns"] = sorted(
+                set(row["no_loss_turns"]) | {i for i in labels if i < cut}
+            )
         if continuation is not None:
             checkpoint = source["checkpoint"]
             cut = len(checkpoint["messages"])

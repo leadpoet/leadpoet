@@ -48,6 +48,7 @@ def db():
         753,
         754,
         755,
+        756,
     ]
     yield from database_with_lab_arena_migration(
         (
@@ -246,3 +247,273 @@ def test_paid_offer_through_first_epoch(db):
         }
         assert rpc("collection_reward_quotes_v1", 102)["job_count"] == 0
         assert rpc("collection_reward_start_v1") == {"first_epoch": 101}
+        conn.commit()
+        exercise_successor_offers(
+            db,
+            q,
+            rpc,
+            approval,
+            consent,
+            model,
+            offer,
+            live_job,
+            commit,
+            token,
+            artifact,
+        )
+
+
+def exercise_successor_offers(
+    db, q, rpc, initial, consent, model, original, source_job, commit, token, artifact
+):
+    """Exercise same-day selection, historical consent and first-epoch invariants."""
+    from bittensor_wallet import Keypair
+    from contextlib import closing
+    from scripts.collection_price_successor import publish
+
+    pg, dsn = db
+    samples = rpc("collection_offer_samples_v1", original, 0)
+    assert (
+        len(samples) == 1
+        and samples[0]["job_id"] == source_job
+        and samples[0]["cost_microusd"] == 6500
+    )
+    new = "dv-" + "2" * 64
+    next_offer = {
+        **initial,
+        "schema": "leadpoet.collection.verified_task_prices.v1",
+        "live_batch_id": new,
+        "batch_id": original,
+        "observations": samples,
+        "measurement_kind": "settled_production",
+        "through_slot": 0,
+        "job_count": 1,
+        "prices": {"P": {model: 8125}},
+    }
+    next_offer["historical_realization"] = {
+        "quote_epoch": 101,
+        "payment_block": 450,
+        "block_hash": "0x" + "7" * 64,
+        "quoted_microusd": 8172,
+        "received_microusd_at_signed_price": 6280,
+    }
+    for field in ("cutover_anchor", "measurement_jobs", "measurement_sha256"):
+        next_offer.pop(field, None)
+    with closing(pg.connect(**dsn)) as signer:
+        with pytest.raises(pg.Error, match="differ from observations"):
+            publish(signer, dict(next_offer, prices={"P": {model: 8225}}), original)
+        with pytest.raises(pg.Error, match="settled production source"):
+            publish(
+                signer,
+                dict(next_offer, observations=[dict(samples[0], cost_microusd=6501)]),
+                original,
+            )
+        incorrect_history = dict(
+            next_offer["historical_realization"], quoted_microusd=9000
+        )
+        with pytest.raises(pg.Error, match="invalid prior payout observation"):
+            publish(
+                signer,
+                dict(next_offer, historical_realization=incorrect_history),
+                original,
+            )
+        assert publish(signer, next_offer, original) == "published"
+        assert publish(signer, next_offer, original) == "already_published"
+        with pytest.raises(ValueError, match="different measurements"):
+            publish(signer, dict(next_offer, job_count=3), original)
+        with pytest.raises(pg.Error, match="predecessor"):
+            publish(signer, dict(next_offer, live_batch_id="dv-" + "3" * 64), original)
+    assert rpc("collection_offer_schedule_v1", None)["pilot_evidence"] == {
+        k: v for k, v in next_offer.items() if k != "observations"
+    }
+    assert (
+        rpc("collection_offer_schedule_v1", original)["pilot_evidence"]["live_batch_id"]
+        == original
+    )
+    assert rpc("collection_offer_schedule_v1", "dv-" + "f" * 64) == {}
+    assert (
+        rpc("collection_reward_schedule_v1")["pilot_evidence"]["live_batch_id"]
+        == original
+    )
+    assert rpc("collection_reward_quotes_v1", 101)["quotes_microusd"] == {MINER: 8172}
+
+    for i, (offer_id, fee) in enumerate([(original, 8172), (new, 8125)], 1):
+        key = Keypair.create_from_uri(f"//Priced{i}").ss58_address
+        registration = str(uuid4())
+        credential = str(uuid4())
+        signed = dict(
+            consent, hotkey=key, body=dict(consent["body"], offer_id=offer_id)
+        )
+        grant = rpc(
+            "collection_register_v1",
+            registration,
+            key,
+            key,
+            "live",
+            Json(signed),
+            100000,
+            Json(
+                {
+                    "key_id": credential,
+                    "fingerprint": "sha256:" + str(6 + i) * 64,
+                    "ciphertext_b64": "mock",
+                }
+            ),
+            None,
+        )
+        assert grant["status"] == "enrolled"
+        scenarios = (
+            ["P7-s40402", "P7-s40403"] if offer_id == original else ["P7-s40410"]
+        )
+        claim = (
+            str(uuid4()),
+            token,
+            offer_id,
+            "live",
+            commit,
+            Json(scenarios),
+            Json([model]),
+            Json({model: fee}),
+            Json({model: 20000}),
+            PAID_WORKFLOW_TERMS_HASH,
+        )
+        job = rpc("collection_claim_v1", *claim)
+        assert (job["miner_hotkey"], job["mode"], job["price_microusd"]) == (
+            key,
+            "live",
+            fee,
+        )
+        rpc("collection_finish_v1", claim[0], token, "failed", Json({}), None, None)
+
+    q.connection.commit()
+    # Owner references have no collection job or grant. They may price only the separate P8 task.
+    research = "dv-" + "a" * 64
+    sample = dict(
+        samples[0],
+        job_id=str(uuid4()),
+        cost_microusd=1000,
+        scenario_id="P8-s1",
+        provider_receipts_sha256="d" * 64,
+    )
+    research_offer = dict(
+        next_offer,
+        live_batch_id=research,
+        batch_id="owner-p8-" + "c" * 64,
+        measurement_kind="owner_provider_receipts",
+        payment_rule="verified_sales_evidence_v1",
+        observations=[sample],
+        prices={"P8": {model: 1250}},
+        budgets={"P8": {model: 20000}},
+    )
+    research_offer.pop("through_slot")
+    with closing(pg.connect(**dsn)) as signer:
+        with pytest.raises(pg.Error, match="invalid settled price observations"):
+            publish(
+                signer,
+                dict(research_offer, observations=[dict(sample, scenario_id="P7-s1")]),
+                new,
+            )
+        assert publish(signer, research_offer, new) == "published"
+    current = rpc("collection_offer_schedule_v1", None)
+    assert current["available_offers"] == [
+        {"task": "P8", "offer_id": research},
+        {"task": "P7", "offer_id": new},
+    ]
+    assert not any(
+        r["job_id"] == sample["job_id"]
+        for r in rpc("collection_batch_jobs_v1", research)
+    )
+    key = Keypair.create_from_uri("//PaidSales").ss58_address
+    grant = dict(consent, hotkey=key, body=dict(consent["body"], offer_id=research))
+    rpc(
+        "collection_register_v1",
+        str(uuid4()),
+        key,
+        key,
+        "live",
+        Json(grant),
+        100000,
+        Json(
+            {
+                "key_id": str(uuid4()),
+                "fingerprint": "sha256:" + "9" * 64,
+                "ciphertext_b64": "mock",
+            }
+        ),
+        None,
+    )
+    job = rpc(
+        "collection_claim_v1",
+        str(uuid4()),
+        token,
+        research,
+        "live",
+        commit,
+        Json(["P8-s2"]),
+        Json([model]),
+        Json({model: 1250}),
+        Json({model: 20000}),
+        PAID_WORKFLOW_TERMS_HASH,
+    )
+    assert (
+        job["miner_hotkey"] == key
+        and job["scenario_id"] == "P8-s2"
+        and job["price_microusd"] == 1250
+    )
+    assert (
+        rpc(
+            "collection_reserve_call_v1",
+            job["job_id"],
+            token,
+            "generate-1",
+            "openrouter",
+            "a" * 64,
+            1800,
+        )["status"]
+        == "reserved"
+    )
+    rpc(
+        "collection_record_call_v1",
+        job["job_id"],
+        token,
+        "generate-1",
+        "f" * 64,
+        "gen-research",
+        1400,
+        200,
+    )
+    q.execute("SAVEPOINT native_quality")
+    with pytest.raises(pg.Error, match="settled verified"):
+        rpc(
+            "collection_finish_v1",
+            job["job_id"],
+            token,
+            "accepted",
+            Json({"payment_rule": "verified_p7_v1", "training_status": "needs_review"}),
+            artifact,
+            101,
+        )
+    q.execute("ROLLBACK TO native_quality")
+    rpc(
+        "collection_finish_v1",
+        job["job_id"],
+        token,
+        "accepted",
+        Json(
+            {
+                "payment_rule": "verified_sales_evidence_v1",
+                "training_status": "needs_review",
+            }
+        ),
+        artifact,
+        101,
+    )
+    assert rpc("collection_reward_quotes_v1", 102)["quotes_microusd"] == {key: 1250}
+    assert rpc("collection_reward_quotes_v1", 101)["quotes_microusd"] == {MINER: 8172}
+    q.execute("SAVEPOINT immutability")
+    with pytest.raises(pg.Error, match="immutable"):
+        q.execute(
+            "UPDATE public.collection_paid_offers SET approval='{}' WHERE offer_id=%s",
+            (research,),
+        )
+    q.execute("ROLLBACK TO immutability")

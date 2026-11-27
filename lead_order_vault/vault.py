@@ -61,8 +61,8 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from . import envelope as env
-from .tools import TOOLS, Tool
-from .envelope import (CALLER_HEADER, CHECK_TIMEOUT_SECONDS, ENCRYPTION_DOMAIN, HOSTS, IDENTITY_SCHEMA,
+from .tools import HOSTS, TOOLS, Tool
+from .envelope import (CALLER_HEADER, CHECK_TIMEOUT_SECONDS, ENCRYPTION_DOMAIN, IDENTITY_SCHEMA,
                        KEY_ALGORITHM, RECEIPT_SCHEMA, RECEIPTS_DOMAIN, TLS_SCHEMA, canonical, spki_sha256)
 
 # Handshake, headers and body together; a per-read timeout alone would let a
@@ -425,10 +425,6 @@ def _field(document, path: Tuple):
     return None
 
 
-def _route_allowed(provider: str, method: str, path: str, query: str) -> bool:
-    return TOOLS[provider].route(method, path, query)
-
-
 def _refusal(status: int, code: str, receipt: Optional[Mapping], headers=()) -> Mapping:
     """An answer the vault gives in the provider's place."""
 
@@ -457,7 +453,7 @@ def _parse_call(request: Mapping):
             or parts.netloc.lower() not in (parts.hostname, parts.hostname + ":443")):
         raise VaultError("host_not_allowed")
     provider = HOSTS[parts.hostname]
-    if not _route_allowed(provider, method, parts.path, parts.query) or TOOLS[provider].caller_sets_key(parts.query):
+    if not TOOLS[provider].route(method, parts.path, parts.query) or TOOLS[provider].caller_sets_key(parts.query):
         raise VaultError("path_not_allowed")
     raw_headers = request["headers"]
     if not isinstance(raw_headers, Mapping) or len(raw_headers) > 64:

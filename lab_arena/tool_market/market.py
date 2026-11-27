@@ -21,6 +21,7 @@ import secrets
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from lab_arena.lead_orders.auth import BuyerIdentity
@@ -77,12 +78,23 @@ def token_hash(token: str) -> str:
     return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+MAX_ANSWER_DEPTH = 64
+
+
 def _document(body: bytes) -> Any:
     """A vendor's JSON answer, or None when it is not JSON the gateway can
-    send back as is (NaN, an infinite number or a lone surrogate): then the
-    cost readers see what the buyer gets."""
+    send back as is (NaN, an infinite number, a lone surrogate, or nested
+    deeper than MAX_ANSWER_DEPTH): then the cost readers see what the buyer
+    gets."""
 
     document = json_document(body)
+    stack = [(document, 1)]
+    while stack:
+        value, depth = stack.pop()
+        if isinstance(value, (list, dict)):
+            if depth > MAX_ANSWER_DEPTH:
+                return None
+            stack.extend((item, depth + 1) for item in (value.values() if isinstance(value, dict) else value))
     try:
         json.dumps(document, allow_nan=False, ensure_ascii=False).encode("utf-8")
     except (ValueError, UnicodeEncodeError):
@@ -215,7 +227,8 @@ class ToolMarket:
             raise ToolMarketError(400, "envelope_mismatch")
         if header.miner_hotkey != identity.hotkey:
             raise ToolMarketError(400, "envelope_hotkey_mismatch")
-        checked = self._check(tool, envelope)
+        with self._slot("check:" + identity.hotkey, 1, "check_in_flight"):
+            checked = self._check(tool, envelope)
         if checked.get("status") not in ("valid", "unchecked"):
             raise ToolMarketError(422, str(checked.get("reason") or "key_invalid"))
         if checked.get("miner_hotkey") != identity.hotkey or checked.get("provider") != tool:
@@ -243,7 +256,8 @@ class ToolMarket:
             raise ToolMarketError(409, "key_cannot_be_checked")
         if not self._recheck_due(key["key_id"]):
             raise ToolMarketError(429, "check_too_soon", retry_after_seconds=RECHECK_SPACING_SECONDS)
-        checked = self._recheck(key["key_id"], key["tool"], key["envelope"])
+        with self._slot("check:" + identity.hotkey, 1, "check_in_flight"):
+            checked = self._recheck(key["key_id"], key["tool"], key["envelope"])
         return {"key_id": key["key_id"], "tradeable": checked is not None and checked["status"] != "invalid"}
 
     def revoke_key(self, identity: BuyerIdentity, key_id: Any) -> Dict[str, Any]:
@@ -341,17 +355,24 @@ class ToolMarket:
         if not opened["open"]:
             raise ToolMarketError(401, "tab_closed")
         hotkey = opened["hotkey"]
-        with self._lock:
-            if self._in_flight.get(hotkey, 0) >= MAX_CALLS_IN_FLIGHT_PER_BUYER:
-                raise ToolMarketError(429, "too_many_calls_in_flight")
-            self._in_flight[hotkey] = self._in_flight.get(hotkey, 0) + 1
-        try:
+        with self._slot(hotkey, MAX_CALLS_IN_FLIGHT_PER_BUYER, "too_many_calls_in_flight"):
             return self._buy(tool, op, max_ask, private, tab, hotkey, url, headers, payload)
+
+    @contextmanager
+    def _slot(self, name: str, limit: int, code: str):
+        """Hold one of ``limit`` slots for ``name`` in this process, or 429."""
+
+        with self._lock:
+            if self._in_flight.get(name, 0) >= limit:
+                raise ToolMarketError(429, code)
+            self._in_flight[name] = self._in_flight.get(name, 0) + 1
+        try:
+            yield
         finally:
             with self._lock:
-                left = self._in_flight.pop(hotkey) - 1
+                left = self._in_flight.pop(name) - 1
                 if left:
-                    self._in_flight[hotkey] = left
+                    self._in_flight[name] = left
 
     def _buy(self, tool: str, op: catalog.Operation, max_ask: int, private: bool, tab: str, hotkey: str,
              url: str, headers: Mapping[str, str], payload: bytes) -> Dict[str, Any]:
@@ -369,7 +390,7 @@ class ToolMarket:
                 break
             owed_cap = book.owed_microusd(op, op.max_units, ask.ask_microusd)
             if ask.ask_microusd > max_ask or (private and not self._private(tool, ask)) \
-                    or owed_cap > ask.remaining_microusd or ask.miner_hotkey == hotkey:
+                    or owed_cap > ask.remaining_microusd:
                 continue  # known from the book: no reserve could succeed
             attempts += 1
             call_id = self._new_id()
@@ -416,13 +437,13 @@ class ToolMarket:
             raise ToolMarketError(502, "vendor_unreachable", call_id=call_id) from None
         document = _document(response.body)
         status = op.status(response.status, document)
-        failure = book.key_failure(status)
-        # A 429, Retry-After or not, is the key's limit (its miner's account),
-        # not the buyer's, so another key may serve. A 403 only skips the key.
-        if failure is not None or status in (403, 429):
+        # 401 and 402 may mean the key is unusable. A 429, Retry-After or not,
+        # is the key's limit (its miner's account), not the buyer's, so
+        # another key may serve; a 403 only skips the key.
+        if status in (401, 402, 403, 429):
             settle("skipped", status)  # the real status, also when a 2xx body reported it
-            if failure is not None:
-                self._key_failed(op.tool, ask, status, failure)
+            if status in (401, 402):
+                self._key_failed(op.tool, ask, status)
             return None
         units = op.units(status, document)
         charge = 0
@@ -458,7 +479,7 @@ class ToolMarket:
         self._store.record_key_event(key_id=key_id, status=checked["status"], reason=checked.get("reason"))
         return checked
 
-    def _key_failed(self, tool: str, ask: book.Ask, status: int, failure: str) -> None:
+    def _key_failed(self, tool: str, ask: book.Ask, status: int) -> None:
         """A call answered as if the key were unusable. A buyer shapes the
         request, so the answer alone does not always take a key out:
 
@@ -478,7 +499,8 @@ class ToolMarket:
                 return  # unknown, or already recorded as invalid
             confirmed = checked.get("balance") is None
         if confirmed:
-            self._store.record_key_event(key_id=ask.key_id, status="invalid", reason=failure)
+            self._store.record_key_event(key_id=ask.key_id, status="invalid",
+                                         reason="unauthorized" if status == 401 else "no_credit")
 
     def _private(self, tool: str, ask: book.Ask) -> bool:
         """A key that may serve a private call: its miner signed a private-supply

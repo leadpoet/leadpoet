@@ -47,11 +47,6 @@ def test_cheapest_ask_first_and_earlier_wins_a_tie():
     assert [a.key_id for a in book.rank(asks)] == ["b", "a", "c"]
 
 
-def test_key_failures_and_rate_limits():
-    assert book.key_failure(402) == "no_credit" and book.key_failure(401)
-    assert not any(book.key_failure(s) for s in (400, 403, 429))
-
-
 def test_get_operations_send_only_listed_params():
     url, headers, body = ZB.build({"email": "ada@acme.com", "ip_address": "1.2.3.4"})
     parts = urlsplit(url)

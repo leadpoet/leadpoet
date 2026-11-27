@@ -505,11 +505,22 @@ def test_keys_without_room_for_a_call_do_not_use_up_its_attempts(world):
 
 def test_an_answer_the_gateway_cannot_send_back_is_free(world):
     world.miner_key("odd-answer", 900_000, tool="exa")
-    world.vendor.script["odd-answer"] = [ProviderResponse(
-        200, {"content-type": "application/json"}, b'{"costDollars":{"total":0.005},"results":[{"score":NaN}]}')]
+    cost = b'{"costDollars":{"total":0.005},"results":'
+    world.vendor.script["odd-answer"] = [
+        ProviderResponse(200, {"content-type": "application/json"}, cost + b'[{"score":NaN}]}'),
+        ProviderResponse(200, {"content-type": "application/json"}, cost + b"[" * 100 + b"]" * 100 + b"}")]
     _, token = world.buyer()
-    result = world.market.call(token, SEARCH)
-    assert result["body"] is None and result["charge_microusd"] == 0  # unknown usage: the miner bears it
+    for _ in range(2):
+        result = world.market.call(token, SEARCH)
+        assert result["body"] is None and result["charge_microusd"] == 0  # unknown usage: the miner bears it
+
+
+def test_a_miner_checks_one_key_at_a_time(world):
+    miner, key_id = world.miner_key("one-check", 10_000, tool="zerobounce")
+    world.market._in_flight["check:" + miner] = 1  # a registration or check still waiting on the vault
+    with pytest.raises(ToolMarketError) as busy:
+        world.market.check_key(world.who(miner), key_id)
+    assert (busy.value.status, busy.value.code) == (429, "check_in_flight")
 
 
 def test_a_buyer_who_keeps_causing_unknown_usage_is_stopped(world):

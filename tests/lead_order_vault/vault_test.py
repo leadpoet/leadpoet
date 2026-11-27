@@ -874,7 +874,10 @@ def test_any_deepline_tool_works_without_a_vault_change():
 
 def test_every_request_the_broker_sends_fits_the_vault():
     from lab_arena.lead_orders import broker
-    from lead_order_vault.vault import _route_allowed
+    from lead_order_vault.tools import TOOLS
+
+    def _route_allowed(provider, method, path, query):
+        return TOOLS[provider].route(method, path, query)
 
     assert _route_allowed("openrouter", "POST", "/" + broker.OPENROUTER_CHAT_PATH, "")
     assert _route_allowed("openrouter", "POST", "/" + broker.OPENROUTER_DECISIONS_PATH, "")

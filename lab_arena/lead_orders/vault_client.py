@@ -24,7 +24,8 @@ import httpx
 from lab_arena import broker as arena_broker
 from lab_arena.broker import ProviderResponse, ProviderTransportError
 from lead_order_vault import trust
-from lead_order_vault.envelope import CALLER_HEADER, CHECK_TIMEOUT_SECONDS as _VAULT_PROBE_SECONDS, HOSTS
+from lead_order_vault.envelope import CALLER_HEADER, CHECK_TIMEOUT_SECONDS as _VAULT_PROBE_SECONDS
+from lead_order_vault.tools import HOSTS
 
 # Time for the vault itself on top of the provider's own timeout.
 VAULT_OVERHEAD_SECONDS = 15.0

@@ -31,7 +31,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from .tools import HOSTS, TOOLS
+from .tools import TOOLS
 
 PREFIX = "lov1."
 # One entry per tool in tools.py; lead orders use OpenRouter and Deepline.

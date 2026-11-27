@@ -8,7 +8,7 @@ asked at $0.01 the buyer pays $0.011 and the miner is owed $0.01.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List, Mapping, Optional
+from typing import Iterable, List, Mapping
 
 from lab_arena.tool_market.catalog import Operation
 
@@ -60,16 +60,9 @@ def rank(asks: Iterable[Ask]) -> List[Ask]:
     return sorted(asks, key=lambda a: (a.demoted, a.ask_microusd, a.ask_sequence))
 
 
-def key_failure(status: int) -> Optional[str]:
-    """A vendor answer that says the key itself is unusable, not the request."""
-
-    return {401: "unauthorized", 402: "no_credit"}.get(int(status))
-
-
 __all__ = [
     "Ask",
     "charge_microusd",
-    "key_failure",
     "owed_microusd",
     "rank",
 ]

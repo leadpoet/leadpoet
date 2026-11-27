@@ -197,6 +197,10 @@ def _zerobounce_cost(document: Any) -> Optional[int]:
     return None if not isinstance(result, str) else 0 if result == "unknown" else 1
 
 
+def _findymail_status(status: int, _: Any) -> int:
+    return 401 if status == 423 else status
+
+
 def _prospeo_status(status: int, document: Any) -> int:
     code = _get(document, "error_code")
     return {"INSUFFICIENT_CREDITS": 402, "INVALID_API_KEY": 401}.get(code, status) if isinstance(code, str) else status
@@ -242,11 +246,10 @@ _OPERATIONS: Sequence[Operation] = (
     # Findymail: one credit per email found. 423 is a paused account, which no free check sees, so it counts as a bad key.
     Operation("findymail", "find_from_linkedin", "POST", "https://app.findymail.com/api/search/business-profile",
               UNIT_CALL, 1, {"linkedin_url": _URL}, cost=_found_email("contact", "email"),
-              real_status=lambda status, _: 401 if status == 423 else status,
-              does="Find a person's work email from their LinkedIn URL."),
+              real_status=_findymail_status, does="Find a person's work email from their LinkedIn URL."),
     Operation("findymail", "find_from_name", "POST", "https://app.findymail.com/api/search/name", UNIT_CALL, 1,
               {"name": Param("str", required=True, max_length=200), "domain": Param("str", required=True, max_length=253)},
-              cost=_found_email("contact", "email"), real_status=lambda status, _: 401 if status == 423 else status,
+              cost=_found_email("contact", "email"), real_status=_findymail_status,
               does="Find a person's work email from their name and company domain."),
     # Hunter: one search per email found. Its 403 is a rate limit and its
     # 429 an empty account.

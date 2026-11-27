@@ -1024,3 +1024,22 @@ def test_a_busy_chain_still_lets_the_stored_balance_pay(world):
     finally:
         for _ in range(market_module.CHAIN_READS):
             world.market._chain_reads.release()
+
+
+def test_a_busy_chain_mid_failover_says_retry_not_top_up(world):
+    world.miner_key("mid-cheap", 9_000)
+    world.miner_key("mid-pricier", 10_000)  # 11,000 a call
+    world.vendor.script["mid-cheap"] = [ok({}, status=429)]
+    buyer = hotkey()
+    world.gamma.units[buyer] = 10_000 * 1000
+    world.market.gamma_balance(buyer)  # stored: enough for the cheap key only
+    world.gamma.units[buyer] = 50_000 * 1000  # more on chain, unread while the chain is busy
+    for _ in range(market_module.CHAIN_READS):
+        world.market._chain_reads.acquire()
+    try:
+        with pytest.raises(ToolMarketError) as busy:
+            world.market.call("", PROFILE, world.who(buyer))
+        assert (busy.value.status, busy.value.code) == (503, "gamma_unavailable")
+    finally:
+        for _ in range(market_module.CHAIN_READS):
+            world.market._chain_reads.release()

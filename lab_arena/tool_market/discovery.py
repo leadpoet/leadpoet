@@ -71,7 +71,7 @@ def openapi(config: ToolMarketConfig) -> Dict[str, Any]:
                     "oneOf": [_operation_schema(op) for op in operations]}}}},
                 "responses": {
                     "200": {"description": "The vendor's answer: call_id, status, body and charge_microusd."},
-                    "402": dict(error, description="insufficient_balance: spend more Gamma; nothing was done."),
+                    "402": dict(error, description="insufficient_balance: spend more Gamma; nothing was charged."),
                     "401": dict(error, description="A btauth/1 problem, named by the error code."),
                     "429": dict(error, description="Too many calls in flight or uncertain for this hotkey."),
                     "503": dict(error, description="No key can serve the call now (no_supply), or the chain "

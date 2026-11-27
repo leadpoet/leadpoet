@@ -218,7 +218,7 @@ async def gamma_balance(request: Request, hotkey: str = "") -> Response:
 @router.post("/tool-market/call")
 async def call(request: Request) -> Response:
     signed = support.btauth.VERSION_HEADER in request.headers
-    token = "" if signed else _bearer(request)
+    token = _bearer(request)  # empty when signed: btauth/1 refuses an Authorization header
     return await _handle(request, lambda m, who, body: m.call(token, _json(body), who), signed=signed,
                          limiter=_call_threads)
 

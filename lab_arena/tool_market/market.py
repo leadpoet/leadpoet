@@ -474,7 +474,7 @@ class ToolMarket:
                 return self._buy(tool, op, max_ask, private, tab, hotkey, url, headers, payload, asks)
             except ToolMarketError as error:
                 if error.code == "tab_budget":  # the tab is this call's share of the balance
-                    raise ToolMarketError(402, "insufficient_balance") from None
+                    raise unread or ToolMarketError(402, "insufficient_balance") from None
                 raise
             finally:
                 try:

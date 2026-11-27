@@ -9,8 +9,8 @@ A request carries ``X-Bittensor-Version: 1``, ``X-Bittensor-Hotkey``,
 
 (https://www.bittensor.com/docs/guides/signed-requests). A nonce older than
 10 s or more than 2 s ahead is refused, and each (hotkey, nonce) pair is
-accepted once. Only sr25519 hotkeys sign: a request naming another scheme
-in ``X-Bittensor-Crypto`` is refused, never verified another way.
+accepted once. Only sr25519 hotkeys sign and the scheme is implied: a
+request that sets ``X-Bittensor-Crypto`` is refused, never verified another way.
 """
 
 from __future__ import annotations

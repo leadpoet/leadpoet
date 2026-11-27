@@ -63,7 +63,7 @@ calculation](gamma-tool-market-economics.md).
    with the service hotkey as receiver). Each call holds at most what it
    can cost against the balance, then settles to the real charge. A
    balance that cannot cover the call is `402 insufficient_balance`, and
-   nothing is sent. The market tries keys cheapest first, with equal
+   nothing is charged. The market tries keys cheapest first, with equal
    prices in ask order: it reserves on up to 10 asks and sends to up to 3
    keys. With `max_ask_microusd`, no key asking more serves the call.
 5. **Or open a tab (an API key)**, for a client that cannot sign each
@@ -352,7 +352,7 @@ All tool-market data is in `scripts/770-tool-market.sql`.
 | `LEADPOET_TOOL_MARKET_GAMMA_SERVICE` | the tool market's Gamma service SS58 hotkey; must differ from lead orders' |
 | `LEADPOET_TOOL_MARKET_TERMS_VERSION` | the terms both sides sign: `tool-market-terms-v1`, whose SHA-256 of `docs/tool-market-terms.md`'s exact bytes is in `PUBLISHED_TERMS` in `config.py`; live mode refuses any other version |
 | `LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL` | the https host every signed request names, and the base of the services document's urls |
-| `LAB_ARENA_NETUID` | the subnet whose Gamma counts; 71 by default |
+| `LAB_ARENA_NETUID` | must be 71, the default; the build refuses any other value |
 
 It reuses the Arena store and chain settings, and the key vault
 deployment, exactly as lead orders do.

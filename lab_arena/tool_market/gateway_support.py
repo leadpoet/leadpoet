@@ -1,9 +1,9 @@
 """The one tool-market surface the public gateway imports.
 
 Keeps the gateway's reviewed ``lab_arena`` import contract to a single
-binding (tests/lab_arena/test_lab_arena_boundary.py). Production wiring,
-which pulls in the chain and the vault client, is imported only when the
-mode is ``live``.
+binding (tests/lab_arena/test_lab_arena_boundary.py). Production wiring
+(the store transport, chain connection and vault trust) is built only when
+the mode is ``live``.
 """
 
 from __future__ import annotations

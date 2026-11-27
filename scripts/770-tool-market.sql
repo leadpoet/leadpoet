@@ -27,6 +27,15 @@ $prereq770$;
 -- Tables
 -- ---------------------------------------------------------------------------
 
+-- One cumulative Gamma namespace funds this ledger for its entire lifetime.
+CREATE TABLE public.tool_market_gamma_source (
+  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton),
+  genesis TEXT NOT NULL CHECK(genesis ~ '^0x[0-9a-f]{64}$'),
+  netuid INTEGER NOT NULL CHECK(netuid BETWEEN 1 AND 65535),
+  service TEXT NOT NULL CHECK(service ~ '^[1-9A-HJ-NP-Za-km-z]{46,48}$'),
+  registered_at BIGINT NOT NULL CHECK(registered_at>0)
+);
+
 CREATE TABLE public.tool_market_gamma_readings (
   reading_id BIGSERIAL PRIMARY KEY,
   hotkey TEXT NOT NULL CHECK(hotkey ~ '^[1-9A-HJ-NP-Za-km-z]{46,48}$'),
@@ -164,7 +173,7 @@ CREATE TABLE public.tool_market_call_settlements (
 DO $tables770$
 DECLARE t TEXT;
 BEGIN
- FOREACH t IN ARRAY ARRAY['tool_market_gamma_readings','tool_market_nonces','tool_market_terms','tool_market_keys',
+ FOREACH t IN ARRAY ARRAY['tool_market_gamma_source','tool_market_gamma_readings','tool_market_nonces','tool_market_terms','tool_market_keys',
    'tool_market_key_revocations','tool_market_key_events','tool_market_asks','tool_market_tabs',
    'tool_market_tab_closures','tool_market_calls','tool_market_call_settlements'] LOOP
   EXECUTE format('ALTER TABLE public.%I OWNER TO lab_arena_owner',t);
@@ -285,11 +294,39 @@ BEGIN
 END;
 $balance770$;
 
+CREATE FUNCTION public.tool_market_bind_gamma_source_v1(
+ p_genesis TEXT,p_netuid INTEGER,p_service TEXT,p_registered_at BIGINT)
+RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $bind770$
+DECLARE actual public.tool_market_gamma_source;
+BEGIN
+ -- Only startup calls this RPC. The singleton cannot be updated or deleted.
+ PERFORM public.tool_market__lock_v1('gamma','source');
+ SELECT * INTO actual FROM public.tool_market_gamma_source WHERE singleton;
+ IF NOT FOUND THEN
+  IF EXISTS(SELECT FROM public.tool_market_gamma_readings) OR EXISTS(SELECT FROM public.tool_market_tabs) THEN
+   RAISE EXCEPTION 'unbound Gamma ledger requires reconciliation' USING ERRCODE='55000';
+  END IF;
+  INSERT INTO public.tool_market_gamma_source(genesis,netuid,service,registered_at)
+   VALUES(p_genesis,p_netuid,p_service,p_registered_at);
+ ELSIF (actual.genesis,actual.netuid,actual.service,actual.registered_at)
+   IS DISTINCT FROM (p_genesis,p_netuid,p_service,p_registered_at) THEN
+  RAISE EXCEPTION 'Gamma credit source differs' USING ERRCODE='55000';
+ END IF;
+ RETURN TRUE;
+END;
+$bind770$;
+
 CREATE FUNCTION public.tool_market_record_gamma_reading_v1(
- p_hotkey TEXT,p_block_number BIGINT,p_block_hash TEXT,p_units NUMERIC,p_available BOOLEAN)
+ p_hotkey TEXT,p_block_number BIGINT,p_block_hash TEXT,p_units NUMERIC,p_available BOOLEAN,
+ p_genesis TEXT,p_netuid INTEGER,p_service TEXT,p_registered_at BIGINT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $reading770$
 DECLARE prior public.tool_market_gamma_readings; latest public.tool_market_gamma_readings;
 BEGIN
+ IF NOT EXISTS (SELECT FROM public.tool_market_gamma_source g WHERE
+   (g.genesis,g.netuid,g.service,g.registered_at)=(p_genesis,p_netuid,p_service,p_registered_at)
+   AND p_block_number>=g.registered_at) THEN
+  RAISE EXCEPTION 'invalid Gamma credit source' USING ERRCODE='55000';
+ END IF;
  -- Finalized readings and tab openings for one buyer share the same lock.
  PERFORM public.tool_market__lock_v1('buyer',p_hotkey);
  SELECT * INTO latest FROM public.tool_market_gamma_readings WHERE hotkey=p_hotkey

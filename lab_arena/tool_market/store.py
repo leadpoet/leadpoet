@@ -13,10 +13,13 @@ from lab_arena.store import StoreTransport
 
 _T, _U, _I, _B, _N, _BOOL = "text", "uuid", "integer", "bigint", "numeric", "boolean"
 
+_SOURCE = (("p_genesis", _T), ("p_netuid", _I), ("p_service", _T), ("p_registered_at", _B))
+
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
+    "tool_market_bind_gamma_source_v1": _SOURCE,
     "tool_market_record_gamma_reading_v1": (
         ("p_hotkey", _T), ("p_block_number", _B), ("p_block_hash", _T), ("p_units", _N), ("p_available", _BOOL),
-    ),
+    ) + _SOURCE,
     "tool_market_use_nonce_v1": (("p_hotkey", _T), ("p_signature_hash", _T), ("p_signed_at", _B)),
     "tool_market_accept_terms_v1": (
         ("p_role", _T), ("p_hotkey", _T), ("p_version", _T), ("p_terms_sha256", _T), ("p_host", _T),
@@ -67,14 +70,23 @@ class ToolMarketStore:
     def __init__(self, transport: StoreTransport) -> None:
         register_rpc_signatures()
         self._t = transport
+        self._gamma_source = None
 
     def _rpc(self, function: str, **params: Any) -> Any:
         return self._t.rpc(function, params)
 
     # Buyers -----------------------------------------------------------------
+    def bind_gamma_source(self, *, genesis: str, netuid: int, service: str, registered_at: int) -> None:
+        source = dict(p_genesis=genesis, p_netuid=netuid, p_service=service, p_registered_at=registered_at)
+        if self._rpc("tool_market_bind_gamma_source_v1", **source) is not True:
+            raise arena_store.ArenaStoreError("Gamma credit source unverified")
+        self._gamma_source = source
+
     def record_gamma_reading(self, *, hotkey: str, block_number: int, block_hash: str, spent_units: int,
                              available: bool) -> Dict[str, Any]:
-        return self._rpc("tool_market_record_gamma_reading_v1", p_hotkey=hotkey, p_block_number=int(block_number),
+        if self._gamma_source is None:
+            raise arena_store.ArenaStoreError("Gamma credit source unverified")
+        return self._rpc("tool_market_record_gamma_reading_v1", **self._gamma_source, p_hotkey=hotkey, p_block_number=int(block_number),
                          p_block_hash=block_hash, p_units=str(int(spent_units)), p_available=bool(available))
 
     def use_nonce(self, *, hotkey: str, signature_hash: str, signed_at: int) -> bool:

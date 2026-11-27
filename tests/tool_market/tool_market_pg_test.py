@@ -82,7 +82,9 @@ def store(database):
         return connection
 
     transport = PsycopgTransport(connect, role="lab_arena_service")
-    yield ToolMarketStore(transport)
+    bound = ToolMarketStore(transport)
+    bound.bind_gamma_source(genesis="0x" + "00" * 32, netuid=71, service="5" * 48, registered_at=1)
+    yield bound
     transport.close()
 
 
@@ -140,7 +142,7 @@ class World:
     def __init__(self, store):
         self.terms = uuid.uuid4().hex + uuid.uuid4().hex
         self.config = ToolMarketConfig(mode="live", tools=frozenset({"harvestapi", "exa", "zerobounce", "hunter"}),
-                                       gamma_service=hotkey(), terms_version="v1", terms_sha256=self.terms,
+                                       gamma_service="5" * 48, terms_version="v1", terms_sha256=self.terms,
                                        public_base_url="https://gw.example")
         self.vault = FakeVault()
         self.vendor = FakeVendor(self.vault)

@@ -17,13 +17,14 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from lab_arena.broker import ProviderResponse
+from lab_arena.chain import ArenaChainError
 from lab_arena.lead_orders.auth import BuyerIdentity
 from lab_arena.lead_orders.gamma import GammaReading
 from lab_arena.lead_orders.vault_client import VaultTransportError
 from lab_arena.store import ArenaStoreError, PsycopgTransport
 from lab_arena.tool_market import market as market_module
 from lab_arena.tool_market.config import ToolMarketConfig
-from lab_arena.tool_market.market import ATTESTATION, ToolMarket, ToolMarketError, token_hash
+from lab_arena.tool_market.market import ATTESTATION, ToolMarket, ToolMarketError
 from lab_arena.tool_market.store import ToolMarketStore
 from lead_order_vault import envelope as vault_envelope
 from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
@@ -375,14 +376,51 @@ def test_a_key_stops_trading_at_its_daily_cap(world):
     assert capped.value.code == "no_supply"
 
 
-def test_a_stale_check_is_repeated_before_the_key_is_used(world, monkeypatch):
-    monkeypatch.setattr(market_module, "CHECK_MAX_AGE_SECONDS", 0)
-    world.miner_key("stale-key", 9_000)
-    world.miner_key("fresh-key", 10_000)
+def test_a_key_that_died_since_its_check_is_found_by_its_first_call(world):
+    miner, _ = world.miner_key("died-key", 9_000, tool="zerobounce")
+    world.miner_key("live-key", 10_000, tool="zerobounce")
     _, token = world.buyer()
-    world.vault.answers["stale-key"] = {"status": "invalid", "reason": "harvestapi_api_key_no_credit"}
-    assert world.market.call(token, PROFILE)["charge_microusd"] == 11_000
-    assert [s[0] for s in world.vendor.sent] == ["fresh-key"]
+    world.vendor.script["died-key"] = [ok({"error": "Invalid API key or your account ran out of credits"})]
+    world.vault.answers["died-key"] = {"status": "invalid", "reason": "zerobounce_api_key_no_credit"}
+    assert world.market.call(token, VALIDATE)["charge_microusd"] == 0  # live key, no status: unknown, free
+    assert [s[0] for s in world.vendor.sent] == ["died-key", "live-key"]
+    assert world.market.statement(miner)["keys"][0]["health"]["status"] == "invalid"
+    world.market.call(token, VALIDATE)
+    assert world.vendor.sent[-1][0] == "live-key"  # out of the book, never tried again
+
+
+def test_a_buyer_who_keeps_causing_unknown_usage_is_stopped(world):
+    miner, _ = world.miner_key("drained-key", 10_000)
+    _, token = world.buyer()
+    world.vendor.script["drained-key"] = [VaultTransportError("response_too_large", forwarded=True)]
+    for _ in range(20):
+        with pytest.raises(ToolMarketError) as unknown:
+            world.market.call(token, PROFILE)
+        assert unknown.value.code == "vendor_unreachable"
+    with pytest.raises(ToolMarketError) as stopped:
+        world.market.call(token, PROFILE)
+    assert (stopped.value.status, stopped.value.code) == (429, "uncertain_limit") and len(world.vendor.sent) == 20
+    world.miner_key("other-tool-key", 900_000, tool="exa")
+    assert world.market.call(token, SEARCH)["status"] == 200  # other tools are not stopped
+    _, other = world.buyer()
+    with pytest.raises(ToolMarketError) as fine:
+        world.market.call(other, PROFILE)  # nor are other buyers
+    assert fine.value.code == "vendor_unreachable"
+
+
+def test_calls_in_flight_count_toward_the_unknown_usage_limit(world):
+    world.miner_key("busy-key", 10)
+    _, token = world.buyer()
+    tab = market_module.token_hash(token)
+    key_id = world.store.book(tool="harvestapi", terms_sha256=world.terms)[0]["key_id"]
+
+    def reserve():
+        return world.store.reserve_call(call_id=str(uuid.uuid4()), token_hash=tab, tool="harvestapi",
+                                        operation="linkedin_profile", key_id=key_id, ask_microusd=10,
+                                        reserve_microusd=11, owed_cap_microusd=10)
+
+    assert [reserve() for _ in range(20)] == ["reserved"] * 20  # none has settled yet
+    assert reserve() == "uncertain_limit"
 
 
 def test_a_settlement_cannot_charge_more_than_its_reserve_or_settle_twice(world):
@@ -391,7 +429,7 @@ def test_a_settlement_cannot_charge_more_than_its_reserve_or_settle_twice(world)
     call_id = world.market.call(token, PROFILE)["call_id"]
     assert world.store.settle_call(call_id=call_id, status="settled", http_status=200, units=1, owed_microusd=1,
                                    charge_microusd=1, epoch=7) == "exists"
-    reserve = world.store.book(tool="harvestapi", terms_sha256=world.terms, check_max_age_seconds=3600)[0]
+    reserve = world.store.book(tool="harvestapi", terms_sha256=world.terms)[0]
     other = str(uuid.uuid4())
     assert world.store.reserve_call(call_id=other, token_hash=market_module.token_hash(token), tool="harvestapi",
                                     operation="linkedin_profile", key_id=reserve["key_id"], ask_microusd=10_000,
@@ -564,11 +602,12 @@ def test_the_epoch_is_read_before_any_vendor_request(world):
     _, token = world.buyer()
 
     def chain_down():
-        raise RuntimeError("chain unavailable")
+        raise ArenaChainError("chain unavailable")
 
     world.market._epoch = chain_down
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ToolMarketError) as down:
         world.market.call(token, PROFILE)
+    assert (down.value.status, down.value.code) == (503, "chain_unavailable")
     assert world.vendor.sent == [] and world.market.tab(token)["calls"] == 0
 
 

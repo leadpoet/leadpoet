@@ -56,8 +56,6 @@ class Ask:
     envelope: str
     ask_microusd: int
     ask_sequence: int
-    # A key whose vendor has a free balance check and whose last check is old.
-    needs_check: bool = False
     # Rate-limited in the last minute, or unreliable in the last hour.
     demoted: bool = False
 
@@ -65,7 +63,7 @@ class Ask:
     def from_row(cls, row: Mapping) -> "Ask":
         return cls(key_id=str(row["key_id"]), miner_hotkey=str(row["miner_hotkey"]), envelope=str(row["envelope"]),
                    ask_microusd=int(row["ask_microusd"]), ask_sequence=int(row["ask_sequence"]),
-                   needs_check=bool(row.get("needs_check")), demoted=bool(row.get("demoted")))
+                   demoted=bool(row.get("demoted")))
 
 
 def rank(asks: Iterable[Ask]) -> List[Ask]:

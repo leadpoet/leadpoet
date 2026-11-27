@@ -8,7 +8,6 @@ unless it is named there.
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 from typing import FrozenSet, Mapping, Optional
 from urllib.parse import urlsplit
@@ -30,9 +29,6 @@ PUBLIC_BASE_URL_ENV = "LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL"
 MODE_OFF = "off"
 MODE_LIVE = "live"
 
-# A key with a free balance check is re-checked before use once its last
-# check is older than this.
-CHECK_MAX_AGE_SECONDS = 6 * 3600
 MAX_TAB_SECONDS = 24 * 3600
 MAX_TAB_MICROUSD = 1_000_000_000  # $1,000
 # Low at launch: what one key may earn in 24 h. Raising it is a code change.
@@ -113,7 +109,6 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
 
 
 __all__ = [
-    "CHECK_MAX_AGE_SECONDS",
     "MAX_KEY_DAILY_CAP_MICROUSD",
     "MAX_TAB_MICROUSD",
     "MAX_TAB_SECONDS",

@@ -37,7 +37,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "tool_market_revoke_key_v1": (("p_key_id", _U), ("p_hotkey", _T), ("p_reason", _T)),
     "tool_market_record_key_event_v1": (("p_key_id", _U), ("p_status", _T), ("p_reason", _T), ("p_balance", _N)),
     "tool_market_post_ask_v1": (("p_key_id", _U), ("p_hotkey", _T), ("p_ask", _B)),
-    "tool_market_book_v1": (("p_tool", _T), ("p_terms_sha256", _T), ("p_check_max_age_seconds", _I)),
+    "tool_market_book_v1": (("p_tool", _T), ("p_terms_sha256", _T)),
     "tool_market_reserve_call_v1": (
         ("p_call_id", _U), ("p_token_hash", _T), ("p_tool", _T), ("p_operation", _T), ("p_key_id", _U),
         ("p_ask", _B), ("p_reserve", _B), ("p_owed_cap", _B),
@@ -125,9 +125,8 @@ class ToolMarketStore:
         return self._rpc("tool_market_post_ask_v1", p_key_id=key_id, p_hotkey=hotkey,
                          p_ask=None if ask_microusd is None else int(ask_microusd))
 
-    def book(self, *, tool: str, terms_sha256: str, check_max_age_seconds: int) -> List[Dict[str, Any]]:
-        return list(self._rpc("tool_market_book_v1", p_tool=tool, p_terms_sha256=terms_sha256,
-                              p_check_max_age_seconds=int(check_max_age_seconds)) or [])
+    def book(self, *, tool: str, terms_sha256: str) -> List[Dict[str, Any]]:
+        return list(self._rpc("tool_market_book_v1", p_tool=tool, p_terms_sha256=terms_sha256) or [])
 
     def statement(self, hotkey: str) -> Dict[str, Any]:
         return self._rpc("tool_market_statement_v1", p_hotkey=hotkey)

@@ -192,19 +192,33 @@ ALTER SEQUENCE public.tool_market_calls_sequence_seq OWNER TO lab_arena_owner;
 -- can no longer settle.
 CREATE FUNCTION public.tool_market__open_seconds_v1() RETURNS INTEGER LANGUAGE sql IMMUTABLE AS $$ SELECT 600 $$;
 
--- What a call holds: its charge once settled, its reserve while young and
--- open, nothing after that.
-CREATE FUNCTION public.tool_market__held_v1(p_call public.tool_market_calls)
-RETURNS BIGINT LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $held770$
- SELECT coalesce((SELECT s.charge_microusd FROM public.tool_market_call_settlements s WHERE s.call_id=p_call.call_id),
-  CASE WHEN p_call.opened_at>clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1())
-   THEN p_call.reserve_microusd ELSE 0 END);
-$held770$;
-
+-- What a tab's calls hold: each its charge once settled, its reserve while
+-- young and open, nothing after that. One join, so a long tab stays cheap.
 CREATE FUNCTION public.tool_market__committed_v1(p_tab_id UUID)
 RETURNS BIGINT LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $committed770$
- SELECT coalesce(sum(public.tool_market__held_v1(c)),0)::BIGINT FROM public.tool_market_calls c WHERE c.tab_id=p_tab_id;
+ SELECT coalesce(sum(coalesce(s.charge_microusd,
+   CASE WHEN c.opened_at>clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1())
+    THEN c.reserve_microusd ELSE 0 END)),0)::BIGINT
+ FROM public.tool_market_calls c LEFT JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
+ WHERE c.tab_id=p_tab_id;
 $committed770$;
+
+-- A buyer's calls to one tool in the last hour that the miner may bear:
+-- settled with unknown usage, or still in flight (each may end that way).
+-- A buyer can cause unknown usage (a timeout, an oversized answer), so at 20
+-- the buyer's next call to that tool is refused. Counting calls in flight
+-- keeps a burst of parallel calls inside the limit. Per tool, so one
+-- vendor's outage does not stop a buyer's other tools. Tabs live at most a
+-- day, so older tabs are skipped.
+CREATE FUNCTION public.tool_market__buyer_uncertain_v1(p_hotkey TEXT,p_tool TEXT)
+RETURNS BIGINT LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $uncertain770$
+ SELECT count(*) FROM public.tool_market_tabs t JOIN public.tool_market_calls c ON c.tab_id=t.tab_id
+  LEFT JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
+ WHERE t.hotkey=p_hotkey AND t.opened_at>clock_timestamp()-interval '25 hours' AND c.tool=p_tool
+  AND c.opened_at>clock_timestamp()-interval '1 hour'
+  AND (s.status='uncertain' OR (s.call_id IS NULL
+   AND c.opened_at>clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1())));
+$uncertain770$;
 
 CREATE FUNCTION public.tool_market__tab_open_v1(p_tab public.tool_market_tabs)
 RETURNS BOOLEAN LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $open770$
@@ -430,27 +444,23 @@ $ask770$;
 
 -- The tool's tradeable supply. A key trades while it is listed, its miner
 -- accepted the current terms, its latest ask is a price, its latest event
--- is valid or unchecked, and its last 24 h are under its daily cap.
--- ``needs_check``: its vendor has a free check (it was last ``valid``) and
--- that check is older than ``p_check_max_age_seconds``.
-CREATE FUNCTION public.tool_market_book_v1(p_tool TEXT,p_terms_sha256 TEXT,p_check_max_age_seconds INTEGER)
+-- is valid or unchecked, and its last 24 h are under its daily cap. The
+-- caller ranks it (``book.rank``).
+CREATE FUNCTION public.tool_market_book_v1(p_tool TEXT,p_terms_sha256 TEXT)
 RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $book770$
  WITH keyed AS (
   SELECT k.key_id,k.miner_hotkey,k.envelope,k.key_fingerprint,k.daily_cap_microusd,
    (SELECT a FROM public.tool_market_asks a WHERE a.key_id=k.key_id ORDER BY a.ask_sequence DESC LIMIT 1) ask,
-   (SELECT e FROM public.tool_market_key_events e WHERE e.key_id=k.key_id ORDER BY e.event_id DESC LIMIT 1) event
+   (SELECT e.status FROM public.tool_market_key_events e WHERE e.key_id=k.key_id ORDER BY e.event_id DESC LIMIT 1) health
   FROM public.tool_market_keys k
   WHERE k.tool=p_tool AND public.tool_market__key_active_v1(k.key_id)
    AND EXISTS(SELECT 1 FROM public.tool_market_terms m WHERE m.role='miner' AND m.hotkey=k.miner_hotkey
     AND m.terms_sha256=p_terms_sha256))
  SELECT coalesce(jsonb_agg(jsonb_build_object('key_id',key_id,'miner_hotkey',miner_hotkey,'envelope',envelope,
    'key_fingerprint',key_fingerprint,'ask_microusd',(ask).ask_microusd,'ask_sequence',(ask).ask_sequence,
-   'needs_check',(event).status='valid'
-     AND (event).recorded_at<clock_timestamp()-make_interval(secs=>p_check_max_age_seconds),
-   'demoted',public.tool_market__key_demoted_v1(key_id))
-   ORDER BY (ask).ask_microusd,(ask).ask_sequence),'[]'::JSONB)
+   'demoted',public.tool_market__key_demoted_v1(key_id))),'[]'::JSONB)
  FROM keyed
- WHERE (ask).ask_microusd IS NOT NULL AND (event).status IN ('valid','unchecked')
+ WHERE (ask).ask_microusd IS NOT NULL AND health IN ('valid','unchecked')
   AND public.tool_market__key_day_v1(key_id)<daily_cap_microusd;
 $book770$;
 
@@ -475,6 +485,9 @@ BEGIN
  END IF;
  IF public.tool_market__committed_v1(tab.tab_id)+p_reserve>tab.budget_microusd THEN
   RETURN jsonb_build_object('status','tab_budget');
+ END IF;
+ IF public.tool_market__buyer_uncertain_v1(tab.hotkey,p_tool)>=20 THEN
+  RETURN jsonb_build_object('status','uncertain_limit');
  END IF;
  PERFORM public.tool_market__lock_v1('key',p_key_id::TEXT);
  SELECT * INTO k FROM public.tool_market_keys WHERE key_id=p_key_id AND tool=p_tool;

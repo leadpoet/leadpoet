@@ -126,13 +126,15 @@ Health events come from vault checks and from calls.
   skips the key. A 403 only skips it; the miner sees refusals in their
   statement.
 - A key goes to the back of its book, still in it, after a bare 429 in the
-  last minute or 3 answers of unknown usage (5xx, timeouts) in the last hour.
+  last minute, or in the last hour a 402 that did not fail it or 3 calls of
+  unknown usage (see Money).
 - A 429 with no `Retry-After` skips the key for this call only. Hunter's
   403 is its rate limit, so it counts as a 429. A 429 with
   `Retry-After` goes back to the buyer.
-- A key whose vendor has a free check is checked again before use once its
-  last check is older than 6 hours, at most once a minute per key. This
-  needs no cron job. The once-a-minute spacing is per gateway process.
+- A key is checked when it is listed and after a 402, at most once a minute
+  per key in each gateway process. There is no scheduled re-check: a key
+  that dies in between is found by its next call, which moves to the next
+  key and costs the buyer nothing.
 - After topping up a failed key, the miner calls
   `POST /tool-market/keys/{id}/check` to put it back in the book.
 
@@ -196,6 +198,11 @@ All amounts are integer micro-USD.
   the miner is owed nothing. The miner bears that risk.
   - A request that may have reached the vendor is never retried on another
     key, so it cannot be used twice.
+  - A buyer shapes some of these, such as an answer too large to return.
+    So a buyer has at most 20 calls to one tool, across all their tabs, that
+    are in flight or ended with unknown usage in the last hour. Past that,
+    calls to that tool are refused (`429 uncertain_limit`); other tools are
+    not affected. This also caps a buyer at 20 calls in flight per tool.
 - **Late answers:** a call still open after 10 minutes holds nothing and
   can no longer settle.
 
@@ -254,9 +261,12 @@ deployment, exactly as lead orders do.
   gets those keys. Removing an approval on Base does not stop a vault
   already running; its owner stops it.
 - **Exa's cost is an estimate.** Exa calls `costDollars` an estimate.
-- **Some keys cannot be checked first.** Exa and HarvestAPI have no free
-  key check, so a dead key is found by its first failed call. Hunter's
-  check proves the key but reads no balance.
+- **Some keys cannot be checked.** Exa and HarvestAPI have no free key
+  check, so a dead key is found by its first failed call. Hunter's check
+  proves the key but reads no balance.
+- **The book is read on every call.** It computes each key's last 24 h
+  and last hour from the call ledger. That is fine at launch volumes;
+  cache the public catalog and books before heavy anonymous traffic.
 - **HarvestAPI prices are unconfirmed.** Its per-endpoint prices are not
   published, so launch keeps only its two profile reads.
 - **No vault receipts for miners.** Calls do not yet keep the vault's

@@ -27,8 +27,8 @@ from lab_arena.lead_orders.gamma import GammaReadError
 from lab_arena.lead_orders.keys import json_document
 from lab_arena.lead_orders.vault_client import VaultTransportError, VaultUnavailable
 from lab_arena.tool_market import book, catalog
+from lab_arena.chain import ArenaChainError
 from lab_arena.tool_market.config import (
-    CHECK_MAX_AGE_SECONDS,
     MAX_KEY_DAILY_CAP_MICROUSD,
     MAX_TAB_MICROUSD,
     MAX_TAB_SECONDS,
@@ -203,8 +203,8 @@ class ToolMarket:
         """Check a key again, e.g. after topping up a key that ran out."""
 
         key = self._own_key(identity, key_id)
-        status = self._recheck(key["key_id"], key["tool"], key["envelope"])
-        return {"key_id": key["key_id"], "tradeable": status}
+        checked = self._recheck(key["key_id"], key["tool"], key["envelope"])
+        return {"key_id": key["key_id"], "tradeable": checked is not None and checked["status"] != "invalid"}
 
     def revoke_key(self, identity: BuyerIdentity, key_id: Any) -> Dict[str, Any]:
         key = self._own_key(identity, key_id)
@@ -287,18 +287,16 @@ class ToolMarket:
             raise ToolMarketError(401, "tab_unknown")
         tab = token_hash(token)
         # Read before any vendor request, so a chain outage cannot strand a paid answer.
-        epoch = int(self._epoch())
-        tried = checks = 0
+        try:
+            epoch = int(self._epoch())
+        except ArenaChainError:
+            raise ToolMarketError(503, "chain_unavailable") from None
+        tried = 0
         for ask in book.rank(book.Ask.from_row(row) for row in self._supply(tool)):
             if tried >= MAX_KEYS_PER_CALL:
                 break
             if ask.ask_microusd > max_ask or (private and not self._private(tool, ask)):
                 continue
-            if ask.needs_check:
-                checks += 1
-                if checks > MAX_KEYS_PER_CALL or not self._recheck_due(ask.key_id) \
-                        or not self._recheck(ask.key_id, tool, ask.envelope):
-                    continue
             call_id = self._new_id()
             status = self._store.reserve_call(
                 call_id=call_id, token_hash=tab, tool=tool, operation=op.name, key_id=ask.key_id,
@@ -308,6 +306,8 @@ class ToolMarket:
                 raise ToolMarketError(401, "tab_closed")
             if status == "tab_budget":
                 raise ToolMarketError(402, "tab_budget")
+            if status == "uncertain_limit":
+                raise ToolMarketError(429, "uncertain_limit")
             if status != "reserved":
                 continue
             tried += 1
@@ -351,14 +351,14 @@ class ToolMarket:
         else:
             owed = book.owed_microusd(op, units, ask.ask_microusd)
             # A call that settles too late holds nothing, so the buyer pays nothing.
-            if settle("settled", response.status, units=units, owed=owed, charge=book.charge_microusd(owed)):
-                charge = book.charge_microusd(owed)
+            charge = book.charge_microusd(owed)
+            if not settle("settled", response.status, units=units, owed=owed, charge=charge):
+                charge = 0
         return {"call_id": call_id, "status": response.status, "body": document, "charge_microusd": charge}
 
     # Helpers ----------------------------------------------------------------
     def _supply(self, tool: str):
-        return self._store.book(tool=tool, terms_sha256=self._config.terms_sha256,
-                                check_max_age_seconds=CHECK_MAX_AGE_SECONDS)
+        return self._store.book(tool=tool, terms_sha256=self._config.terms_sha256)
 
     def _check(self, tool: str, envelope: str) -> Mapping[str, Any]:
         try:
@@ -366,14 +366,8 @@ class ToolMarket:
         except VaultUnavailable as error:
             raise ToolMarketError(503 if error.retryable else 400, error.code) from None
 
-    def _recheck(self, key_id: str, tool: str, envelope: str) -> bool:
-        """Check a key with its vendor again and record it; True if it may trade."""
-
-        checked = self._recheck_answer(key_id, tool, envelope)
-        return checked is not None and checked["status"] != "invalid"
-
-    def _recheck_answer(self, key_id: str, tool: str, envelope: str) -> Optional[Mapping[str, Any]]:
-        """The vault's recorded check of a key, or None when it gave no answer."""
+    def _recheck(self, key_id: str, tool: str, envelope: str) -> Optional[Mapping[str, Any]]:
+        """Check a listed key with its vendor again and record the answer; None when the vault gave none."""
 
         try:
             checked = self._vault.check(provider=tool, envelope=envelope, management_envelope=None)
@@ -403,7 +397,7 @@ class ToolMarket:
         elif vault_tools.TOOLS[tool].balance_url is None or not self._recheck_due(ask.key_id):
             confirmed = False
         else:
-            checked = self._recheck_answer(ask.key_id, tool, ask.envelope)
+            checked = self._recheck(ask.key_id, tool, ask.envelope)
             if checked is None or checked["status"] == "invalid":
                 return  # unknown, or already recorded as invalid
             confirmed = checked.get("balance") is None
@@ -417,7 +411,7 @@ class ToolMarket:
         return ask.miner_hotkey in self._config.private_suppliers or catalog.REQUEST_PRIVACY[tool] == "private"
 
     def _recheck_due(self, key_id: str) -> bool:
-        """At most one vendor check per key a minute in this process, so a
+        """At most one failure check per key a minute in this process, so a
         burst of calls cannot hammer a miner's account."""
 
         now = time.monotonic()

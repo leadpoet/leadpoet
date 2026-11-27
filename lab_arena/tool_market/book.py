@@ -69,11 +69,10 @@ class Ask:
                    needs_check=bool(row.get("needs_check")))
 
 
-def rank(asks: Iterable[Ask], *, skip: Iterable[str] = ()) -> List[Ask]:
+def rank(asks: Iterable[Ask]) -> List[Ask]:
     """Cheapest first; an equal price goes to the earlier ask."""
 
-    skipped = set(skip)
-    return sorted((a for a in asks if a.key_id not in skipped), key=lambda a: (a.ask_microusd, a.ask_sequence))
+    return sorted(asks, key=lambda a: (a.ask_microusd, a.ask_sequence))
 
 
 def key_failure(status: int) -> Optional[str]:

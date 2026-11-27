@@ -14,7 +14,6 @@ from lab_arena.store import StoreTransport
 _T, _U, _I, _B, _N, _BOOL = "text", "uuid", "integer", "bigint", "numeric", "boolean"
 
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
-    "tool_market_balance_v1": (("p_hotkey", _T),),
     "tool_market_record_gamma_reading_v1": (
         ("p_hotkey", _T), ("p_block_number", _B), ("p_block_hash", _T), ("p_units", _N), ("p_available", _BOOL),
     ),
@@ -31,7 +30,8 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "tool_market_close_tab_v1": (("p_token_hash", _T),),
     "tool_market_register_key_v1": (
         ("p_key_id", _U), ("p_tool", _T), ("p_hotkey", _T), ("p_envelope", _T), ("p_fingerprint", _T),
-        ("p_daily_cap", _B), ("p_status", _T), ("p_balance", _N),
+        ("p_daily_cap", _B), ("p_status", _T), ("p_balance", _N), ("p_host", _T), ("p_signed_at", _B),
+        ("p_signed_body", _T), ("p_signature", _T),
     ),
     "tool_market_key_v1": (("p_key_id", _U),),
     "tool_market_revoke_key_v1": (("p_key_id", _U), ("p_hotkey", _T), ("p_reason", _T)),
@@ -74,9 +74,6 @@ class ToolMarketStore:
         return self._t.rpc(function, params)
 
     # Buyers -----------------------------------------------------------------
-    def balance(self, hotkey: str) -> Dict[str, Any]:
-        return self._rpc("tool_market_balance_v1", p_hotkey=hotkey)
-
     def record_gamma_reading(self, *, hotkey: str, block_number: int, block_hash: str, spent_units: int,
                              available: bool) -> Dict[str, Any]:
         return self._rpc("tool_market_record_gamma_reading_v1", p_hotkey=hotkey, p_block_number=int(block_number),
@@ -105,10 +102,12 @@ class ToolMarketStore:
 
     # Miners -----------------------------------------------------------------
     def register_key(self, *, key_id: str, tool: str, hotkey: str, envelope: str, fingerprint: str,
-                     daily_cap_microusd: int, status: str, balance: Optional[float]) -> Dict[str, Any]:
+                     daily_cap_microusd: int, status: str, balance: Optional[float], host: str, signed_at: int,
+                     signed_body: str, signature: str) -> Dict[str, Any]:
         return self._rpc("tool_market_register_key_v1", p_key_id=key_id, p_tool=tool, p_hotkey=hotkey,
                          p_envelope=envelope, p_fingerprint=fingerprint, p_daily_cap=int(daily_cap_microusd),
-                         p_status=status, p_balance=_balance(balance))
+                         p_status=status, p_balance=_balance(balance), p_host=host, p_signed_at=int(signed_at),
+                         p_signed_body=signed_body, p_signature=signature)
 
     def key(self, key_id: str) -> Optional[Dict[str, Any]]:
         return self._rpc("tool_market_key_v1", p_key_id=key_id)

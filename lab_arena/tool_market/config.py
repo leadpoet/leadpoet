@@ -1,8 +1,8 @@
 """Tool-market configuration from the environment. Off unless set otherwise.
 
-``LEADPOET_TOOL_MARKET_TOOLS`` lists the tools that may trade. It is empty
-by default: a tool is listed only once its vendor allows its keys to be
-resold this way (docs/gamma-tool-market.md).
+When live, every catalog tool trades. ``LEADPOET_TOOL_MARKET_TOOLS_OFF``
+turns single tools off, e.g. ``exa,deepline``; a new catalog tool is on
+unless it is named there.
 """
 
 from __future__ import annotations
@@ -15,10 +15,11 @@ from urllib.parse import urlsplit
 
 from lab_arena.lead_orders.auth import normalize_host
 from lab_arena.lead_orders.config import DEFAULT_GAMMA_PALLET, DEFAULT_GAMMA_STORAGE, is_valid_hotkey
+from lab_arena.lead_orders.config import GAMMA_SERVICE_ENV as LEAD_ORDERS_GAMMA_SERVICE_ENV
 from lab_arena.tool_market.catalog import TOOLS
 
 MODE_ENV = "LEADPOET_TOOL_MARKET_MODE"
-TOOLS_ENV = "LEADPOET_TOOL_MARKET_TOOLS"
+TOOLS_OFF_ENV = "LEADPOET_TOOL_MARKET_TOOLS_OFF"
 BUYERS_ENV = "LEADPOET_TOOL_MARKET_BUYER_HOTKEYS"
 GAMMA_SERVICE_ENV = "LEADPOET_TOOL_MARKET_GAMMA_SERVICE"
 TERMS_VERSION_ENV = "LEADPOET_TOOL_MARKET_TERMS_VERSION"
@@ -33,7 +34,8 @@ MODE_LIVE = "live"
 CHECK_MAX_AGE_SECONDS = 6 * 3600
 MAX_TAB_SECONDS = 24 * 3600
 MAX_TAB_MICROUSD = 1_000_000_000  # $1,000
-MAX_KEY_DAILY_CAP_MICROUSD = 1_000_000_000
+# Low at launch: what one key may earn in 24 h. Raising it is a code change.
+MAX_KEY_DAILY_CAP_MICROUSD = 20_000_000  # $20
 
 _TERMS_RE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -75,7 +77,8 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
         raise ToolMarketConfigError("%s must be off or live" % MODE_ENV)
     if mode == MODE_OFF:
         return ToolMarketConfig()
-    tools = frozenset(t.strip() for t in env.get(TOOLS_ENV, "").split(",") if t.strip())
+    off = frozenset(t.strip() for t in env.get(TOOLS_OFF_ENV, "").split(",") if t.strip())
+    tools = frozenset(TOOLS) - off
     buyers = frozenset(h.strip() for h in env.get(BUYERS_ENV, "").split(",") if h.strip())
     config = ToolMarketConfig(
         mode=mode, tools=tools, buyer_hotkeys=buyers,
@@ -84,12 +87,15 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
         terms_sha256=env.get(TERMS_SHA256_ENV, "").strip().lower(),
         public_base_url=env.get(PUBLIC_BASE_URL_ENV, "").strip().rstrip("/"),
     )
-    if not tools <= set(TOOLS):
-        raise ToolMarketConfigError("%s names a tool the catalog does not have" % TOOLS_ENV)
+    if not off <= set(TOOLS):
+        raise ToolMarketConfigError("%s names a tool the catalog does not have" % TOOLS_OFF_ENV)
     if not all(is_valid_hotkey(h) for h in buyers):
         raise ToolMarketConfigError("%s has an invalid hotkey" % BUYERS_ENV)
     if not is_valid_hotkey(config.gamma_service):
         raise ToolMarketConfigError("%s must be the tool market's Gamma service SS58 hotkey" % GAMMA_SERVICE_ENV)
+    # One Gamma deposit must not fund two products.
+    if config.gamma_service == env.get(LEAD_ORDERS_GAMMA_SERVICE_ENV, "").strip():
+        raise ToolMarketConfigError("%s must differ from %s" % (GAMMA_SERVICE_ENV, LEAD_ORDERS_GAMMA_SERVICE_ENV))
     if not _TERMS_RE.fullmatch(config.terms_version) or not _SHA_RE.fullmatch(config.terms_sha256):
         raise ToolMarketConfigError("%s and %s are required" % (TERMS_VERSION_ENV, TERMS_SHA256_ENV))
     if not config.public_base_url.startswith("https://"):

@@ -160,7 +160,7 @@ async def open_tab(request: Request) -> Response:
 
 @router.post("/tool-market/keys")
 async def register_key(request: Request) -> Response:
-    return await _handle(request, lambda m, who, body: m.register_key(who, _json(body)), signed=True)
+    return await _handle(request, lambda m, who, body: m.register_key(who, _json(body), body), signed=True)
 
 
 @router.post("/tool-market/keys/{key_id}/check")

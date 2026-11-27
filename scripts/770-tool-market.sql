@@ -63,6 +63,9 @@ CREATE TABLE public.tool_market_terms (
 
 -- ``envelope`` is the miner's key sealed to the vault; only the vault can
 -- open it. ``key_fingerprint`` is the vault's public name for the key.
+-- ``signed_body`` is the register request as the miner's hotkey signed it,
+-- with their attestation that the key is theirs to offer; ``host``,
+-- ``signed_at`` and ``signature`` let anyone verify it again.
 CREATE TABLE public.tool_market_keys (
   key_id UUID PRIMARY KEY,
   sequence BIGSERIAL NOT NULL UNIQUE,
@@ -71,6 +74,10 @@ CREATE TABLE public.tool_market_keys (
   envelope TEXT NOT NULL CHECK(envelope LIKE 'lov1.%' AND length(envelope)<=8192),
   key_fingerprint TEXT NOT NULL CHECK(key_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
   daily_cap_microusd BIGINT NOT NULL CHECK(daily_cap_microusd>0),
+  host TEXT NOT NULL CHECK(length(host) BETWEEN 1 AND 253),
+  signed_at BIGINT NOT NULL,
+  signed_body TEXT NOT NULL CHECK(length(signed_body) BETWEEN 2 AND 65536),
+  signature TEXT NOT NULL CHECK(length(signature) BETWEEN 128 AND 130),
   registered_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX tool_market_keys_tool ON public.tool_market_keys(tool,sequence);
@@ -133,6 +140,8 @@ CREATE TABLE public.tool_market_calls (
   miner_hotkey TEXT NOT NULL,
   ask_microusd BIGINT NOT NULL CHECK(ask_microusd>0),
   reserve_microusd BIGINT NOT NULL CHECK(reserve_microusd>0),
+  -- The most the miner can be owed for this call; the daily cap counts it.
+  owed_cap_microusd BIGINT NOT NULL CHECK(owed_cap_microusd>=0),
   opened_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX tool_market_calls_tab ON public.tool_market_calls(tab_id);
@@ -204,12 +213,12 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $open77
 $open770$;
 
 -- What a key has earned or holds over the last 24 h, in owed (miner) terms:
--- settled calls count what they owe, young open calls their ask's reserve.
+-- settled calls count what they owe, young open calls the most they can owe.
 CREATE FUNCTION public.tool_market__key_day_v1(p_key_id UUID)
 RETURNS BIGINT LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $day770$
  SELECT coalesce(sum(coalesce(s.owed_microusd,
    CASE WHEN c.opened_at>clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1())
-    THEN c.reserve_microusd ELSE 0 END)),0)::BIGINT
+    THEN c.owed_cap_microusd ELSE 0 END)),0)::BIGINT
  FROM public.tool_market_calls c LEFT JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
  WHERE c.key_id=p_key_id AND c.opened_at>clock_timestamp()-interval '24 hours';
 $day770$;
@@ -315,11 +324,14 @@ $tab770$;
 
 CREATE FUNCTION public.tool_market_close_tab_v1(p_token_hash TEXT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $close770$
-DECLARE tab UUID;
+DECLARE tab public.tool_market_tabs;
 BEGIN
- SELECT tab_id INTO tab FROM public.tool_market_tabs WHERE token_hash=p_token_hash;
- IF tab IS NULL THEN RETURN NULL; END IF;
- INSERT INTO public.tool_market_tab_closures(tab_id) VALUES(tab) ON CONFLICT DO NOTHING;
+ SELECT * INTO tab FROM public.tool_market_tabs WHERE token_hash=p_token_hash;
+ IF tab.tab_id IS NULL THEN RETURN NULL; END IF;
+ -- The buyer lock, as reserve and open_tab: no call is reserved on a tab
+ -- whose close another tab's budget already counts on.
+ PERFORM public.tool_market__lock_v1('buyer',tab.hotkey);
+ INSERT INTO public.tool_market_tab_closures(tab_id) VALUES(tab.tab_id) ON CONFLICT DO NOTHING;
  RETURN public.tool_market_tab_v1(p_token_hash);
 END;
 $close770$;
@@ -331,7 +343,8 @@ $close770$;
 -- One active listing per key: the same vendor key sealed twice, by one miner
 -- or two, is refused while the first is listed.
 CREATE FUNCTION public.tool_market_register_key_v1(p_key_id UUID,p_tool TEXT,p_hotkey TEXT,p_envelope TEXT,
- p_fingerprint TEXT,p_daily_cap BIGINT,p_status TEXT,p_balance NUMERIC)
+ p_fingerprint TEXT,p_daily_cap BIGINT,p_status TEXT,p_balance NUMERIC,p_host TEXT,p_signed_at BIGINT,
+ p_signed_body TEXT,p_signature TEXT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $register770$
 BEGIN
  IF p_status NOT IN ('valid','unchecked') THEN
@@ -342,8 +355,9 @@ BEGIN
    AND public.tool_market__key_active_v1(k.key_id)) THEN
   RETURN jsonb_build_object('status','duplicate');
  END IF;
- INSERT INTO public.tool_market_keys(key_id,tool,miner_hotkey,envelope,key_fingerprint,daily_cap_microusd)
- VALUES(p_key_id,p_tool,p_hotkey,p_envelope,p_fingerprint,p_daily_cap);
+ INSERT INTO public.tool_market_keys(key_id,tool,miner_hotkey,envelope,key_fingerprint,daily_cap_microusd,
+  host,signed_at,signed_body,signature)
+ VALUES(p_key_id,p_tool,p_hotkey,p_envelope,p_fingerprint,p_daily_cap,p_host,p_signed_at,p_signed_body,p_signature);
  INSERT INTO public.tool_market_key_events(key_id,status,balance) VALUES(p_key_id,p_status,p_balance);
  RETURN jsonb_build_object('status','registered','key_id',p_key_id);
 END;
@@ -359,6 +373,7 @@ $key770$;
 CREATE FUNCTION public.tool_market_revoke_key_v1(p_key_id UUID,p_hotkey TEXT,p_reason TEXT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $revoke770$
 BEGIN
+ PERFORM public.tool_market__lock_v1('key',p_key_id::TEXT);  -- after any reserve in flight
  IF NOT EXISTS(SELECT 1 FROM public.tool_market_keys WHERE key_id=p_key_id AND miner_hotkey=p_hotkey) THEN
   RETURN jsonb_build_object('status','not_found');
  END IF;
@@ -379,6 +394,7 @@ CREATE FUNCTION public.tool_market_post_ask_v1(p_key_id UUID,p_hotkey TEXT,p_ask
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $ask770$
 DECLARE seq BIGINT;
 BEGIN
+ PERFORM public.tool_market__lock_v1('key',p_key_id::TEXT);  -- after any reserve in flight
  IF NOT EXISTS(SELECT 1 FROM public.tool_market_keys WHERE key_id=p_key_id AND miner_hotkey=p_hotkey)
   OR NOT public.tool_market__key_active_v1(p_key_id) THEN
   RETURN jsonb_build_object('status','not_found');
@@ -424,10 +440,14 @@ RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,publi
 DECLARE tab public.tool_market_tabs; k public.tool_market_keys; current_ask BIGINT;
 BEGIN
  SELECT * INTO tab FROM public.tool_market_tabs WHERE token_hash=p_token_hash;
- IF tab.tab_id IS NULL OR NOT public.tool_market__tab_open_v1(tab) THEN
+ IF tab.tab_id IS NULL THEN RETURN jsonb_build_object('status','tab_closed'); END IF;
+ -- Lock order: buyer, then key. The buyer lock orders this reserve against
+ -- a close of this tab and the balance check of a new tab, so a tab is
+ -- open, checked under the lock, whenever a call is added to it.
+ PERFORM public.tool_market__lock_v1('buyer',tab.hotkey);
+ IF NOT public.tool_market__tab_open_v1(tab) THEN
   RETURN jsonb_build_object('status','tab_closed');
  END IF;
- PERFORM public.tool_market__lock_v1('tab',tab.tab_id::TEXT);
  IF public.tool_market__committed_v1(tab.tab_id)+p_reserve>tab.budget_microusd THEN
   RETURN jsonb_build_object('status','tab_budget');
  END IF;
@@ -441,8 +461,9 @@ BEGIN
  IF public.tool_market__key_day_v1(p_key_id)+p_owed_cap>k.daily_cap_microusd THEN
   RETURN jsonb_build_object('status','key_cap');
  END IF;
- INSERT INTO public.tool_market_calls(call_id,tab_id,tool,operation,key_id,miner_hotkey,ask_microusd,reserve_microusd)
- VALUES(p_call_id,tab.tab_id,p_tool,p_operation,p_key_id,k.miner_hotkey,p_ask,p_reserve);
+ INSERT INTO public.tool_market_calls(call_id,tab_id,tool,operation,key_id,miner_hotkey,ask_microusd,reserve_microusd,
+  owed_cap_microusd)
+ VALUES(p_call_id,tab.tab_id,p_tool,p_operation,p_key_id,k.miner_hotkey,p_ask,p_reserve,p_owed_cap);
  RETURN jsonb_build_object('status','reserved');
 END;
 $reserve770$;
@@ -490,13 +511,13 @@ $statement770$;
 -- Every tool_market function: owner, no PUBLIC execute; the service may
 -- execute all but the double-underscore helpers.
 DO $functions770$
-DECLARE f REGPROCEDURE;
+DECLARE f REGPROCEDURE; name TEXT;
 BEGIN
- FOR f IN SELECT p.oid::REGPROCEDURE FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+ FOR f,name IN SELECT p.oid::REGPROCEDURE,p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
   WHERE n.nspname='public' AND p.proname LIKE 'tool\_market%\_v1' LOOP
   EXECUTE format('ALTER FUNCTION %s OWNER TO lab_arena_owner',f);
   EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC,anon,authenticated,service_role,lab_arena_service',f);
-  IF f::TEXT NOT LIKE 'tool_market\_\_%' THEN
+  IF name NOT LIKE 'tool\_market\_\_%' THEN
    EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO lab_arena_service',f);
   END IF;
  END LOOP;

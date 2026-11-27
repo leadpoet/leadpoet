@@ -41,6 +41,9 @@ MAX_KEYS_PER_CALL = 3
 CALL_TIMEOUT_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MIN_TAB_SECONDS = 60
+# What a miner signs, inside the register body, for every key they list.
+ATTESTATION = ("tool-market-attestation-v1: This key is from my own account with this tool's vendor. "
+               "I may let it be used this way under that vendor's terms, and I carry that risk.")
 
 
 class ToolMarketError(Exception):
@@ -138,9 +141,14 @@ class ToolMarket:
         return closed
 
     # Miners -----------------------------------------------------------------
-    def register_key(self, identity: BuyerIdentity, body: Mapping[str, Any]) -> Dict[str, Any]:
-        if set(body) != {"tool", "envelope", "daily_cap_microusd"}:
+    def register_key(self, identity: BuyerIdentity, body: Mapping[str, Any], signed_body: bytes) -> Dict[str, Any]:
+        """List a key. ``signed_body`` is the request body as signed; it is kept
+        with the key, so the miner's attestation can be verified again later."""
+
+        if set(body) != {"tool", "envelope", "daily_cap_microusd", "attestation"}:
             raise ToolMarketError(400, "request_invalid")
+        if body["attestation"] != ATTESTATION:
+            raise ToolMarketError(400, "attestation_required", attestation=ATTESTATION)
         tool = body["tool"]
         if tool not in self._config.tools:
             raise ToolMarketError(404, "tool_unavailable")
@@ -164,7 +172,8 @@ class ToolMarket:
         result = self._store.register_key(
             key_id=self._new_id(), tool=tool, hotkey=identity.hotkey, envelope=envelope,
             fingerprint=checked["key_fingerprint"], daily_cap_microusd=cap, status=checked["status"],
-            balance=checked.get("balance"))
+            balance=checked.get("balance"), host=identity.host, signed_at=identity.signed_at,
+            signed_body=signed_body.decode("utf-8"), signature=identity.signature.lower().removeprefix("0x"))
         if result["status"] == "duplicate":
             raise ToolMarketError(409, "key_already_listed")
         return dict(result, health=checked["status"])
@@ -224,12 +233,16 @@ class ToolMarket:
         if not token:
             raise ToolMarketError(401, "tab_unknown")
         tab = token_hash(token)
-        tried = 0
+        # Read before any vendor request, so a chain outage cannot strand a paid answer.
+        epoch = int(self._epoch())
+        tried = checks = 0
         for ask in book.rank(book.Ask.from_row(row) for row in self._supply(tool)):
             if tried >= MAX_KEYS_PER_CALL:
                 break
-            if ask.needs_check and not self._recheck(ask.key_id, tool, ask.envelope):
-                continue
+            if ask.needs_check:
+                checks += 1
+                if checks > MAX_KEYS_PER_CALL or not self._recheck(ask.key_id, tool, ask.envelope):
+                    continue
             call_id = self._new_id()
             status = self._store.reserve_call(
                 call_id=call_id, token_hash=tab, tool=tool, operation=op.name, key_id=ask.key_id,
@@ -242,14 +255,18 @@ class ToolMarket:
             if status != "reserved":
                 continue
             tried += 1
-            outcome = self._send(op, ask, call_id, url, headers, payload)
+            outcome = self._send(op, ask, call_id, epoch, url, headers, payload)
             if outcome is not None:
                 return outcome
         raise ToolMarketError(503, "no_supply")
 
-    def _send(self, op: catalog.Operation, ask: book.Ask, call_id: str, url: str, headers: Mapping[str, str],
-              payload: bytes) -> Optional[Dict[str, Any]]:
+    def _send(self, op: catalog.Operation, ask: book.Ask, call_id: str, epoch: int, url: str,
+              headers: Mapping[str, str], payload: bytes) -> Optional[Dict[str, Any]]:
         """One vendor request on one key. ``None`` means try the next key."""
+
+        def settle(status: str, http_status: Optional[int], *, units: int = 0, owed: int = 0, charge: int = 0) -> bool:
+            return self._store.settle_call(call_id=call_id, status=status, http_status=http_status, units=units,
+                                           owed_microusd=owed, charge_microusd=charge, epoch=epoch) == "settled"
 
         try:
             response = self._transport.send(
@@ -257,33 +274,30 @@ class ToolMarket:
                 body=payload, timeout_seconds=CALL_TIMEOUT_SECONDS, max_response_bytes=MAX_RESPONSE_BYTES)
         except VaultTransportError as error:
             if error.forwarded is False:
-                self._settle(call_id, "skipped", None)
+                settle("skipped", None)
                 return None
             # It may have reached the vendor and used the key: the miner
             # bears it, and a retry could use it twice.
-            self._settle(call_id, "uncertain", error.observed_status)
+            settle("uncertain", error.observed_status)
             raise ToolMarketError(502, "vendor_unreachable", call_id=call_id) from None
-        failure = book.key_failure(response.status)
-        if failure is not None or book.rate_limited(response.status, response.headers):
-            self._settle(call_id, "skipped", response.status)
+        document = json_document(response.body)
+        status = op.status(response.status, document)
+        failure = book.key_failure(status)
+        if failure is not None or book.rate_limited(status, response.headers):
+            settle("skipped", response.status)
             if failure is not None:
                 self._store.record_key_event(key_id=ask.key_id, status="failed", reason=failure)
             return None
-        document = json_document(response.body)
-        units = op.units(response.status, document)
+        units = op.units(status, document)
+        charge = 0
         if units is None:
-            self._settle(call_id, "uncertain", response.status)
-            charge = 0
+            settle("uncertain", response.status)
         else:
             owed = book.owed_microusd(op, units, ask.ask_microusd)
-            charge = book.charge_microusd(owed)
-            self._settle(call_id, "settled", response.status, units=units, owed=owed, charge=charge)
+            # A call that settles too late holds nothing, so the buyer pays nothing.
+            if settle("settled", response.status, units=units, owed=owed, charge=book.charge_microusd(owed)):
+                charge = book.charge_microusd(owed)
         return {"call_id": call_id, "status": response.status, "body": document, "charge_microusd": charge}
-
-    def _settle(self, call_id: str, status: str, http_status: Optional[int], *, units: int = 0, owed: int = 0,
-                charge: int = 0) -> None:
-        self._store.settle_call(call_id=call_id, status=status, http_status=http_status, units=units,
-                                owed_microusd=owed, charge_microusd=charge, epoch=int(self._epoch()))
 
     # Helpers ----------------------------------------------------------------
     def _supply(self, tool: str):

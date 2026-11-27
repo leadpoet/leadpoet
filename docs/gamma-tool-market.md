@@ -5,21 +5,22 @@ Miners supply the vendor keys and set a price per unit. Agents and buyers
 pay in Gamma and call one API. Each call goes to the cheapest healthy key.
 
 It is off by default. Every route answers 404 until
-`LEADPOET_TOOL_MARKET_MODE=live`. A tool trades only once it is listed in
-`LEADPOET_TOOL_MARKET_TOOLS`, which is empty by default.
+`LEADPOET_TOOL_MARKET_MODE=live`. Once live, every catalog tool trades.
+`LEADPOET_TOOL_MARKET_TOOLS_OFF` turns single tools off, for example
+`exa,deepline`.
 
-## Why a tool is off until its vendor agrees
+## Miner attestation
 
-Most vendors' terms forbid sharing or reselling a key. A tool joins
-`LEADPOET_TOOL_MARKET_TOOLS` only after one of these:
+A miner lists a key only by signing, with their hotkey, this exact
+statement inside the register request (`ATTESTATION` in
+`lab_arena/tool_market/market.py`):
 
-- the vendor agrees in writing that keys may be resold this way; or
-- Leadpoet signs a reseller deal with the vendor.
+> tool-market-attestation-v1: This key is from my own account with this
+> tool's vendor. I may let it be used this way under that vendor's terms,
+> and I carry that risk.
 
-Deepline and OpenRouter are left out for this reason. [Deepline's terms
-§4](https://deepline.com/terms) bar sharing credentials, and Deepline
-competes with this product. [OpenRouter's terms](https://openrouter.ai/terms)
-bar selling or transferring access.
+The signed request body, its signature, host and time are stored with the
+key, so anyone can verify the attestation later.
 
 ## Launch set
 
@@ -32,6 +33,22 @@ reports its own usage or charges a fixed number of credits per request.
 | [DataForSEO](https://docs.dataforseo.com/v3/serp/google/organic/live/advanced/) | vendor USD (`cost` in each answer) | `google_organic_serp`, `google_ads_search_volume` | yes: [user data](https://docs.dataforseo.com/v3/appendix/user_data/) |
 | [Exa](https://docs.exa.ai/reference/search) | vendor USD (`costDollars.total`) | `search`, `contents` | no |
 | [HarvestAPI](https://docs.harvestapi.io/) | per call | `linkedin_profile`, `linkedin_company` | no |
+| [Deepline](https://code.deepline.com) | vendor USD (`billing` credits × $0.10) | `zerobounce_validate`, `bounceban_verify_single`, `harvestapi_get_company` | yes: billing balance |
+
+## Adding a tool
+
+A tool is data, not a new code path:
+
+1. One `Operation` per endpoint in `lab_arena/tool_market/catalog.py`:
+   method, URL, unit, maximum units per call, allowed parameters, and how
+   to read its cost. A vendor that reports errors inside a 2xx answer
+   names a `body_status` reader.
+2. One `Tool` entry in `lead_order_vault/vault.py` (and its host in
+   `lead_order_vault/envelope.py`): where the key goes, which routes it may
+   call, and its free balance check. The vault is a separate attested
+   image, so it keeps its own allowlist rather than trusting the gateway's.
+
+A new Deepline integration is only step 1: one `_deepline(...)` line.
 
 The operations and their allowed parameters are in
 `lab_arena/tool_market/catalog.py`. The key vault enforces the same hosts
@@ -41,9 +58,12 @@ and route shapes again (`lead_order_vault/vault.py`, `TOOLS`).
 
 These tools are good candidates once the launch set has run:
 
-- **Email checks:** NeverBounce, ZeroBounce, Reoon, Kickbox. NeverBounce
-  takes its key in a query parameter and reports errors inside a 2xx
-  answer, so the vault and catalog need a rule for that first.
+- **More Deepline integrations:** PredictLeads signals, Hunter and
+  LeadMagic email finders, once their payloads are pinned in the catalog.
+- **Direct email checks:** ZeroBounce, NeverBounce, Reoon, Kickbox on their
+  own keys. ZeroBounce and NeverBounce take the key in a query parameter,
+  so the vault needs that key placement first. ZeroBounce already trades
+  through Deepline.
 - **Signals and search:** PredictLeads, Serper.
 - **Email finding:** Enrow.
 - **Reseller deals only:** FullEnrich, Prospeo, Findymail and Crustdata.
@@ -56,6 +76,7 @@ These tools are good candidates once the launch set has run:
    machine (`python -m lead_order_vault.cli seal`). They then send the
    envelope to `POST /tool-market/keys`, signed with their hotkey.
    - Leadpoet stores only the envelope. Only the vault can open it.
+   - The body carries the miner's signed attestation (above).
    - The vault checks the key with the vendor's free balance call, if the
      vendor has one. A key with no credit is refused.
    - The same vendor key can be listed only once at a time.
@@ -86,11 +107,14 @@ A key is in its tool's book only while all of these hold:
 - its miner accepted the current terms;
 - its latest ask is a price, not a withdrawal;
 - its latest health event is `valid` or `unchecked`;
-- what it earned in the last 24 h is under its daily cap.
+- what it earned in the last 24 h is under its daily cap. A miner picks
+  the cap, at most $20 a day per key at launch.
 
 Health events come from vault checks and from calls.
 
-- A vendor answer of 401, 402 or 403 marks the key `failed`. The call then
+- A vendor answer of 401, 402 or 403 marks the key `failed`. So does the
+  same error reported inside a 200: DataForSEO's `status_code` 40200, or
+  Deepline's `insufficient_credits`. The call then
   moves on to the next key, and the buyer pays nothing for the failed try.
 - A 429 with no `Retry-After` skips the key for this call only. A 429 with
   `Retry-After` goes back to the buyer.
@@ -134,9 +158,9 @@ All tool-market data is in `scripts/770-tool-market.sql`.
 | Variable | Meaning |
 | --- | --- |
 | `LEADPOET_TOOL_MARKET_MODE` | `off` (default) or `live` |
-| `LEADPOET_TOOL_MARKET_TOOLS` | comma-separated tools that may trade; empty by default |
+| `LEADPOET_TOOL_MARKET_TOOLS_OFF` | comma-separated tools turned off; empty by default, so all trade |
 | `LEADPOET_TOOL_MARKET_BUYER_HOTKEYS` | optional allowlist of buyer hotkeys, for a staff rollout |
-| `LEADPOET_TOOL_MARKET_GAMMA_SERVICE` | the tool market's Gamma service SS58 hotkey |
+| `LEADPOET_TOOL_MARKET_GAMMA_SERVICE` | the tool market's Gamma service SS58 hotkey; must differ from lead orders' |
 | `LEADPOET_TOOL_MARKET_TERMS_VERSION`, `LEADPOET_TOOL_MARKET_TERMS_SHA256` | the terms text both sides sign |
 | `LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL` | the https host every signed request names |
 
@@ -151,6 +175,16 @@ deployment, exactly as lead orders do.
   Until then, owed amounts build up but pay nothing.
 - **The vendor's own report sets the usage.** For per-call tools, Leadpoet
   counts a 2xx answer as one use, whatever its body says.
+- **Deepline's cost must be in its answer.** A Deepline answer without a
+  `billing` credit count settles as unknown: the buyer pays nothing and the
+  miner bears it. Lead orders read the bill back afterwards; this lane
+  does not yet.
+- **One bad request can fail up to 3 keys.** A 403 caused by the request
+  itself, not the key, still marks each key tried as `failed` until its
+  miner asks for a check.
+- **An ask can rise between the book and the call.** A buyer pays the ask
+  at the moment of the call, within the tab's budget. A delay on price
+  rises, as Bittensor subnet 28 uses, can come later.
 - **Exa's cost is an estimate.** Exa calls `costDollars` an estimate.
 - **Some keys cannot be checked first.** Exa and HarvestAPI have no free
   key check, so a dead key is found by its first failed call.

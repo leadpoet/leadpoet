@@ -22,7 +22,7 @@ from lab_arena.lead_orders.vault_client import VaultTransportError
 from lab_arena.store import ArenaStoreError, PsycopgTransport
 from lab_arena.tool_market import market as market_module
 from lab_arena.tool_market.config import ToolMarketConfig
-from lab_arena.tool_market.market import ToolMarket, ToolMarketError
+from lab_arena.tool_market.market import ATTESTATION, ToolMarket, ToolMarketError
 from lab_arena.tool_market.store import ToolMarketStore
 from lead_order_vault import envelope as vault_envelope
 from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
@@ -34,6 +34,7 @@ VAULT_KEY = vault_envelope.compressed(ec.generate_private_key(ec.SECP256K1()).pu
 PROFILE = {"tool": "scrapecreators", "operation": "linkedin_profile",
            "params": {"url": "https://www.linkedin.com/in/someone"}}
 SERP = {"tool": "dataforseo", "operation": "google_organic_serp", "params": {"keyword": "payroll"}}
+VALIDATE = {"tool": "deepline", "operation": "zerobounce_validate", "params": {"email": "ada@acme.com"}}
 
 
 def hotkey() -> str:
@@ -117,7 +118,7 @@ class FakeGamma:
 class World:
     def __init__(self, store):
         self.terms = uuid.uuid4().hex + uuid.uuid4().hex
-        self.config = ToolMarketConfig(mode="live", tools=frozenset({"scrapecreators", "dataforseo", "exa"}),
+        self.config = ToolMarketConfig(mode="live", tools=frozenset({"scrapecreators", "dataforseo", "exa", "deepline"}),
                                        gamma_service=hotkey(), terms_version="v1", terms_sha256=self.terms,
                                        public_base_url="https://gw.example")
         self.vault = FakeVault()
@@ -137,10 +138,16 @@ class World:
     def miner_key(self, secret, ask, *, tool="scrapecreators", cap=10 * USD, miner=None):
         miner = miner or hotkey()
         self.accept(miner, "miner")
-        listed = self.market.register_key(self.who(miner), {
-            "tool": tool, "envelope": self.vault.seal(tool, miner, secret), "daily_cap_microusd": cap})
+        listed = self.register(miner, {"tool": tool, "envelope": self.vault.seal(tool, miner, secret),
+                                       "daily_cap_microusd": cap})
         self.market.post_ask(self.who(miner), {"key_id": listed["key_id"], "ask_microusd": ask})
         return miner, listed["key_id"]
+
+    def register(self, miner, body):
+        """A register request as the gateway hands it over: parsed and as signed."""
+
+        body = dict(body, attestation=ATTESTATION) if "attestation" not in body else body
+        return self.market.register_key(self.who(miner), body, json.dumps(body).encode())
 
     def buyer(self, usd=1, budget=100_000, seconds=600):
         buyer = hotkey()
@@ -257,15 +264,14 @@ def test_listing_rules(world):
     world.accept(other, "miner")
     # The same vendor key, sealed again by anyone, is refused while listed.
     with pytest.raises(ToolMarketError) as twice:
-        world.market.register_key(world.who(other), {"tool": "scrapecreators", "daily_cap_microusd": USD,
-                                                     "envelope": world.vault.seal("scrapecreators", other, "listed-key")})
+        world.register(other, {"tool": "scrapecreators", "daily_cap_microusd": USD,
+                               "envelope": world.vault.seal("scrapecreators", other, "listed-key")})
     assert twice.value.code == "key_already_listed"
     # An envelope sealed for another miner or tool is refused before the vault is asked.
     checks = world.vault.checks
     for envelope in (world.vault.seal("scrapecreators", miner, "k2"), world.vault.seal("exa", other, "k3")):
         with pytest.raises(ToolMarketError):
-            world.market.register_key(world.who(other), {"tool": "scrapecreators", "envelope": envelope,
-                                                         "daily_cap_microusd": USD})
+            world.register(other, {"tool": "scrapecreators", "envelope": envelope, "daily_cap_microusd": USD})
     assert world.vault.checks == checks
     # Only the owner may price, check or revoke a key.
     for act in (lambda: world.market.post_ask(world.who(other), {"key_id": key_id, "ask_microusd": 1}),
@@ -320,6 +326,69 @@ def test_a_settlement_cannot_charge_more_than_its_reserve_or_settle_twice(world)
                                     tool="scrapecreators", operation="linkedin_profile", key_id=reserve["key_id"],
                                     ask_microusd=9_999, reserve_microusd=11_000, owed_cap_microusd=10_000) \
         == "ask_changed"
+
+
+def test_a_key_is_listed_only_with_its_miners_signed_attestation(world, database):
+    miner = hotkey()
+    world.accept(miner, "miner")
+    body = {"tool": "scrapecreators", "envelope": world.vault.seal("scrapecreators", miner, "attested-key"),
+            "daily_cap_microusd": USD}
+    for attestation in (None, "yes", ATTESTATION + " "):
+        with pytest.raises(ToolMarketError) as refused:
+            world.register(miner, dict(body, attestation=attestation))
+        assert refused.value.code in ("attestation_required", "request_invalid")
+    assert world.vault.checks == 0  # refused before any vendor check
+    key_id = world.register(miner, body)["key_id"]
+    psycopg2, dsn = database
+    connection = psycopg2.connect(**dsn)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT signed_body,signature,host,signed_at FROM public.tool_market_keys WHERE key_id=%s",
+                           (key_id,))
+            signed_body, signature, host, signed_at = cursor.fetchone()
+    finally:
+        connection.close()
+    assert json.loads(signed_body)["attestation"] == ATTESTATION
+    assert (signature, host, signed_at) == ("ab" * 64, "gw.example", 1)
+
+
+def test_deepline_bills_its_reported_credits_and_a_body_error_fails_the_key_over(world):
+    miner, _ = world.miner_key("deepline-dry", 900_000, tool="deepline")
+    world.miner_key("deepline-full", 1_000_000, tool="deepline")
+    _, token = world.buyer(budget=500_000)  # one call reserves $0.20 x 1.1
+    world.vendor.script["deepline-dry"] = [ok({"billing": {"kind": "insufficient_credits"}})]
+    world.vendor.script["deepline-full"] = [ok({"result": {"status": "valid"}, "billing": {"credits_charged": 0.28}})]
+    result = world.market.call(token, VALIDATE)
+    # 0.28 credits x $0.10 at 100% of Deepline's price, plus 10%.
+    assert result["charge_microusd"] == 30_800 and [s[0] for s in world.vendor.sent] == ["deepline-dry", "deepline-full"]
+    assert world.market.statement(miner)["keys"][0]["health"]["reason"] == "no_credit"
+    _, method, url, body = world.vendor.sent[1]
+    assert url == "https://code.deepline.com/api/v2/integrations/zerobounce_validate/execute"
+    assert json.loads(body) == {"provider": "zerobounce", "operation": "zerobounce_validate",
+                                "payload": {"email": "ada@acme.com"}}
+
+
+def test_a_dataforseo_out_of_funds_answer_inside_a_200_fails_the_key(world):
+    miner, _ = world.miner_key("seo-dry", 900_000, tool="dataforseo")
+    _, token = world.buyer()
+    world.vendor.script["seo-dry"] = [ok({"status_code": 40200, "status_message": "Payment Required.", "cost": 0})]
+    with pytest.raises(ToolMarketError) as empty:
+        world.market.call(token, SERP)
+    assert empty.value.code == "no_supply"
+    assert world.market.statement(miner)["keys"][0]["health"]["status"] == "failed"
+
+
+def test_the_epoch_is_read_before_any_vendor_request(world):
+    world.miner_key("epoch-key", 10_000)
+    _, token = world.buyer()
+
+    def chain_down():
+        raise RuntimeError("chain unavailable")
+
+    world.market._epoch = chain_down
+    with pytest.raises(RuntimeError):
+        world.market.call(token, PROFILE)
+    assert world.vendor.sent == [] and world.market.tab(token)["calls"] == 0
 
 
 def test_tables_are_append_only_and_closed_to_the_service_role(database):

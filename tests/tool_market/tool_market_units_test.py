@@ -41,7 +41,6 @@ def test_markup_rounds_up_and_never_charges_less_than_owed():
 def test_cheapest_ask_first_and_earlier_wins_a_tie():
     asks = [book.Ask("c", ALICE, "e", 30, 1), book.Ask("a", ALICE, "e", 10, 3), book.Ask("b", ALICE, "e", 10, 2)]
     assert [a.key_id for a in book.rank(asks)] == ["b", "a", "c"]
-    assert [a.key_id for a in book.rank(asks, skip={"b"})] == ["a", "c"]
 
 
 def test_ask_bounds():
@@ -72,6 +71,17 @@ def test_dataforseo_gets_exactly_one_task():
     _, headers, body = SERP.build({"keyword": "payroll", "location_code": 2840})
     assert json.loads(body) == [{"keyword": "payroll", "location_code": 2840}]
     assert headers["content-type"] == "application/json"
+
+
+def test_a_2xx_body_error_is_read_as_its_real_status():
+    assert SERP.status(200, {"status_code": 40200}) == 402 and SERP.status(200, {"status_code": 20000}) == 200
+    assert SERP.status(500, {"status_code": 40200}) == 500
+    deepline = catalog.operation("deepline", "zerobounce_validate")
+    assert deepline.status(200, {"billing": {"kind": "insufficient_credits"}}) == 402
+    assert deepline.units(200, {"billing": {"credits_charged": 0.28}}) == 28_000
+    assert deepline.units(200, {"result": {}}) is None
+    _, headers, _ = deepline.build({"email": "ada@acme.com"})
+    assert headers["x-deepline-execute-response-intent"] == "raw"
 
 
 def test_units_come_from_the_vendor_answer():
@@ -105,9 +115,13 @@ def test_config_is_off_by_default_and_strict_when_live():
             "LEADPOET_TOOL_MARKET_TERMS_VERSION": "v1", "LEADPOET_TOOL_MARKET_TERMS_SHA256": "a" * 64,
             "LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL": "https://gw.example/"}
     config = load_config(live)
-    assert config.enabled and config.tools == frozenset() and config.public_host == "gw.example"
-    assert load_config(dict(live, LEADPOET_TOOL_MARKET_TOOLS="exa, dataforseo")).tools == {"exa", "dataforseo"}
-    for bad in ({"LEADPOET_TOOL_MARKET_TOOLS": "openrouter"}, {"LEADPOET_TOOL_MARKET_TERMS_SHA256": "x"},
+    # Live means every catalog tool trades; one switch turns single tools off.
+    assert config.enabled and config.tools == set(catalog.TOOLS) and config.public_host == "gw.example"
+    assert "deepline" in config.tools
+    assert load_config(dict(live, LEADPOET_TOOL_MARKET_TOOLS_OFF="exa, deepline")).tools \
+        == set(catalog.TOOLS) - {"exa", "deepline"}
+    for bad in ({"LEADPOET_TOOL_MARKET_TOOLS_OFF": "openrouter"},
+                {"LEADPOET_LEAD_ORDERS_GAMMA_SERVICE": ALICE}, {"LEADPOET_TOOL_MARKET_TERMS_SHA256": "x"},
                 {"LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL": "http://gw.example"},
                 {"LEADPOET_TOOL_MARKET_GAMMA_SERVICE": "71"}, {"LEADPOET_TOOL_MARKET_BUYER_HOTKEYS": "nope"},
                 {"LEADPOET_TOOL_MARKET_MODE": "staff"}):

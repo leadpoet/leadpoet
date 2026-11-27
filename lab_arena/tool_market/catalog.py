@@ -13,6 +13,10 @@ Usage units:
 - ``vendor_usd``: the vendor reports the request's own cost in its answer.
   A miner asks a price in micro-USD per vendor USD (``900000`` sells at 90%
   of the vendor's price), and the call counts the reported micro-USD.
+
+Adding a tool is data, not code: one ``Operation`` per endpoint here, plus
+the tool's key placement and route rule in ``lead_order_vault.vault.TOOLS``,
+which the attested vault enforces on its own.
 """
 
 from __future__ import annotations
@@ -24,6 +28,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlencode
+
+from lab_arena.provider_costs import deepline_cost
 
 UNIT_CALL = "call"
 UNIT_VENDOR_USD = "vendor_usd"
@@ -110,8 +116,12 @@ class Operation:
     # ``call`` unit: units a 2xx answer counts. ``vendor_usd``: the cost reader.
     call_units: int = 1
     cost: Optional[Callable[[Any], Optional[int]]] = field(default=None, compare=False)
-    # DataForSEO takes a list of tasks; the catalog sends exactly one.
-    one_task_array: bool = False
+    # How the checked params become the vendor's JSON body (default: as is).
+    wrap: Optional[Callable[[Dict[str, Any]], Any]] = field(default=None, compare=False)
+    # A vendor that reports errors inside a 2xx answer: the HTTP-like status
+    # its body means, or None when the body is not an error.
+    body_status: Optional[Callable[[Any], Optional[int]]] = field(default=None, compare=False)
+    headers: Tuple[Tuple[str, str], ...] = ()
 
     @property
     def unit_scale(self) -> int:
@@ -126,15 +136,24 @@ class Operation:
             if param.required and name not in params:
                 raise CatalogError("param_missing")
         values = {name: self.params[name].read(value) for name, value in params.items()}
-        headers = {"accept": "application/json"}
+        headers = dict(self.headers, accept="application/json")
         if self.method == "GET":
             return self.url + ("?" + urlencode(sorted(values.items())) if values else ""), headers, b""
         headers["content-type"] = "application/json"
-        document: Any = [values] if self.one_task_array else values
+        document = self.wrap(values) if self.wrap is not None else values
         return self.url, headers, json.dumps(document, separators=(",", ":")).encode("utf-8")
 
+    def status(self, http_status: int, document: Any) -> int:
+        """The answer's real status: an error a 2xx body reports wins."""
+
+        if 200 <= http_status < 300 and self.body_status is not None:
+            reported = self.body_status(document)
+            if reported is not None:
+                return reported
+        return http_status
+
     def units(self, status: int, document: Any) -> Optional[int]:
-        """Units a vendor answer counts: 0 for a refusal, None when unknown."""
+        """Units an answer counts, given ``status()``: 0 for a refusal, None when unknown."""
 
         if 400 <= status < 500:
             return 0
@@ -146,11 +165,41 @@ class Operation:
         return None if reported is None else min(reported, self.max_units)
 
 
+def _dataforseo_status(document: Any) -> Optional[int]:
+    """DataForSEO answers 200 and puts its own code in ``status_code``: 40200 is 402."""
+
+    code = document.get("status_code") if isinstance(document, dict) else None
+    if isinstance(code, int) and not isinstance(code, bool) and 40000 <= code < 60000:
+        return code // 100
+    return None
+
+
+def _deepline_status(document: Any) -> Optional[int]:
+    billing = document.get("billing") if isinstance(document, dict) else None
+    return 402 if isinstance(billing, dict) and billing.get("kind") == "insufficient_credits" else None
+
+
+def _deepline_cost(document: Any) -> Optional[int]:
+    cost = deepline_cost(document)
+    return None if cost is None else cost.microusd
+
+
+def _deepline(name: str, provider: str, params: Mapping[str, Param]) -> Operation:
+    """One Deepline integration. Deepline bills credits and reports them in ``billing``."""
+
+    return Operation("deepline", name, "POST", _DEEPLINE + "/api/v2/integrations/%s/execute" % name,
+                     UNIT_VENDOR_USD, 200_000, params, cost=_deepline_cost,
+                     wrap=lambda values: {"provider": provider, "operation": name, "payload": values},
+                     body_status=_deepline_status, headers=(("x-deepline-execute-response-intent", "raw"),))
+
+
 _URL = Param("str", required=True, max_length=300)
+_EMAIL = Param("str", required=True, max_length=320)
 _SC = "https://api.scrapecreators.com"
 _DFS = "https://api.dataforseo.com/v3"
 _HARVEST = "https://api.harvestapi.io"
 _EXA = "https://api.exa.ai"
+_DEEPLINE = "https://code.deepline.com"
 
 _OPERATIONS: Sequence[Operation] = (
     # ScrapeCreators: one credit per request.
@@ -166,12 +215,12 @@ _OPERATIONS: Sequence[Operation] = (
               UNIT_VENDOR_USD, 50_000,
               {"keyword": Param("str", required=True, max_length=700), "location_code": Param("int", high=10**8),
                "language_code": Param("str", max_length=8), "depth": Param("int", high=200)},
-              cost=_usd_field("cost"), one_task_array=True),
+              cost=_usd_field("cost"), wrap=lambda values: [values], body_status=_dataforseo_status),
     Operation("dataforseo", "google_ads_search_volume", "POST", _DFS + "/keywords_data/google_ads/search_volume/live",
               UNIT_VENDOR_USD, 150_000,
               {"keywords": Param("str_list", required=True, max_length=80, high=1000),
                "location_code": Param("int", high=10**8), "language_code": Param("str", max_length=8)},
-              cost=_usd_field("cost"), one_task_array=True),
+              cost=_usd_field("cost"), wrap=lambda values: [values], body_status=_dataforseo_status),
     # Exa: each answer carries ``costDollars.total``, which Exa calls an estimate.
     Operation("exa", "search", "POST", _EXA + "/search", UNIT_VENDOR_USD, 50_000,
               {"query": Param("str", required=True, max_length=2000), "numResults": Param("int", high=25),
@@ -193,6 +242,11 @@ _OPERATIONS: Sequence[Operation] = (
               {"url": _URL}),
     Operation("harvestapi", "linkedin_company", "GET", _HARVEST + "/linkedin/company", UNIT_CALL, 1,
               {"url": _URL}),
+    # Deepline: one key reaches many vendors. Launch keeps three
+    # single-record checks whose payloads Leadpoet already sends.
+    _deepline("zerobounce_validate", "zerobounce", {"email": _EMAIL, "ip_address": Param("str", max_length=45)}),
+    _deepline("bounceban_verify_single", "bounceban", {"email": _EMAIL}),
+    _deepline("harvestapi_get_company", "harvestapi", {"url": _URL}),
 )
 
 OPERATIONS: Dict[Tuple[str, str], Operation] = {(op.tool, op.name): op for op in _OPERATIONS}

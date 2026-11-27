@@ -213,7 +213,7 @@ def main(argv: Optional[list] = None) -> int:
         answer = client.request("POST", "/tool-market/terms", {
             "role": "buyer", "terms_version": version, "terms_sha256": sha256}, signed=True)
         wanted = answer.get("terms_version")
-        if answer.get("error") == "terms_outdated" and wanted in PUBLISHED_TERMS:
+        if answer.get("error") == "terms_outdated" and isinstance(wanted, str) and wanted in PUBLISHED_TERMS:
             # The gateway trades on another published version: sign that one.
             answer = client.request("POST", "/tool-market/terms", {
                 "role": "buyer", "terms_version": wanted, "terms_sha256": PUBLISHED_TERMS[wanted]}, signed=True)

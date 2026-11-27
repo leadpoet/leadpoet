@@ -159,7 +159,10 @@ and [signed requests](https://www.bittensor.com/docs/guides/signed-requests) gui
   subnet registration block (`NetworkRegisteredAt`). If the subnet is
   dissolved and registered again, reads fail closed until ops reconcile, so
   cleared totals never wipe or double credit. A total that goes backwards is
-  refused (`503 gamma_unavailable`).
+  refused (`503 gamma_unavailable`). Each process reads at most two
+  balances from the chain at once; past that, a balance read answers
+  `503 gamma_unavailable` at once, so a flood of fresh hotkeys cannot queue
+  paid calls behind the chain client's lock.
 
 To publish it (ops, once per service hotkey):
 
@@ -395,11 +398,13 @@ deployment, exactly as lead orders do.
   whether a key is live. The miner sealed the key, so it holds it already;
   the check adds only Leadpoet's address. A read-only 30-day check before
   the vault would close this.
-- **Three reads grow with history.** A balance reads every tab the buyer
-  ever opened, each call sums its key's earlier calls, and the book
-  computes each key's last 24 h and last hour from the call ledger on
-  every call. Fine at launch volumes; keep running totals, and cache the
-  public catalog and books, before they grow.
+- **Four things grow with history.** A balance reads every tab the buyer
+  ever opened (a btauth/1 call is a tab of its own), every signed request
+  keeps a nonce row for good, each call sums its key's earlier calls, and
+  the book computes each key's last 24 h and last hour from the call
+  ledger on every call. Fine at launch volumes; keep running totals,
+  partition the nonces by day, and cache the public catalog and books,
+  before they grow.
 - **A lost API key holds its budget until it expires.** Only its token
   closes it, and the CLI makes 30-day keys by default; a signed "close my
   keys" route would let a buyer free a lost one.

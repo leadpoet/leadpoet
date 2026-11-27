@@ -125,7 +125,7 @@ class FakeVendor:
         item = answers.pop(0) if len(answers) > 1 else answers[0]
         if isinstance(item, Exception):
             raise item
-        return item
+        return item() if callable(item) else item
 
 
 class FakeGamma:
@@ -935,3 +935,32 @@ def test_a_funded_hotkey_calls_with_its_signature_alone_until_its_balance_runs_o
     with pytest.raises(ToolMarketError) as invalid:
         world.market.gamma_balance("not-a-hotkey")
     assert (invalid.value.status, invalid.value.code) == (400, "invalid_hotkey")
+
+
+def test_signed_calls_share_a_small_balance_and_hold_only_the_cheapest_keys_need(world):
+    world.miner_key("shared-key", 10_000)  # 11,000 a call; the most a profile call may cost is 275,000
+    buyer = hotkey()
+    world.gamma.units[buyer] = 25_000 * 1000  # two calls' worth
+    who, inner = world.who(buyer), []
+
+    def second_call_while_the_first_is_in_flight():
+        inner.append(world.market.call("", PROFILE, who))
+        return ok()
+
+    world.vendor.script["shared-key"] = [second_call_while_the_first_is_in_flight, ok()]
+    assert world.market.call("", PROFILE, who)["charge_microusd"] == 11_000
+    assert inner[0]["charge_microusd"] == 11_000
+
+
+def test_balance_reads_past_the_limit_answer_at_once_without_the_chain(world):
+    reads = []
+    world.gamma.read = lambda hk, head=None: reads.append(hk)
+    for _ in range(market_module.CHAIN_READS):
+        world.market._chain_reads.acquire()
+    try:
+        with pytest.raises(ToolMarketError) as busy:
+            world.market.gamma_balance("5FLSigC9HGRKVhB9FiEo4Y3koPsNmBmLJbpXg2mp1hXcS59Y")
+        assert (busy.value.status, busy.value.code) == (503, "gamma_unavailable") and reads == []
+    finally:
+        for _ in range(market_module.CHAIN_READS):
+            world.market._chain_reads.release()

@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -55,6 +56,14 @@ class Client:
         self.api_key = api_key
         self.keypair = keypair
         self._receiver = ""
+        self._nonce, self._nonce_lock = 0, threading.Lock()
+
+    def _next_nonce(self) -> int:
+        """Strictly increasing, so two requests within one clock tick stay distinct."""
+
+        with self._nonce_lock:
+            self._nonce = max(time.time_ns(), self._nonce + 1)
+            return self._nonce
 
     def receiver(self) -> str:
         """The market's Gamma service hotkey, from its services document."""
@@ -77,7 +86,8 @@ class Client:
             receiver = self.receiver()
             if not receiver:
                 return {"error": "services_document_unreadable"}
-            headers.update(btauth.sign(self.keypair, method=method, target=path, body=data, receiver=receiver))
+            headers.update(btauth.sign(self.keypair, method=method, target=path, body=data, receiver=receiver,
+                                       now_ns=self._next_nonce))
         elif proof:
             timestamp = str(int(time.time()))
             message = signed_message(method, urlsplit(self.url).netloc, path, timestamp, data)

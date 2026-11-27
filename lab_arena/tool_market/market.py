@@ -46,6 +46,11 @@ MAX_ASKS_PER_CALL = 10
 # every call thread with slow free answers (a no-match search, a timeout).
 MAX_CALLS_IN_FLIGHT_PER_BUYER = 8
 RECHECK_SPACING_SECONDS = 60
+# Gamma balance reads in flight in this process. Each is several chain
+# requests under the chain client's one lock, which every paid call's epoch
+# read also takes; anyone can ask for one (a fresh hotkey, the public
+# balance), so past this many the answer is 503 at once.
+CHAIN_READS = 2
 # An envelope (4,096 characters), the attestation and the other fields.
 MAX_REGISTER_BODY_BYTES = 8192
 MAX_USAGE_PAGE = 500
@@ -135,6 +140,7 @@ class ToolMarket:
         self._rechecked: Dict[str, float] = {}
         self._in_flight: Dict[str, int] = {}
         self._lock = threading.Lock()
+        self._chain_reads = threading.BoundedSemaphore(CHAIN_READS)
 
     # Terms and balance ------------------------------------------------------
     def accept_terms(self, identity: BuyerIdentity, body: Mapping[str, Any]) -> Dict[str, Any]:
@@ -154,10 +160,14 @@ class ToolMarket:
     def balance(self, hotkey: str) -> Dict[str, Any]:
         """Read the buyer's Gamma spend to this service and return their balance."""
 
+        if not self._chain_reads.acquire(blocking=False):
+            raise ToolMarketError(503, "gamma_unavailable")
         try:
             reading = self._gamma.read(hotkey)
         except ArenaChainError:  # a Gamma read or the finalized head
             raise ToolMarketError(503, "gamma_unavailable") from None
+        finally:
+            self._chain_reads.release()
         result = self._store.record_gamma_reading(
             hotkey=hotkey, block_number=reading.block_number, block_hash=reading.block_hash,
             spent_units=reading.spent_units, available=reading.available)
@@ -446,9 +456,14 @@ class ToolMarket:
         with self._slot(hotkey, MAX_CALLS_IN_FLIGHT_PER_BUYER, "too_many_calls_in_flight"):
             opened = open_for(most)
             if opened["status"] == "insufficient_balance":
-                # What fits: a cheaper key's call may need less than ``most``.
-                budget = min(most, int(self.balance(hotkey).get("balance_microusd") or 0))
-                opened = open_for(budget) if budget > 0 else opened
+                # Hold only what the cheapest key that could serve needs, so
+                # concurrent calls share a small balance, not one taking it all.
+                need = min((book.charge_microusd(book.owed_microusd(op, op.max_units, ask.ask_microusd))
+                            for ask in self._asks(tool, op, max_ask, private)), default=None)
+                if need is None:
+                    raise ToolMarketError(503, "no_supply")
+                if need <= int(self.balance(hotkey).get("balance_microusd") or 0):
+                    opened = open_for(need)
             if opened["status"] != "opened":
                 raise ToolMarketError(402, "insufficient_balance")
             try:
@@ -490,13 +505,10 @@ class ToolMarket:
             raise ToolMarketError(503, "chain_unavailable") from None
         tried = attempts = 0
         short = False
-        for ask in book.rank(book.Ask.from_row(row) for row in self._supply(tool)):
+        for ask in self._asks(tool, op, max_ask, private):
             if tried >= MAX_KEYS_PER_CALL or attempts >= MAX_ASKS_PER_CALL:
                 break
             owed_cap = book.owed_microusd(op, op.max_units, ask.ask_microusd)
-            if ask.ask_microusd > max_ask or (private and not self._private(tool, ask)) \
-                    or owed_cap > ask.remaining_microusd:
-                continue  # known from the book: no reserve could succeed
             attempts += 1
             call_id = self._new_id()
             status = self._store.reserve_call(
@@ -565,6 +577,14 @@ class ToolMarket:
     def _require_supplier(self, tool: str, hotkey: str) -> None:
         if not self._config.may_supply(tool, hotkey):
             raise ToolMarketError(403, "supplier_not_approved")
+
+    def _asks(self, tool: str, op: catalog.Operation, max_ask: int, private: bool):
+        """The book's asks, best first, that a reserve for this call could take."""
+
+        for ask in book.rank(book.Ask.from_row(row) for row in self._supply(tool)):
+            if ask.ask_microusd <= max_ask and (not private or self._private(tool, ask)) \
+                    and book.owed_microusd(op, op.max_units, ask.ask_microusd) <= ask.remaining_microusd:
+                yield ask
 
     def _supply(self, tool: str):
         return [row for row in self._store.book(tool=tool, terms_sha256=self._config.terms_sha256)

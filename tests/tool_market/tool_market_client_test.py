@@ -157,3 +157,10 @@ def test_an_answer_that_is_not_a_json_object_is_an_error(monkeypatch):
         page.read = lambda body=body: body
         monkeypatch.setattr(client_module, "_open", page)
         assert client_module.Client("https://gw.example", api_key="k").tools() == {"error": "http_200", "status": 200}
+
+
+def test_signed_requests_in_one_clock_tick_get_distinct_nonces(monkeypatch):
+    monkeypatch.setattr(client_module.time, "time_ns", lambda: 1752076800 * 10**9)
+    gateway = client_module.Client("https://gw.example", keypair=Keypair.create_from_uri("//Alice"))
+    first, second = gateway._next_nonce(), gateway._next_nonce()
+    assert second > first >= 1752076800 * 10**9

@@ -141,9 +141,18 @@ def test_interrupted_pool_prefix_exports_before_its_final_bill(pool_fixture, tmp
         meta = json.loads(archive.read("metadata.json"))
         assert meta["unknown_miner_bills"] == 1 and meta["settled_miner_cost_microusd"] >= 10
         assert meta["miner_cost_microusd"] is None and meta["cost_per_kept_row_microusd"] is None
+    # Resolving one of multiple open reservations can change the known bill
+    # while the job remains partial_billing_pending. Refresh that revision too.
+    grant["unresolved"] = 2
+    waiting, two_open, two = tick(before)
+    assert two["unresolved_miner_calls"] == 2 and two_open != old
+    grant["unresolved"] = 1
+    grant["miner_cost_microusd"] = 11
+    waiting, one_open, one = tick(waiting)
+    assert one["settled_miner_cost_microusd"] == 11 and one_open not in (old, two_open)
     grant["unresolved"] = 0
     grant["miner_cost_microusd"] = 12
-    after, updated, settled = tick(before)
+    after, updated, settled = tick(waiting)
     assert before["snapshot"] != after["snapshot"] and updated != old and old.read_bytes() == prior_bytes
     assert settled["miner_cost_microusd"] == 12 and "unresolved_miner_calls" not in settled
     assert partial["messages"] == settled["messages"]

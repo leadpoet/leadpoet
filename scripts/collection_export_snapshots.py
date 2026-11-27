@@ -246,9 +246,11 @@ def observe(private_root, directory, db, objects, previous=None, *, max_groups=3
                 if same and exists:
                     groups[case] = prior_group
                 else:
-                    # An old archive may remain discoverable for an append-only change.
+                    # A change to a queued attempt cannot invalidate its published siblings.
+                    # Check all prior released or held members, including billing evidence.
                     before = prior_group.get("members", {})
-                    kept = exists and all(members.get(i) == row for i, row in before.items())
+                    published = set(prior_group.get("released", ())) | set(prior_group.get("held", {}))
+                    kept = exists and all(i in before and members.get(i) == before[i] for i in published)
                     groups[case] = {**(prior_group if kept else {}), "members": members, "queued": True}
                 old_partial = any(m["job_status"] == "failed" for m in members.values())
                 if groups[case].get("queued"):

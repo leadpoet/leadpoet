@@ -9,7 +9,7 @@ import pytest
 from lab_arena.store import ArenaStoreError
 from lab_arena.tool_market import market
 from tests.tool_market.tool_market_pg_test import (
-    PROFILE, USD, admin, database, hotkey, store, world,
+    PROFILE, USD, database, hotkey, store, world,
 )
 
 

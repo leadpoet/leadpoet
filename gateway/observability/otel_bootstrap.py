@@ -808,6 +808,11 @@ _ARENA_RUN_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,200}$")
 _ARENA_ROUND_ID_RE = re.compile(r"^arena-[0-9]{4}-[0-9]{2}-[0-9]{2}(?:-[a-z0-9]{1,16})?$")
 _ARENA_SUBMISSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 _ARENA_RUNNER_HOTKEY_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{46,48}$")
+# Shape, not an enum. The reviewer's model ids rotate whenever a provider
+# withdraws an endpoint, and this allowlist is set equality: pinning the four
+# current ids here would silently DROP every review span the next time one of
+# them changes, which is exactly the moment the attribute is worth having.
+_ARENA_REVIEW_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}/[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 
 # The base provider envelope plus the complete trusted run identity when the
 # service has one. Partial identities and any additional field drop the span.
@@ -862,6 +867,7 @@ RUNTIME_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(
 
 REVIEW_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
     "arena.review_status": (str,),
+    "arena.review_model": (str,),
     "arena.error_code": (str,),
     "arena.review_categories": (str,),
     "arena.provider_http_status": (int,),
@@ -1320,6 +1326,9 @@ def _validating_exporter(
                 return "review_categories"
         if attributes["arena.funding_route"] not in ARENA_REVIEW_FUNDING_ROUTES:
             return "funding_route"
+        review_model = attributes["arena.review_model"]
+        if review_model != "-" and not _ARENA_REVIEW_MODEL_RE.fullmatch(review_model):
+            return "review_model"
         if not 0 <= attributes["arena.provider_http_status"] <= 599:
             return "provider_http_status"
         if not _ARENA_ROUND_ID_RE.fullmatch(attributes["arena.round_id"]):
@@ -1917,6 +1926,7 @@ class ArenaTelemetry:
         self, status: str, *, error_code: str, categories: str,
         provider_http_status: int, retryable: bool, funding_route: str,
         round_id: str, submission_id: str, miner_hotkey: str, attempt: int,
+        review_model: str = "-",
     ) -> None:
         try:
             if self._review_tracer is None:
@@ -1927,6 +1937,7 @@ class ArenaTelemetry:
             span.set_attribute("arena.review_status", status)
             span.set_attribute("arena.error_code", error_code)
             span.set_attribute("arena.review_categories", categories)
+            span.set_attribute("arena.review_model", review_model)
             span.set_attribute("arena.provider_http_status", provider_http_status)
             span.set_attribute("arena.retryable", retryable)
             span.set_attribute("arena.funding_route", funding_route)

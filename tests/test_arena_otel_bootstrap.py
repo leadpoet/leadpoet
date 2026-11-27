@@ -258,6 +258,7 @@ def test_review_span_uses_its_exact_fail_closed_envelope():
         round_id="arena-2026-10-15", submission_id="miner-submission",
         miner_hotkey="5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9",
         attempt=1,
+        review_model="openai/gpt-6.1-sol",
     )
     recorder.record_review("error", **values)
     (span,) = exp.get_finished_spans()
@@ -266,6 +267,7 @@ def test_review_span_uses_its_exact_fail_closed_envelope():
     assert span.attributes["arena.error_code"] == "code_review_provider_credit"
     assert span.attributes["arena.review_categories"] == "-"
     assert span.attributes["arena.provider_http_status"] == 402
+    assert span.attributes["arena.review_model"] == "openai/gpt-6.1-sol"
 
     exp.clear()
     for changed in (
@@ -278,6 +280,8 @@ def test_review_span_uses_its_exact_fail_closed_envelope():
         {"miner_hotkey": "invalid"},
         {"attempt": 0},
         {"provider_http_status": 900},
+        {"review_model": "a model name with spaces"},
+        {"review_model": "../../../etc/passwd"},
     ):
         recorder.record_review("error", **{**values, **changed})
     assert exp.get_finished_spans() == ()
@@ -287,6 +291,20 @@ def test_review_span_uses_its_exact_fail_closed_envelope():
     })
     (span,) = exp.get_finished_spans()
     assert span.attributes["arena.review_categories"] == "duplicate_submission;fabricated_evidence"
+
+    # A model id the reviewer has never used before must still export: the
+    # ids rotate when a provider withdraws an endpoint, and dropping the span
+    # then would blind the lane exactly when it matters.
+    exp.clear()
+    recorder.record_review("error", **{**values, "review_model": "newvendor/model-v9.2-preview"})
+    (span,) = exp.get_finished_spans()
+    assert span.attributes["arena.review_model"] == "newvendor/model-v9.2-preview"
+
+    # An attempt with no recorded model still exports, under the "-" sentinel.
+    exp.clear()
+    recorder.record_review("error", **{**values, "review_model": "-"})
+    (span,) = exp.get_finished_spans()
+    assert span.attributes["arena.review_model"] == "-"
 
 
 def test_stage_span_carries_only_the_approved_attributes():

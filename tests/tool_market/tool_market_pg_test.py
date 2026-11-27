@@ -1070,3 +1070,22 @@ def test_a_settlement_whose_answer_is_lost_is_read_back_or_named(world, monkeypa
         world.market.call(token, PROFILE)
     assert (unknown.value.status, unknown.value.code) == (503, "store_unavailable")
     assert unknown.value.detail["call_id"]
+
+
+def test_a_tab_whose_opening_answer_is_lost_is_read_back(world, monkeypatch):
+    from lab_arena.store import ArenaStoreError
+
+    buyer = hotkey()
+    world.gamma.units[buyer] = 10**9
+    world.accept(buyer, "buyer")
+    open_tab = world.store.open_tab
+
+    def commit_then_lose(**kwargs):
+        open_tab(**kwargs)
+        raise ArenaStoreError("HTTP 504 from the proxy", http_status=504)
+
+    monkeypatch.setattr(world.store, "open_tab", commit_then_lose)
+    opened = world.market.open_tab(world.who(buyer), {"budget_microusd": 100_000, "seconds": 600})
+    # The buyer gets the token, so the one tab holding their budget can be used and closed.
+    assert opened["status"] == "opened" and opened["budget_microusd"] == 100_000
+    assert world.market.tab(opened["token"])["tab_id"] == opened["tab_id"]

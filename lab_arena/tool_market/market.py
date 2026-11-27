@@ -197,9 +197,18 @@ class ToolMarket:
         seconds = _int(body["seconds"], MIN_TAB_SECONDS, MAX_TAB_SECONDS, "seconds_invalid")
         self.balance(identity.hotkey)
         token = self._new_token()
-        result = self._store.open_tab(tab_id=self._new_id(), hotkey=identity.hotkey, token_hash=token_hash(token),
-                                      budget_microusd=budget, seconds=seconds,
-                                      terms_sha256=self._config.terms_sha256)
+        try:
+            result = self._store.open_tab(tab_id=self._new_id(), hotkey=identity.hotkey, token_hash=token_hash(token),
+                                          budget_microusd=budget, seconds=seconds,
+                                          terms_sha256=self._config.terms_sha256)
+        except ArenaStoreError:
+            # Its answer may be lost after it committed: an open tab only its
+            # token can close would hold the budget until it expires.
+            found = self._store.tab(token_hash(token))
+            if not found:
+                raise
+            result = {"status": "opened", "tab_id": found["tab_id"], "budget_microusd": found["budget_microusd"],
+                      "expires_at": found["expires_at"]}
         if result["status"] == "terms_required":
             raise ToolMarketError(403, "terms_required")
         if result["status"] == "insufficient_balance":

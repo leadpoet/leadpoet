@@ -1,10 +1,10 @@
 """Buyer client for the Subnet 71 tool market: a CLI and a small MCP server.
 
-The hotkey signs three things once: the terms, a balance read and an API
-key (a tab). Everything after that uses only the API key, which is capped
-by its budget and expires, so an agent never holds the hotkey. Usage is
-in "For buyers" in docs/gamma-tool-market.md; ``mcp`` runs a stdio MCP
-server for agents.
+After spending Gamma at the market, the hotkey signs each call (btauth/1)
+and the call is charged to its balance. An agent that should not hold the
+hotkey uses an API key instead: a tab the hotkey opens once, capped by its
+budget, with an expiry. Usage is in "For buyers" in
+docs/gamma-tool-market.md; ``mcp`` runs a stdio MCP server for agents.
 
 ``SUBNET71_URL`` (or ``--url``) is the gateway's public origin, with no path:
 https, or http only to this machine. ``name=value`` sends text and
@@ -24,6 +24,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
 from lab_arena.lead_orders.auth import signed_message
+from lab_arena.tool_market import btauth
 from lab_arena.tool_market.config import PUBLISHED_TERMS
 
 TIMEOUT_SECONDS = 120
@@ -53,14 +54,31 @@ class Client:
         self.url = url.rstrip("/")
         self.api_key = api_key
         self.keypair = keypair
+        self._receiver = ""
+
+    def receiver(self) -> str:
+        """The market's Gamma service hotkey, from its services document."""
+
+        if not self._receiver:
+            publishers = self.request("GET", "/tool-market/services.json").get("publishers") or [{}]
+            self._receiver = str(publishers[0].get("hotkey") or "")
+        return self._receiver
 
     def request(self, method: str, path: str, body: Optional[Dict[str, Any]] = None, *,
-                signed: bool = False) -> Dict[str, Any]:
-        """The gateway's JSON answer; an error answer comes back as ``{"error": ..., "status": ...}``."""
+                signed: bool = False, proof: bool = False) -> Dict[str, Any]:
+        """The gateway's JSON answer; an error answer comes back as ``{"error": ..., "status": ...}``.
+
+        ``signed``: btauth/1 by the hotkey. ``proof``: the lead-order scheme,
+        which the terms need, since their signature is stored."""
 
         data = json.dumps(body).encode() if body is not None else b""
         headers = {"content-type": "application/json", "accept": "application/json"}
         if signed:
+            receiver = self.receiver()
+            if not receiver:
+                return {"error": "services_document_unreadable"}
+            headers.update(btauth.sign(self.keypair, method=method, target=path, body=data, receiver=receiver))
+        elif proof:
             timestamp = str(int(time.time()))
             message = signed_message(method, urlsplit(self.url).netloc, path, timestamp, data)
             headers.update({"x-hotkey": self.keypair.ss58_address, "x-timestamp": timestamp,
@@ -88,10 +106,12 @@ class Client:
 
     def call(self, tool: str, operation: str, params: Dict[str, Any],
              max_ask_microusd: Optional[int] = None, private: Any = False) -> Dict[str, Any]:
+        """On the API key when one is set, else signed by the hotkey."""
+
         body: Dict[str, Any] = {"tool": tool, "operation": operation, "params": params, "private": private}
         if max_ask_microusd is not None:
             body["max_ask_microusd"] = max_ask_microusd
-        return self.request("POST", "/tool-market/call", body)
+        return self.request("POST", "/tool-market/call", body, signed=not self.api_key)
 
 
 # -- MCP (stdio, JSON-RPC 2.0, one message per line) ----------------------------
@@ -102,7 +122,8 @@ MCP_TOOLS = [
                     "and the current price in micro-USD. Read this before call_tool.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "call_tool",
-     "description": "Call one tool operation from find_tool. It is charged to the API key's budget.",
+     "description": "Call one tool operation from find_tool. It is charged to the Gamma balance "
+                    "(or the API key's budget, when one is set).",
      "inputSchema": {"type": "object", "required": ["tool", "operation"], "properties": {
          "tool": {"type": "string"}, "operation": {"type": "string"},
          "params": {"type": "object", "description": "The operation's parameters, as find_tool lists them."},
@@ -179,8 +200,8 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--hotkey-name", default="default")
     parser.add_argument("--hotkey-uri", default="", help="for tests, such as //Alice")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("terms", help="accept the buyer terms (once)")
-    commands.add_parser("balance", help="your Gamma balance: what you spent to the market, less what is held")
+    commands.add_parser("terms", help="accept the buyer terms (once; needed for an API key)")
+    commands.add_parser("balance", help="your Gamma balance at the market, in USD")
     key = commands.add_parser("key", help="create an API key that spends up to --budget USD of your balance")
     key.add_argument("--budget", type=float, required=True, help="USD")
     key.add_argument("--days", type=float, default=30)
@@ -202,19 +223,20 @@ def main(argv: Optional[list] = None) -> int:
     except ValueError as error:
         parser.error(str(error))
 
-    if args.command in ("terms", "balance", "key"):
+    # Calls sign with the hotkey unless an API key is set.
+    if args.command in ("terms", "balance", "key") or (args.command in ("call", "mcp") and not client.api_key):
         client.keypair = _keypair(args)
     if args.command == "terms":
         version, sha256 = list(PUBLISHED_TERMS.items())[-1]
         answer = client.request("POST", "/tool-market/terms", {
-            "role": "buyer", "terms_version": version, "terms_sha256": sha256}, signed=True)
+            "role": "buyer", "terms_version": version, "terms_sha256": sha256}, proof=True)
         wanted = answer.get("terms_version")
         if answer.get("error") == "terms_outdated" and isinstance(wanted, str) and wanted in PUBLISHED_TERMS:
             # The gateway trades on another published version: sign that one.
             answer = client.request("POST", "/tool-market/terms", {
-                "role": "buyer", "terms_version": wanted, "terms_sha256": PUBLISHED_TERMS[wanted]}, signed=True)
+                "role": "buyer", "terms_version": wanted, "terms_sha256": PUBLISHED_TERMS[wanted]}, proof=True)
     elif args.command == "balance":
-        answer = client.request("GET", "/tool-market/balance", signed=True)
+        answer = client.request("GET", "/tool-market/gamma/balance?hotkey=" + client.keypair.ss58_address)
     elif args.command == "key":
         answer = client.request("POST", "/tool-market/tabs", {
             "budget_microusd": round(args.budget * 1_000_000), "seconds": round(args.days * 86400)}, signed=True)

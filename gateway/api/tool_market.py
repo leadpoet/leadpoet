@@ -4,11 +4,15 @@ While ``LEADPOET_TOOL_MARKET_MODE`` is ``off`` (the default) every route
 answers 404 and nothing is built. The routes touch no Arena or lead-order
 state.
 
-* Signed routes: sr25519 hotkey signature, 60 s timestamp window, one use
-  per signature (``lab_arena.lead_orders.auth``), as the lead-order routes.
-* Tab routes: the token a signed ``POST /tool-market/tabs`` returned, as a
-  bearer token, so an agent can call tools without signing each call.
-* Public: the catalog and the order book of each enabled tool.
+* Signed routes: btauth/1, Bittensor's signed requests, with the Gamma
+  service hotkey as receiver (``lab_arena.tool_market.btauth``), or the
+  lead-order scheme (``lab_arena.lead_orders.auth``). The terms and key
+  registrations take only the lead-order scheme: their signature is stored,
+  and its message (host, timestamp) can be rebuilt from what is stored.
+* ``POST /tool-market/call``: btauth/1, charged to the hotkey's Gamma
+  balance (the Gamma standard), or a tab's token as a bearer token.
+* Public, with ``Access-Control-Allow-Origin: *``: the services document,
+  the OpenAPI spec, the catalog, each tool's book and any hotkey's balance.
 """
 
 from __future__ import annotations
@@ -38,6 +42,10 @@ _call_threads = anyio.CapacityLimiter(CALL_THREADS)
 # few threads: a miner re-posting a key cannot hold up other routes.
 CHECK_THREADS = 4
 _check_threads = anyio.CapacityLimiter(CHECK_THREADS)
+# The public balance reads the chain, so it gets a few threads of its own.
+BALANCE_THREADS = 4
+_balance_threads = anyio.CapacityLimiter(BALANCE_THREADS)
+PUBLIC = {"access-control-allow-origin": "*"}
 
 _lock = threading.Lock()
 _state: Optional[Tuple[Any, Any]] = None
@@ -102,9 +110,37 @@ def _bearer(request: Request) -> str:
     return value[len("Bearer "):] if value.startswith("Bearer ") else ""
 
 
+def _target(request: Request) -> str:
+    """The request target as sent (percent-encoded), as btauth/1 signs it."""
+
+    target = request.scope.get("raw_path", request.url.path.encode()).decode("latin-1")
+    query = request.scope.get("query_string", b"").decode("latin-1")
+    return target + ("?" + query if query else "")
+
+
+def _identity(request: Request, config: Any, market: Any, body: bytes, *, proof: bool) -> Any:
+    headers = request.headers
+    if support.btauth.VERSION_HEADER in headers and not proof:
+        if "authorization" in headers:
+            raise support.ToolMarketError(400, "btauth_ambiguous_credentials")
+        return support.btauth.verify(
+            headers, body, method=request.method, target=_target(request), receiver=config.gamma_service,
+            verifier=_verifier or support.verify_hotkey_signature, use_nonce=market.use_nonce)
+    return support.verify_buyer_request(
+        method=request.method, host=config.public_host, path=request.url.path, body=body,
+        hotkey=headers.get("x-hotkey"), timestamp=headers.get("x-timestamp"),
+        signature=headers.get("x-signature"), verifier=_verifier or support.verify_hotkey_signature,
+        use_nonce=market.use_nonce)
+
+
 async def _handle(request: Request, work: Callable[[Any, Any, bytes], Any], *, signed: bool,
-                  limiter: Optional[anyio.CapacityLimiter] = None) -> Response:
-    """Shared route body: mode gate, signature, thread offload, errors."""
+                  limiter: Optional[anyio.CapacityLimiter] = None, proof: bool = False,
+                  public: bool = False) -> Response:
+    """Shared route body: mode gate, signature, thread offload, errors.
+
+    ``signed``: btauth/1 or the lead-order scheme (``proof``: that one only).
+    ``public``: readable from any web page.
+    """
 
     try:
         config, market = await anyio.to_thread.run_sync(_get_state)
@@ -123,39 +159,60 @@ async def _handle(request: Request, work: Callable[[Any, Any, bytes], Any], *, s
         body = bytes(buf)
         identity = None
         if signed:
-            headers = request.headers
-            identity = await anyio.to_thread.run_sync(lambda: support.verify_buyer_request(
-                method=request.method, host=config.public_host, path=request.url.path, body=body,
-                hotkey=headers.get("x-hotkey"), timestamp=headers.get("x-timestamp"),
-                signature=headers.get("x-signature"), verifier=_verifier or support.verify_hotkey_signature,
-                use_nonce=market.use_nonce,
-            ))
+            identity = await anyio.to_thread.run_sync(
+                lambda: _identity(request, config, market, body, proof=proof))
         result = await anyio.to_thread.run_sync(lambda: work(market, identity, body), limiter=limiter)
     except support.ToolMarketError as exc:
-        return _error(exc.status, exc.code, **exc.detail)
+        response = _error(exc.status, exc.code, **exc.detail)
     except support.AuthError as exc:
-        return _error(exc.status, exc.code)
+        response = _error(exc.status, exc.code)
+        if exc.code.startswith("btauth_"):
+            response.headers["www-authenticate"] = "btauth/1"
     except support.ArenaStoreError:
-        return _error(503, "store_unavailable")
-    return JSONResponse(status_code=200, content=result)
+        response = _error(503, "store_unavailable")
+    else:
+        response = JSONResponse(status_code=200, content=result)
+    if public:
+        response.headers.update(PUBLIC)
+    return response
 
 
 # -- public ---------------------------------------------------------------------
 
+@router.get("/tool-market/services.json")
+async def services(request: Request) -> Response:
+    return await _handle(request, lambda m, who, body: m.services(), signed=False,
+                         public=True)
+
+
+@router.get("/tool-market/openapi.json")
+async def openapi(request: Request) -> Response:
+    return await _handle(request, lambda m, who, body: m.openapi(), signed=False, public=True)
+
+
 @router.get("/tool-market/catalog")
 async def tool_catalog(request: Request) -> Response:
-    return await _handle(request, lambda m, who, body: m.tool_catalog(), signed=False)
+    return await _handle(request, lambda m, who, body: m.tool_catalog(), signed=False, public=True)
 
 
 @router.get("/tool-market/books/{tool}")
 async def order_book(tool: str, request: Request) -> Response:
-    return await _handle(request, lambda m, who, body: m.order_book(tool), signed=False)
+    return await _handle(request, lambda m, who, body: m.order_book(tool), signed=False, public=True)
 
 
-# -- tab token ------------------------------------------------------------------
+@router.get("/tool-market/gamma/balance")
+async def gamma_balance(request: Request, hotkey: str = "") -> Response:
+    return await _handle(request, lambda m, who, body: m.gamma_balance(hotkey), signed=False, public=True,
+                         limiter=_balance_threads)
+
+
+# -- calls: btauth/1 or a tab token ----------------------------------------------
 
 @router.post("/tool-market/call")
 async def call(request: Request) -> Response:
+    if support.btauth.VERSION_HEADER in request.headers:
+        return await _handle(request, lambda m, who, body: m.call("", _json(body), who), signed=True,
+                             limiter=_call_threads)
     token = _bearer(request)
     return await _handle(request, lambda m, who, body: m.call(token, _json(body)), signed=False,
                          limiter=_call_threads)
@@ -184,12 +241,8 @@ async def close_tab(request: Request) -> Response:
 
 @router.post("/tool-market/terms")
 async def accept_terms(request: Request) -> Response:
-    return await _handle(request, lambda m, who, body: m.accept_terms(who, _json(body)), signed=True)
-
-
-@router.get("/tool-market/balance")
-async def balance(request: Request) -> Response:
-    return await _handle(request, lambda m, who, body: m.balance(who.hotkey), signed=True)
+    return await _handle(request, lambda m, who, body: m.accept_terms(who, _json(body)), signed=True,
+                         proof=True)
 
 
 @router.post("/tool-market/tabs")
@@ -200,7 +253,7 @@ async def open_tab(request: Request) -> Response:
 @router.post("/tool-market/keys")
 async def register_key(request: Request) -> Response:
     return await _handle(request, lambda m, who, body: m.register_key(who, _json(body), body), signed=True,
-                         limiter=_check_threads)
+                         limiter=_check_threads, proof=True)
 
 
 @router.post("/tool-market/keys/{key_id}/check")

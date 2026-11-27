@@ -17,6 +17,7 @@ from lab_arena.tool_market.config import ToolMarketConfig
 from lab_arena.tool_market.market import ToolMarket, ToolMarketError
 
 ALICE = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+BOB = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"  # the market's Gamma service hotkey
 
 
 class FakeMarket:
@@ -35,7 +36,10 @@ class FakeMarket:
         self.seen.append(("ask", identity.hotkey, body))
         return {"status": "posted", "ask_sequence": 1}
 
-    def call(self, token, body):
+    def call(self, token, body, identity=None):
+        if identity is not None:
+            self.seen.append(("signed call", identity.hotkey, body))
+            return {"call_id": "c", "status": 200, "body": {}, "charge_microusd": 11_000}
         self.seen.append(("call", token, body))
         if token != "tmt_good":
             raise ToolMarketError(402, "tab_budget")
@@ -51,6 +55,15 @@ class FakeMarket:
     def order_book(self, tool):
         return {"tool": tool, "asks": []}
 
+    def gamma_balance(self, hotkey):
+        return {"hotkey": hotkey, "credited_usd": "0.000000", "used_usd": "0.000000", "remaining_usd": "0.000000"}
+
+    def services(self):
+        return {"publishers": [{"netuid": 71, "hotkey": BOB}]}
+
+    def openapi(self):
+        return {"openapi": "3.0.3"}
+
 
 @pytest.fixture
 def client():
@@ -62,7 +75,7 @@ def client():
 
 
 def enable():
-    config = ToolMarketConfig(mode="live", tools=frozenset({"exa"}), gamma_service=ALICE, terms_version="v1",
+    config = ToolMarketConfig(mode="live", tools=frozenset({"exa"}), gamma_service=BOB, terms_version="v1",
                               terms_sha256="a" * 64, public_base_url="https://gw.example")
     market = FakeMarket()
     routes.configure(builder=lambda: (config, market), verifier=wallet_signature_verifier)
@@ -83,7 +96,8 @@ def test_every_route_is_404_when_the_mode_is_off(client, monkeypatch):
     routes.configure()
     for method, path in (("GET", "/tool-market/books/exa"), ("GET", "/tool-market/catalog"), ("POST", "/tool-market/call"),
                          ("GET", "/tool-market/tab"), ("POST", "/tool-market/tab/close"),
-                         ("POST", "/tool-market/terms"), ("GET", "/tool-market/balance"),
+                         ("POST", "/tool-market/terms"), ("GET", "/tool-market/gamma/balance"),
+                         ("GET", "/tool-market/services.json"), ("GET", "/tool-market/openapi.json"),
                          ("POST", "/tool-market/tabs"), ("POST", "/tool-market/keys"),
                          ("POST", "/tool-market/keys/k/check"), ("POST", "/tool-market/keys/k/revoke"),
                          ("POST", "/tool-market/asks"), ("GET", "/tool-market/statement"),
@@ -184,3 +198,48 @@ def test_lead_search_raw_v2_verification_preserves_vendor_verdict_and_actual_cha
     assert client.post(url, json={"payload": {}}).json()["status"] == "failed"
     market.call = lambda *_: {"call_id": "call3", "status": 500, "body": {}, "charge_microusd": 0}
     assert client.post(url, json={"payload": {}}).json()["status"] == "failed"
+
+
+def btauth_headers(path, body, *, receiver=BOB):
+    from bittensor_wallet import Keypair
+
+    from lab_arena.tool_market import btauth
+
+    return btauth.sign(Keypair.create_from_uri("//Alice"), method="POST", target=path, body=body,
+                       receiver=receiver)
+
+
+def test_a_btauth_call_is_charged_to_the_signers_balance_with_no_key(client):
+    market = enable()
+    body = json.dumps({"tool": "exa", "operation": "search", "params": {"query": "q"}}).encode()
+    headers = btauth_headers("/tool-market/call", body)
+    answer = client.post("/tool-market/call", content=body, headers=headers)
+    assert answer.status_code == 200 and market.seen[-1] == ("signed call", ALICE, json.loads(body))
+    replayed = client.post("/tool-market/call", content=body, headers=headers)
+    assert replayed.status_code == 401 and replayed.json() == {"error": "btauth_replayed_nonce"}
+    assert replayed.headers["www-authenticate"] == "btauth/1"
+    wrong = client.post("/tool-market/call", content=body,
+                        headers=btauth_headers("/tool-market/call", body, receiver=ALICE))
+    assert wrong.json() == {"error": "btauth_wrong_receiver"}
+    both = client.post("/tool-market/call", content=body, headers=dict(
+        btauth_headers("/tool-market/call", body), authorization="Bearer tmt_good"))
+    assert both.status_code == 400 and both.json() == {"error": "btauth_ambiguous_credentials"}
+    # The path signed must be the path sent, query and all.
+    moved = client.post("/tool-market/call?x=1", content=body, headers=btauth_headers("/tool-market/call", body))
+    assert moved.json() == {"error": "btauth_bad_signature"}
+
+
+def test_the_terms_take_only_the_scheme_whose_signature_is_stored(client):
+    enable()
+    body = b"{}"
+    answer = client.post("/tool-market/terms", content=body, headers=btauth_headers("/tool-market/terms", body))
+    assert answer.status_code == 401 and answer.json() == {"error": "hotkey_invalid"}
+
+
+def test_discovery_and_balance_are_public_and_readable_from_any_page(client):
+    enable()
+    for path in ("/tool-market/services.json", "/tool-market/openapi.json", "/tool-market/catalog",
+                 "/tool-market/gamma/balance?hotkey=" + ALICE):
+        answer = client.get(path)
+        assert answer.status_code == 200 and answer.headers["access-control-allow-origin"] == "*"
+    assert client.get("/tool-market/gamma/balance?hotkey=" + ALICE).json()["remaining_usd"] == "0.000000"

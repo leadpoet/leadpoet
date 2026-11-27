@@ -131,7 +131,8 @@ def test_gamma_reader_reads_finalized_spent_counter():
     client = FakeClient(value=type("V", (), {"value": 2_500_000_000})())
     reading = GammaBalanceReader(FakeChain(client), service_id=BOB).read(ALICE)
     assert reading.available and reading.spent_units == 2_500_000_000 and reading.block_number == 500
-    assert client.calls == [("SubtensorModule", "GammaSpent", [71, BOB, ALICE], "0x" + "ab" * 32)]
+    assert client.calls == [("SubtensorModule", "GammaSpent", [71, BOB, ALICE], "0x" + "ab" * 32),
+                            ("SubtensorModule", "RegisteredSubnetCounter", [71], "0x" + "ab" * 32)]
     assert money.gamma_units_to_microusd(reading.spent_units) == 2_500_000
     assert GammaBalanceReader(FakeChain(FakeClient(value=None)), service_id=BOB).read(ALICE).spent_units == 0
 

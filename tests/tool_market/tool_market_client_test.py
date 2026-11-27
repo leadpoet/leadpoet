@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -11,7 +12,7 @@ from bittensor_wallet import Keypair
 
 from lab_arena.chain import wallet_signature_verifier
 from lab_arena.lead_orders.auth import verify_buyer_request
-from lab_arena.tool_market import client as client_module
+from lab_arena.tool_market import btauth, client as client_module
 
 
 class Recorder:
@@ -34,15 +35,32 @@ class Recorder:
         return json.dumps(self.answer).encode()
 
 
-def test_a_signed_request_passes_the_gateways_check(monkeypatch):
-    sent = Recorder({"status": "opened", "token": "tmt_x"})
+def test_a_call_with_no_api_key_is_signed_with_btauth_to_the_published_service_hotkey(monkeypatch):
+    bob = Keypair.create_from_uri("//Bob").ss58_address
+    sent = Recorder({"publishers": [{"netuid": 71, "hotkey": bob}], "status": 200})
     monkeypatch.setattr(client_module, "_open", sent)
     alice = Keypair.create_from_uri("//Alice")
     client = client_module.Client("https://gw.example:443/", keypair=alice)
-    client.request("POST", "/tool-market/tabs", {"budget_microusd": 1, "seconds": 60}, signed=True)
+    client.call("hunter", "email_finder", {"domain": "acme.com"})
+    client.call("hunter", "email_finder", {"domain": "acme.com"})
+    paths = [urlsplit(r.full_url).path for r in sent.sent]
+    assert paths == ["/tool-market/services.json", "/tool-market/call", "/tool-market/call"]  # read once
+    request = sent.sent[1]
+    headers = {k.lower(): v for k, v in request.header_items()}
+    identity = btauth.verify(headers, request.data, method="POST", target="/tool-market/call", receiver=bob,
+                             verifier=wallet_signature_verifier, use_nonce=lambda *a: True)
+    assert identity.hotkey == alice.ss58_address and "authorization" not in headers
+
+
+def test_the_terms_are_signed_in_the_scheme_whose_message_is_stored(monkeypatch):
+    sent = Recorder({"status": "accepted"})
+    monkeypatch.setattr(client_module, "_open", sent)
+    alice = Keypair.create_from_uri("//Alice")
+    client = client_module.Client("https://gw.example:443/", keypair=alice)
+    client.request("POST", "/tool-market/terms", {"role": "buyer"}, proof=True)
     request = sent.sent[0]
     identity = verify_buyer_request(
-        method="POST", host="gw.example", path="/tool-market/tabs", body=request.data,
+        method="POST", host="gw.example", path="/tool-market/terms", body=request.data,
         hotkey=request.get_header("X-hotkey"), timestamp=request.get_header("X-timestamp"),
         signature=request.get_header("X-signature"), verifier=wallet_signature_verifier,
         use_nonce=lambda *a: True)

@@ -2,8 +2,8 @@
 
 A miner seals a vendor key to the key vault on their own machine, registers
 the envelope here, and posts an ask: what they earn per unit of usage. A
-buyer opens a tab against their Gamma balance and calls catalog operations
-with the tab's token. Each call goes to the cheapest eligible key, through
+buyer calls catalog operations with requests their hotkey signs (btauth/1),
+charged to their Gamma balance, or opens a tab and calls with its token. Each call goes to the cheapest eligible key, through
 the vault, which puts the key where the vendor expects it. The buyer pays
 the ask plus 10% (``book.charge_microusd``); the miner is owed the ask.
 
@@ -25,10 +25,12 @@ from contextlib import contextmanager
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from lab_arena.lead_orders.auth import BuyerIdentity
+from lab_arena.lead_orders.config import is_valid_hotkey
 from lab_arena.lead_orders.keys import json_document
 from lab_arena.lead_orders.vault_client import VaultTransportError, VaultUnavailable
-from lab_arena.tool_market import book, catalog
+from lab_arena.tool_market import book, catalog, discovery
 from lab_arena.chain import ArenaChainError
+from lab_arena.store import ArenaStoreError
 from lab_arena.tool_market.config import ToolMarketConfig
 from lab_arena.tool_market.store import ToolMarketStore
 from lead_order_vault import envelope as vault_envelope
@@ -50,6 +52,8 @@ MAX_USAGE_PAGE = 500
 CALL_TIMEOUT_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MIN_TAB_SECONDS = 60
+# A signed call's own tab outlives the call window (``tool_market__open_seconds_v1``).
+CALL_TAB_SECONDS = 600
 MAX_TAB_SECONDS = 30 * 24 * 3600  # a tab is the buyer's API key
 MAX_TAB_MICROUSD = 1_000_000_000  # $1,000
 # Low at launch: what one key may earn in 24 h. Raising it is a code change.
@@ -103,6 +107,10 @@ def _document(body: bytes) -> Any:
     return document
 
 
+def _usd(microusd: int) -> str:
+    return "%d.%06d" % divmod(microusd, 1_000_000)
+
+
 def _int(value: Any, low: int, high: int, code: str, **detail: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
         raise ToolMarketError(400, code, **detail)
@@ -151,10 +159,22 @@ class ToolMarket:
             raise ToolMarketError(503, "gamma_unavailable") from None
         result = self._store.record_gamma_reading(
             hotkey=hotkey, block_number=reading.block_number, block_hash=reading.block_hash,
-            spent_units=reading.spent_units, available=reading.available)
+            spent_units=reading.spent_units, available=reading.available, subnet_counter=reading.subnet_counter)
         if result.get("status") in ("counter_backwards", "reading_conflict"):
             raise ToolMarketError(503, "gamma_unavailable")
         return result
+
+    def gamma_balance(self, hotkey: Any) -> Dict[str, Any]:
+        """The Gamma standard's balance: anyone may read any hotkey's, in USD
+        as decimal strings; a hotkey that never spent here reads zeros."""
+
+        if not isinstance(hotkey, str) or not is_valid_hotkey(hotkey):
+            raise ToolMarketError(400, "invalid_hotkey")
+        found = self.balance(hotkey)
+        credited = max(int(found.get("credit_microusd") or 0), 0)
+        remaining = min(max(int(found.get("balance_microusd") or 0), 0), credited)
+        return {"hotkey": hotkey, "credited_usd": _usd(credited), "used_usd": _usd(credited - remaining),
+                "remaining_usd": _usd(remaining)}
 
     # Tabs -------------------------------------------------------------------
     def open_tab(self, identity: BuyerIdentity, body: Mapping[str, Any]) -> Dict[str, Any]:
@@ -171,8 +191,8 @@ class ToolMarket:
                                       terms_sha256=self._config.terms_sha256)
         if result["status"] == "terms_required":
             raise ToolMarketError(403, "terms_required")
-        if result["status"] == "balance_low":
-            raise ToolMarketError(402, "balance_low", balance=result.get("balance"))
+        if result["status"] == "insufficient_balance":
+            raise ToolMarketError(402, "insufficient_balance", balance=result.get("balance"))
         return dict(result, token=token)
 
     def tab(self, token: str) -> Dict[str, Any]:
@@ -340,6 +360,12 @@ class ToolMarket:
                                for (t, _), op in sorted(catalog.OPERATIONS.items()) if t == tool]})
         return {"tools": tools}
 
+    def services(self) -> Dict[str, Any]:
+        return discovery.services_document(self._config)
+
+    def openapi(self) -> Dict[str, Any]:
+        return discovery.openapi(self._config)
+
     # Calls ------------------------------------------------------------------
     def lead_search_validation(self, token: str, request: Mapping[str, Any]) -> dict:
         """Adapt Lead Search's raw-v2 ZeroBounce contract at the buyer boundary."""
@@ -360,7 +386,10 @@ class ToolMarket:
                 "toolResponse": {"raw": body} if answered else {},
                 "billing": {"cost_usd": result["charge_microusd"] / 1_000_000}}
 
-    def call(self, token: str, body: Mapping[str, Any]) -> Dict[str, Any]:
+    def call(self, token: str, body: Mapping[str, Any], identity: Optional[BuyerIdentity] = None) -> Dict[str, Any]:
+        """One catalog call, on a tab's ``token`` or, with ``identity`` (a
+        btauth/1 request), charged to that hotkey's balance."""
+
         if not isinstance(body, Mapping) or set(body) - {"params", "max_ask_microusd", "private"} \
                 != {"tool", "operation"}:
             raise ToolMarketError(400, "request_invalid")
@@ -380,6 +409,8 @@ class ToolMarket:
             url, headers, payload = op.build(body.get("params", {}))
         except catalog.CatalogError as error:
             raise ToolMarketError(400, error.code) from None
+        if identity is not None:
+            return self._signed_call(identity.hotkey, tool, op, max_ask, private, url, headers, payload)
         if not token:
             raise ToolMarketError(401, "tab_unknown")
         tab = token_hash(token)
@@ -394,6 +425,42 @@ class ToolMarket:
             raise ToolMarketError(403, "buyer_not_allowed")
         with self._slot(hotkey, MAX_CALLS_IN_FLIGHT_PER_BUYER, "too_many_calls_in_flight"):
             return self._buy(tool, op, max_ask, private, tab, hotkey, url, headers, payload)
+
+    def _signed_call(self, hotkey: str, tool: str, op: catalog.Operation, max_ask: int, private: bool,
+                     url: str, headers: Mapping[str, str], payload: bytes) -> Dict[str, Any]:
+        """A call on a tab of its own, closed when the call ends, so it holds
+        at most what this call can cost and leaves its charge on the balance.
+        Gamma spent since the last reading is credited only when the stored
+        balance falls short, so most calls read no chain."""
+
+        if not self._config.may_buy(hotkey):
+            raise ToolMarketError(403, "buyer_not_allowed")
+        most = book.charge_microusd(book.owed_microusd(op, op.max_units, max_ask))
+        tab = token_hash(self._new_token())
+
+        def open_for(budget: int) -> Dict[str, Any]:
+            return self._store.open_tab(tab_id=self._new_id(), hotkey=hotkey, token_hash=tab, budget_microusd=budget,
+                                        seconds=CALL_TAB_SECONDS, terms_sha256=None)
+
+        with self._slot(hotkey, MAX_CALLS_IN_FLIGHT_PER_BUYER, "too_many_calls_in_flight"):
+            opened = open_for(most)
+            if opened["status"] == "insufficient_balance":
+                # What fits: a cheaper key's call may need less than ``most``.
+                budget = min(most, int(self.balance(hotkey).get("balance_microusd") or 0))
+                opened = open_for(budget) if budget > 0 else opened
+            if opened["status"] != "opened":
+                raise ToolMarketError(402, "insufficient_balance")
+            try:
+                return self._buy(tool, op, max_ask, private, tab, hotkey, url, headers, payload)
+            except ToolMarketError as error:
+                if error.code == "tab_budget":  # the tab is this call's share of the balance
+                    raise ToolMarketError(402, "insufficient_balance") from None
+                raise
+            finally:
+                try:
+                    self._store.close_tab(tab)
+                except ArenaStoreError:
+                    pass  # it then lapses in CALL_TAB_SECONDS; the answer must still reach the buyer
 
     @contextmanager
     def _slot(self, name: str, limit: int, code: str):

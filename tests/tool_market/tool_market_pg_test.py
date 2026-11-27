@@ -346,14 +346,33 @@ def test_the_catalog_lists_each_tool_its_operations_and_best_price(world):
     assert tools["exa"]["best_ask_microusd"] is None  # nobody sells it yet
 
 
-def test_polling_a_balance_adds_a_reading_only_when_it_changes(world, admin):
+def test_polling_a_balance_adds_a_reading_only_when_the_total_changes(world, admin):
     buyer = hotkey()
-    read = dict(hotkey=buyer, block_number=7, block_hash="0x" + "07" * 32, spent_units=5, available=True)
-    for _ in range(3):
-        world.store.record_gamma_reading(**read)
-    world.store.record_gamma_reading(**dict(read, block_number=8, block_hash="0x" + "08" * 32))
-    admin.execute("SELECT count(*) FROM public.tool_market_gamma_readings WHERE hotkey=%s", (buyer,))
-    assert admin.fetchone()[0] == 2
+    read = dict(hotkey=buyer, block_number=7, block_hash="0x" + "07" * 32, spent_units=5, available=True,
+                subnet_counter=1)
+    for block in (7, 7, 8):
+        world.store.record_gamma_reading(**dict(read, block_number=block))
+    world.store.record_gamma_reading(**dict(read, block_number=9, spent_units=6))
+    # Anyone may ask for any hotkey's balance: one that never spent adds nothing.
+    world.store.record_gamma_reading(**dict(read, hotkey=hotkey(), spent_units=0))
+    admin.execute("SELECT hotkey,count(*) FROM public.tool_market_gamma_readings WHERE hotkey=%s GROUP BY 1",
+                  (buyer,))
+    assert admin.fetchall() == [(buyer, 2)]
+    admin.execute("SELECT count(*) FROM public.tool_market_gamma_readings WHERE spent_units=0 AND available")
+    assert admin.fetchone()[0] == 0
+
+
+def test_a_registered_again_subnet_starts_its_totals_from_zero_and_keeps_earlier_credit(world):
+    buyer = hotkey()
+    read = dict(hotkey=buyer, block_hash="0x" + "07" * 32, available=True)
+    world.store.record_gamma_reading(**dict(read, block_number=7, spent_units=3 * 10**9, subnet_counter=1))
+    # Dissolved and registered again: the chain's total is back to 2 Gamma.
+    again = world.store.record_gamma_reading(**dict(read, block_number=9, spent_units=2 * 10**9, subnet_counter=2))
+    assert again["credit_microusd"] == 5 * USD
+    # Within one registration a smaller total, or an older counter, is a broken read.
+    for broken in (dict(spent_units=10**9, subnet_counter=2), dict(spent_units=4 * 10**9, subnet_counter=1)):
+        assert world.store.record_gamma_reading(**dict(read, block_number=10, **broken)) == {
+            "status": "counter_backwards"}
 
 
 def test_a_buyer_pages_their_own_finished_calls_by_watermark(world, admin):
@@ -890,3 +909,31 @@ def test_tables_are_append_only_and_closed_to_the_service_role(database):
                 cursor.execute("SELECT public.tool_market__committed_v1(gen_random_uuid())")
     finally:
         connection.close()
+
+
+def test_a_funded_hotkey_calls_with_its_signature_alone_until_its_balance_runs_out(world):
+    """The Gamma standard's acceptance test: no terms step, no API key, 402 at zero."""
+
+    world.miner_key("signed-key", 10_000)  # 11,000 a call to the buyer
+    buyer = "5FLSigC9HGRKVhB9FiEo4Y3koPsNmBmLJbpXg2mp1hXcS59Y"  # //Charlie: a checksummed address
+    who = world.who(buyer)
+    zeros = {"hotkey": buyer, "credited_usd": "0.000000", "used_usd": "0.000000", "remaining_usd": "0.000000"}
+    assert world.market.gamma_balance(buyer) == zeros
+    with pytest.raises(ToolMarketError) as refused:
+        world.market.call("", PROFILE, who)
+    assert (refused.value.status, refused.value.code) == (402, "insufficient_balance")
+    # $0.03: two calls, and less than the most a profile call may cost ($0.275).
+    world.gamma.units[buyer] = 30_000 * 1000
+    for _ in range(2):
+        result = world.market.call("", PROFILE, who)
+        assert result["status"] == 200 and result["charge_microusd"] == 11_000
+    with pytest.raises(ToolMarketError) as empty:
+        world.market.call("", PROFILE, who)
+    assert (empty.value.status, empty.value.code) == (402, "insufficient_balance")
+    assert len(world.vendor.sent) == 2  # a refused call did no work
+    # Each call's own tab closed with it, so the balance holds only the charges.
+    assert world.market.gamma_balance(buyer) == {
+        "hotkey": buyer, "credited_usd": "0.030000", "used_usd": "0.022000", "remaining_usd": "0.008000"}
+    with pytest.raises(ToolMarketError) as invalid:
+        world.market.gamma_balance("not-a-hotkey")
+    assert (invalid.value.status, invalid.value.code) == (400, "invalid_hotkey")

@@ -83,7 +83,7 @@ def build_from_environment(config: ToolMarketConfig):
         _required("LAB_ARENA_SUPABASE_URL", env), service_key=_required("LAB_ARENA_SERVICE_KEY", env),
     ))
     chain_config = chain_module.ArenaChainConfig(
-        endpoint=_required("LAB_ARENA_CHAIN_ENDPOINT", env), netuid=int(env.get("LAB_ARENA_NETUID", "71")),
+        endpoint=_required("LAB_ARENA_CHAIN_ENDPOINT", env), netuid=config.netuid,
         network_name=env.get("LAB_ARENA_NETWORK", "finney"),
         request_timeout_seconds=int(env.get("LAB_ARENA_CHAIN_TIMEOUT_SECONDS", "30")),
     )

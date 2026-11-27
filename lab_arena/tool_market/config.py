@@ -26,6 +26,7 @@ PRIVATE_SUPPLIERS_ENV = "LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS"
 GAMMA_SERVICE_ENV = "LEADPOET_TOOL_MARKET_GAMMA_SERVICE"
 TERMS_VERSION_ENV = "LEADPOET_TOOL_MARKET_TERMS_VERSION"
 PUBLIC_BASE_URL_ENV = "LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL"
+NETUID_ENV = "LAB_ARENA_NETUID"  # the chain reads' netuid (wiring.py)
 
 MODE_OFF = "off"
 MODE_LIVE = "live"
@@ -36,6 +37,8 @@ MODE_LIVE = "live"
 PUBLISHED_TERMS: Mapping[str, str] = {
     "tool-market-terms-v1": "1c76cd8317b7fc68be0655ff24fd36a31ae1745e6b0c8e4ca878d60a67457988",
 }
+# Where the services document points buyers for the terms text.
+TERMS_URL = "https://github.com/leadpoet/leadpoet/blob/main/docs/tool-market-terms.md"
 
 
 class ToolMarketConfigError(RuntimeError):
@@ -55,6 +58,7 @@ class ToolMarketConfig:
     terms_version: str = ""
     terms_sha256: str = ""
     public_base_url: str = ""
+    netuid: int = 71
 
     lead_search_verify_max_ask: Optional[int] = None
     approved_suppliers: FrozenSet[Tuple[str, str]] = frozenset()
@@ -103,6 +107,7 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
         gamma_service=env.get(GAMMA_SERVICE_ENV, "").strip(),
         terms_version=terms_version, terms_sha256=PUBLISHED_TERMS.get(terms_version, ""),
         public_base_url=env.get(PUBLIC_BASE_URL_ENV, "").strip().rstrip("/"),
+        netuid=int(env.get(NETUID_ENV, "71")),
     )
     if not off <= set(TOOLS):
         raise ToolMarketConfigError("%s names a tool the catalog does not have" % TOOLS_OFF_ENV)
@@ -122,6 +127,8 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
 
 
 __all__ = [
+    "PUBLISHED_TERMS",
+    "TERMS_URL",
     "ToolMarketConfig",
     "ToolMarketConfigError",
     "load_config",

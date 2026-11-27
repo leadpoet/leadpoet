@@ -45,6 +45,9 @@ CREATE TABLE public.tool_market_gamma_readings (
   block_hash TEXT NOT NULL CHECK(block_hash ~ '^0x[0-9a-f]{64}$'),
   spent_units NUMERIC(39,0) NOT NULL CHECK(spent_units>=0),
   available BOOLEAN NOT NULL,
+  -- RegisteredSubnetCounter at the block: it grows when the subnet is
+  -- dissolved and registered again, which starts every total from zero.
+  subnet_counter BIGINT NOT NULL CHECK(subnet_counter>=0),
   read_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX tool_market_gamma_readings_hotkey ON public.tool_market_gamma_readings(hotkey,block_number DESC,reading_id DESC);
@@ -283,15 +286,18 @@ $lock770$;
 
 CREATE FUNCTION public.tool_market__balance_v1(p_hotkey TEXT)
 RETURNS JSONB LANGUAGE plpgsql STABLE SET search_path=pg_catalog,public AS $balance770$
-DECLARE r public.tool_market_gamma_readings; held BIGINT; credit BIGINT;
+DECLARE r public.tool_market_gamma_readings; held BIGINT; credit BIGINT; spent NUMERIC;
 BEGIN
  SELECT * INTO r FROM public.tool_market_gamma_readings WHERE hotkey=p_hotkey
   ORDER BY block_number DESC,reading_id DESC LIMIT 1;
+ -- Each registration of the subnet has its own totals: its largest one.
+ SELECT coalesce(sum(m),0) INTO spent FROM (SELECT max(g.spent_units) m FROM public.tool_market_gamma_readings g
+  WHERE g.hotkey=p_hotkey AND g.available GROUP BY g.subnet_counter) totals;
  SELECT coalesce(sum(CASE WHEN public.tool_market__tab_open_v1(t) THEN t.budget_microusd
    ELSE public.tool_market__committed_v1(t.tab_id) END),0)::BIGINT INTO held
   FROM public.tool_market_tabs t WHERE t.hotkey=p_hotkey;
  -- 10^9 Gamma units per USD: 1000 units per micro-USD, rounded down.
- credit:=CASE WHEN r.available THEN floor(r.spent_units/1000)::BIGINT ELSE 0 END;
+ credit:=CASE WHEN r.available THEN floor(spent/1000)::BIGINT ELSE 0 END;
  RETURN jsonb_build_object('available',coalesce(r.available,FALSE),'block_number',r.block_number,
   'credit_microusd',credit,'held_microusd',held,'balance_microusd',credit-held);
 END;
@@ -320,7 +326,7 @@ END;
 $bind770$;
 
 CREATE FUNCTION public.tool_market_record_gamma_reading_v1(
- p_hotkey TEXT,p_block_number BIGINT,p_block_hash TEXT,p_units NUMERIC,p_available BOOLEAN,
+ p_hotkey TEXT,p_block_number BIGINT,p_block_hash TEXT,p_units NUMERIC,p_available BOOLEAN,p_counter BIGINT,
  p_genesis TEXT,p_netuid INTEGER,p_service TEXT,p_registered_at BIGINT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $reading770$
 DECLARE prior public.tool_market_gamma_readings; latest public.tool_market_gamma_readings;
@@ -349,8 +355,15 @@ BEGIN
  IF p_available AND prior.reading_id IS NOT NULL AND p_units<prior.spent_units THEN
   RETURN jsonb_build_object('status','counter_backwards');
  END IF;
- INSERT INTO public.tool_market_gamma_readings(hotkey,block_number,block_hash,spent_units,available)
- VALUES(p_hotkey,p_block_number,lower(p_block_hash),CASE WHEN p_available THEN p_units ELSE 0 END,p_available);
+ -- The same total again (a client polling its balance) adds no row, nor
+ -- does a hotkey that never spent here (anyone may ask for any balance).
+ IF p_available AND ((prior.subnet_counter=p_counter AND prior.spent_units=p_units)
+   OR (prior.reading_id IS NULL AND p_units=0)) THEN
+  RETURN public.tool_market__balance_v1(p_hotkey);
+ END IF;
+ INSERT INTO public.tool_market_gamma_readings(hotkey,block_number,block_hash,spent_units,available,subnet_counter)
+ VALUES(p_hotkey,p_block_number,lower(p_block_hash),CASE WHEN p_available THEN p_units ELSE 0 END,p_available,
+  CASE WHEN p_available THEN p_counter ELSE 0 END);
  RETURN public.tool_market__balance_v1(p_hotkey);
 END;
 $reading770$;
@@ -381,13 +394,16 @@ RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,publi
 DECLARE balance JSONB; expires TIMESTAMPTZ;
 BEGIN
  PERFORM public.tool_market__lock_v1('buyer',p_hotkey);
- IF NOT EXISTS(SELECT 1 FROM public.tool_market_terms WHERE role='buyer' AND hotkey=p_hotkey
-   AND terms_sha256=p_terms_sha256) THEN
+ -- NULL terms: a one-call tab for a btauth/1 call, whose terms the services
+ -- document says the paid request accepts (the Gamma standard allows no
+ -- step before a funded hotkey's first call).
+ IF p_terms_sha256 IS NOT NULL AND NOT EXISTS(SELECT 1 FROM public.tool_market_terms WHERE role='buyer'
+   AND hotkey=p_hotkey AND terms_sha256=p_terms_sha256) THEN
   RETURN jsonb_build_object('status','terms_required');
  END IF;
  balance:=public.tool_market__balance_v1(p_hotkey);
  IF (balance->>'balance_microusd')::BIGINT<p_budget THEN  -- an unavailable reading credits 0
-  RETURN jsonb_build_object('status','balance_low','balance',balance);
+  RETURN jsonb_build_object('status','insufficient_balance','balance',balance);
  END IF;
  expires:=clock_timestamp()+make_interval(secs=>p_seconds);
  INSERT INTO public.tool_market_tabs(tab_id,hotkey,token_hash,budget_microusd,expires_at)

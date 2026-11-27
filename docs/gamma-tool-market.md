@@ -55,24 +55,31 @@ calculation](gamma-tool-market-economics.md).
      for a vendor-USD tool. Every operation's largest call must owe
      something at the ask (`400 ask_too_low`), and the key's daily cap must
      hold 4 of them (`400 ask_too_high_for_cap`).
-3. **Open a tab (an API key).** A buyer pays Gamma to the tool market's
-   service once; that spend is their balance and stays until used. They
-   sign `POST /tool-market/tabs` with a budget and a lifetime of up to 30
+3. **Spend Gamma.** A buyer spends Gamma at the tool market's service
+   hotkey (`btcli gamma spend`). That spend is their balance and stays
+   until used. `GET /tool-market/gamma/balance?hotkey=<ss58>` shows it.
+4. **Call.** `POST /tool-market/call` sends `{tool, operation, params}`,
+   signed with the hotkey that spent ([btauth/1](https://www.bittensor.com/docs/guides/signed-requests),
+   with the service hotkey as receiver). Each call holds at most what it
+   can cost against the balance, then settles to the real charge. A
+   balance that cannot cover the call is `402 insufficient_balance`, and
+   nothing is sent. The market tries keys cheapest first, with equal
+   prices in ask order: it reserves on up to 10 asks and sends to up to 3
+   keys. With `max_ask_microusd`, no key asking more serves the call.
+5. **Or open a tab (an API key)**, for a client that cannot sign each
+   request. A buyer signs `POST /tool-market/tabs` with a budget and a lifetime of up to 30
    days, and get back a bearer token to use like any API key. While the
    tab is open, its whole budget is held against the buyer's balance, and
    the rest of the balance stays free for other tabs. Once it closes or
-   expires, only what its calls spent stays held.
-4. **Call.** `POST /tool-market/call` sends `{tool, operation, params}` with
-   the tab token. The market tries keys cheapest first, with equal prices
-   in ask order: it reserves on up to 10 asks and sends to up to 3 keys.
-   Each call reserves its maximum charge against the tab before it is
-   sent, then settles to the real charge. With `max_ask_microusd`, no key
-   asking more serves the call.
+   expires, only what its calls spent stays held. `POST /tool-market/call`
+   with `Authorization: Bearer <token>` then spends from the tab.
 
-Both buyers and miners sign the configured terms (`POST /tool-market/terms`,
-text in `docs/tool-market-terms.md`) before they trade. A new version
-applies to tabs a buyer opens after accepting it; a tab already open
-keeps its terms. A miner's keys leave the book until the miner accepts it.
+Miners, and buyers who open a tab, sign the configured terms (`POST
+/tool-market/terms`, text in `docs/tool-market-terms.md`) first. A new
+version applies to tabs a buyer opens after accepting it; a tab already
+open keeps its terms. A miner's keys leave the book until the miner accepts
+it. A signed call accepts the current terms by being sent: the services
+document names their version, SHA-256 and url.
 
 ## For buyers
 
@@ -81,33 +88,43 @@ this repository and needs only `bittensor_wallet` beyond it, for signing:
 
 ```bash
 export SUBNET71_URL=https://<gateway>
-python -m lab_arena.tool_market.client terms             # once
 python -m lab_arena.tool_market.client balance
+python -m lab_arena.tool_market.client call hunter email_finder domain=acme.com full_name="Ada Lee"
+# Or an API key, for a client that cannot sign:
+python -m lab_arena.tool_market.client terms             # once
 python -m lab_arena.tool_market.client key --budget 20 --days 30
 export SUBNET71_API_KEY=<token it printed>
-python -m lab_arena.tool_market.client call hunter email_finder domain=acme.com full_name="Ada Lee"
 python -m lab_arena.tool_market.client call exa search query="crm vendors" numResults:=5
 python -m lab_arena.tool_market.client key-status        # the key's spend and expiry
 python -m lab_arena.tool_market.client key-close         # unspent budget back to the balance
 ```
 
-`name=value` sends text and `name:=value` sends JSON. `--private` (or
+With no `SUBNET71_API_KEY`, `call` signs each request with the wallet's
+hotkey, sent to the service hotkey the services document names. `name=value` sends text and `name:=value` sends JSON. `--private` (or
 `private` in `call_tool`) uses only suppliers that keep the request
 private. The client follows no redirect and talks only https, or http
 to this machine.
 
 For an agent, `python -m lab_arena.tool_market.client mcp` is a stdio MCP
-server with two tools: `find_tool` (the catalog) and `call_tool`. It holds
-only the API key, so an agent can spend at most that key's budget.
+server with two tools: `find_tool` (the catalog) and `call_tool`. Given an
+API key, it holds only that key, so an agent can spend at most its budget.
+Without one, it signs with the wallet and can spend the whole balance.
 
 ## Routes
 
 All under `/tool-market`.
 
-- **Public:** `GET /catalog`, `GET /books/{tool}`.
+- **Public, with `Access-Control-Allow-Origin: *`:** `GET /services.json`,
+  `GET /openapi.json`, `GET /catalog`, `GET /books/{tool}`, and
+  `GET /gamma/balance?hotkey=<ss58>` (`{hotkey, credited_usd, used_usd,
+  remaining_usd}` as decimal strings; zeros for a hotkey that never spent).
+- **btauth/1** (`X-Bittensor-*` headers): `POST /call`. Errors are
+  `401 btauth_*` with `WWW-Authenticate: btauth/1`, and a request with both
+  btauth headers and `Authorization` is `400 btauth_ambiguous_credentials`.
 - **Tab token** (`Authorization: Bearer`): `POST /call`, `GET /tab`,
   `POST /tab/close`.
-- **Signed by the hotkey:** `POST /terms`, `GET /balance`, `POST /tabs`,
+- **Signed by the hotkey, in the lead-order scheme** (the stored signature
+  must be re-checkable later): `POST /terms`, `POST /tabs`,
   `GET /usage`, and for miners `POST /keys`, `POST /keys/{id}/check`,
   `POST /keys/{id}/revoke`, `POST /asks` and `GET /statement` (their keys,
   health and what each earned).
@@ -124,6 +141,33 @@ A buyer has at most 8 calls in flight at once in a gateway process
 so slow free answers cannot hold up the rest of the gateway. Key
 registrations and checks share 4 threads of their own, and a miner has
 one in flight at a time per process (`429 check_in_flight`).
+
+## The Gamma standard
+
+The market follows the chain's [services](https://www.bittensor.com/docs/guides/services)
+and [signed requests](https://www.bittensor.com/docs/guides/signed-requests) guides:
+
+- `GET /tool-market/services.json` is the services document: the
+  publisher (netuid and service hotkey), the OpenAPI spec, a `gamma`
+  payment with `btauth/1` and the balance url, the catalog as pricing, and
+  the terms.
+- `GET /tool-market/openapi.json` is built from the catalog, so each
+  operation's parameters in the spec are the ones `/call` checks.
+- Credit is read at a finalized block: `GammaSpent` for the buyer at the
+  service hotkey, with the subnet's `RegisteredSubnetCounter` from the same
+  block. When the counter grows, the subnet was dissolved and registered
+  again, so its totals start from zero and earlier credit is kept. A
+  counter or total that goes backwards is refused (`503 gamma_unavailable`).
+
+To publish it (ops, once per service hotkey):
+
+1. The subnet owner turns Gamma on (`sudo_set_subnet_gamma_enabled`).
+2. The service hotkey holds a validator permit on netuid 71, or is the
+   owner hotkey.
+3. Its coldkey runs `btcli tx set-service --netuid 71 --url
+   https://<gateway>/tool-market/services.json`, and `btcli query services
+   --netuid 71` shows it.
+4. Before a hotkey swap, list the new hotkey in `publishers` too.
 
 ## Launch set
 
@@ -302,7 +346,8 @@ All tool-market data is in `scripts/770-tool-market.sql`.
 | `LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS` | hotkeys of miners with a private-supply agreement; serve private calls |
 | `LEADPOET_TOOL_MARKET_GAMMA_SERVICE` | the tool market's Gamma service SS58 hotkey; must differ from lead orders' |
 | `LEADPOET_TOOL_MARKET_TERMS_VERSION` | the terms both sides sign: `tool-market-terms-v1`, whose SHA-256 of `docs/tool-market-terms.md`'s exact bytes is in `PUBLISHED_TERMS` in `config.py`; live mode refuses any other version |
-| `LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL` | the https host every signed request names |
+| `LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL` | the https host every signed request names, and the base of the services document's urls |
+| `LAB_ARENA_NETUID` | the subnet whose Gamma counts; 71 by default |
 
 It reuses the Arena store and chain settings, and the key vault
 deployment, exactly as lead orders do.
@@ -356,9 +401,20 @@ deployment, exactly as lead orders do.
 - **A lost API key holds its budget until it expires.** Only its token
   closes it, and the CLI makes 30-day keys by default; a signed "close my
   keys" route would let a buyer free a lost one.
-- **A signed balance read needs no funds.** Each costs a few chain reads,
-  and every signed request adds a nonce row (and a reading row for each
-  newer finalized block). Rate-limit the route at the edge before opening it widely.
+- **A balance read is public and needs no funds.** Each costs a few chain
+  reads (a reading row only when the total changed). It has its own small
+  limiter and 4 threads; rate-limit it at the edge before opening it widely.
+- **One publisher hotkey.** The services document lists only the current
+  service hotkey, and credit counts only spend there. A swap needs both
+  listed, and credit read at both, before it happens.
+- **A dissolution's last block is not read.** The standard takes the final
+  totals as the block before plus that block's `GammaSpent` events; this
+  market reads only finalized totals, so spend in the removing block is lost.
+- **Only sr25519 hotkeys sign.** A btauth request with `X-Bittensor-Crypto`
+  set is refused.
+- **A signed call accepts the terms by being sent.** It needs no terms
+  step; the services document states the terms it accepts. An API key
+  still needs the signed terms.
 - **Anyone can fill the vault's connections.** It serves at most 128 at
   once, and one that sends nothing holds its slot for 10 s, so a stranger
   can keep every call at `503 no_supply` (nothing is charged). Limit the

@@ -166,3 +166,51 @@ def test_the_published_terms_hash_is_the_terms_file():
     text = path.read_bytes()
     assert hashlib.sha256(text).hexdigest() == PUBLISHED_TERMS["tool-market-terms-v1"]
     assert b"(tool-market-terms-v1)" in text
+
+
+def test_btauth_signs_the_standards_eight_lines_and_refuses_each_bad_request():
+    from bittensor_wallet import Keypair
+
+    from lab_arena.chain import wallet_signature_verifier
+    from lab_arena.lead_orders.auth import AuthError
+    from lab_arena.tool_market import btauth
+
+    # The signed-requests guide's sr25519 test vector.
+    alice, bob = Keypair.create_from_uri("//Alice"), "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+    assert btauth.payload("post", "/generate?stream=false", b'{"prompt": "hello"}', "1752076800000000000",
+                          alice.ss58_address, bob) == "\n".join((
+        "btauth/1", "sr25519", "POST", "/generate?stream=false",
+        "341c57448e531310fbbe83f44cea2a5e838bd9e8a6b82b269f01d0dbbc23c3cc", "1752076800000000000",
+        alice.ss58_address, bob))
+    now = 1752076800 * 10**9
+    used = set()
+
+    def once(hotkey, nonce_hash, signed_at):
+        if (hotkey, nonce_hash) in used:
+            return False
+        used.add((hotkey, nonce_hash))
+        return True
+
+    def check(headers, *, body=b"{}", receiver=bob, at=now):
+        return btauth.verify({k.lower(): v for k, v in headers.items()}, body, method="POST", target="/x",
+                             receiver=receiver, verifier=wallet_signature_verifier, use_nonce=once,
+                             now_ns=lambda: at)
+
+    def fresh():
+        return btauth.sign(alice, method="POST", target="/x", body=b"{}", receiver=bob, now_ns=lambda: now)
+
+    headers = fresh()
+    assert check(headers).hotkey == alice.ss58_address
+    refusals = {
+        "btauth_replayed_nonce": lambda: check(headers),
+        "btauth_unknown_version": lambda: check(dict(fresh(), **{"X-Bittensor-Version": "2"})),
+        "btauth_missing_header": lambda: check({k: v for k, v in fresh().items() if k != "X-Bittensor-Nonce"}),
+        "btauth_unsupported_scheme": lambda: check(dict(fresh(), **{"X-Bittensor-Crypto": "ed25519"})),
+        "btauth_wrong_receiver": lambda: check(fresh(), receiver=alice.ss58_address),
+        "btauth_stale_nonce": lambda: check(fresh(), at=now + 11 * 10**9),
+        "btauth_bad_signature": lambda: check(fresh(), body=b'{"a": 1}'),
+    }
+    for code, attempt in refusals.items():
+        with pytest.raises(AuthError) as refused:
+            attempt()
+        assert (refused.value.status, refused.value.code) == (401, code)

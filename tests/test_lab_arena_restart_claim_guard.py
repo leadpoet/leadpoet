@@ -1008,3 +1008,35 @@ def test_cli_paired_path_drains_both_components_then_releases(monkeypatch, capsy
         assert guard_cli.main() == 0
     assert present is False
     assert len(capsys.readouterr().out.splitlines()) == len(actions)
+
+
+def test_default_lease_bounds_an_abandoned_guard_to_minutes(monkeypatch):
+    """A controller that dies must not withhold paid review for hours.
+
+    The guard lease is the only bound on an abandoned restart. A live drain
+    renews it every ``min(30, lease/3)`` seconds, so the default must stay far
+    above that renewal interval and far below the hours-long window that let a
+    dead controller hold Arena review work off indefinitely.
+    """
+
+    captured: list[int] = []
+
+    def acquire(args, *, expected_generation=None, deadline=None):
+        captured.append(args.lease_seconds)
+        raise guard_cli.GuardError("stop after the first acquire")
+
+    monkeypatch.setattr(guard_cli, "_acquire", acquire)
+    monkeypatch.setattr(guard_cli, "_abort_if_owned_draining", lambda *a, **k: None)
+    monkeypatch.setattr(
+        sys, "argv",
+        [str(SCRIPT), "drain", "--candidate", CANDIDATE,
+         "--invocation", INVOCATION, "--scope", "all"],
+    )
+    assert guard_cli.main() != 0
+
+    lease = captured[0]
+    assert lease == 900
+    # 60..14400 is the range the restart-guard RPC accepts.
+    assert 60 <= lease <= 14400
+    # The renewal interval must leave a wide margin inside the lease.
+    assert min(30.0, lease / 3) * 10 <= lease

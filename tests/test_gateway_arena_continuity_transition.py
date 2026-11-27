@@ -234,6 +234,10 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
           if [ "${FAIL:-}" = dual_gap ] && [ "$new_mode" = dual ] && [ "$new_backend" = closed ]; then return 1; fi
         }
         preflight_gateway_restart_disk() { record disk; }
+        # The guard lease renewal runs for the length of the restart and has
+        # its own tests; this fixture exercises the cutover around it.
+        start_lab_arena_restart_renewal() { :; }
+        stop_lab_arena_restart_renewal() { :; }
         start_arena_component() {
           record "start:$1:$2"
           if [ "${FAIL:-}" != driver_died ] || [ "$1" != driver ]; then

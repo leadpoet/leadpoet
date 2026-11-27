@@ -98,7 +98,8 @@ def test_gateway_exit_preserves_guard_cleanup_contract(
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     helpers = "\n\n".join(
         _shell_function_source(script, name)
-        for name in ("abort_lab_arena_restart_guard_before_destructive", "on_gateway_restart_exit")
+        for name in ("abort_lab_arena_restart_guard_before_destructive",
+                     "stop_lab_arena_restart_renewal", "on_gateway_restart_exit")
     )
     capture = tmp_path / "actions"
     plan = tmp_path / "plan"
@@ -117,6 +118,8 @@ LEADPOET_REPO_ROOT=/exact-source
 GATEWAY_PREFLIGHT_TREE=
 GATEWAY_RELEASE_FOLLOW_ROOT=
 LAB_ARENA_RESTART_DRAIN_REPORT=
+LAB_ARENA_RESTART_RENEWAL_PID=
+LAB_ARENA_RESTART_RENEWAL_ROOT=
 GATEWAY_PREPARED_V2_RELEASE_MANIFEST=
 GATEWAY_DEPLOY_PLAN_FILE={shlex.quote(str(plan))}
 GATEWAY_GIT_HELPER={shlex.quote(str(git_helper))}
@@ -194,6 +197,8 @@ def test_gateway_arena_drain_records_generation_and_removes_report(tmp_path: Pat
         "LAB_ARENA_RESTART_DRAIN_PID=\n"
         "LAB_ARENA_RESTART_DRAIN_REPORT=\n"
         "LAB_ARENA_RESTART_DRAIN_PRIOR_JOBS=\n"
+        "LAB_ARENA_RESTART_RENEWAL_PID=\n"
+        "LAB_ARENA_RESTART_RENEWAL_ROOT=\n"
         "run_lab_arena_restart_guard() {\n"
         "  test \"$1\" = --exec-drain\n"
         "  printf '%s\\n' '{\"guard_generation\":17,\"preserved\":true}'\n"
@@ -265,7 +270,9 @@ def test_gateway_parent_signal_stops_drain_and_discovers_exact_guard(
         )
     functions = "\n\n".join(
         (_shell_function_source(script, "abort_lab_arena_restart_guard_before_destructive"),
-         drain_function, _shell_function_source(script, "on_gateway_restart_signal"))
+         drain_function,
+         _shell_function_source(script, "stop_lab_arena_restart_renewal"),
+         _shell_function_source(script, "on_gateway_restart_signal"))
     )
     child = tmp_path / "drain-child"
     abort = tmp_path / "abort-argv"
@@ -286,6 +293,8 @@ def test_gateway_parent_signal_stops_drain_and_discovers_exact_guard(
         "LAB_ARENA_RESTART_DRAIN_PID=\n"
         "LAB_ARENA_RESTART_DRAIN_REPORT=\n"
         "LAB_ARENA_RESTART_DRAIN_PRIOR_JOBS=\n"
+        "LAB_ARENA_RESTART_RENEWAL_PID=\n"
+        "LAB_ARENA_RESTART_RENEWAL_ROOT=\n"
         "run_lab_arena_restart_guard() {\n"
         "  if [ \"$1\" = --exec-drain ]; then shift; fi\n"
         "  if [ \"$2\" = drain ]; then\n"

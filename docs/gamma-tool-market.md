@@ -20,18 +20,12 @@ call ID using [the accrual query](../scripts/tool_market_accruals.sql).
 The buyer's Gamma spend is burned on-chain. It cannot be withdrawn to pay
 that liability, and the spread is not a cash balance for buybacks.
 
-Supply here means a vendor account and its paid quota. The gateway chooses
-the supplier, the attested vault sends the request, and the vendor runs it.
-The experiment lab has its own job, capture, funding and weight paths.
+Supply here means a vendor account and its paid quota. The experiment lab has its own job, capture, funding and weight paths.
 Supplier compute on miner hosts and earnings redeemable across tools are
 not implemented by this API.
 
-Start by measuring one equivalent platform operation. Compare cost per
-usable answer, miss rate, field coverage, p50/p95 latency and failures
-under the same timeout, cache policy, privacy and volume tier. Obtain
-written approval for the provider/account and reconcile actual vendor debits.
-External agent demand and monthly savings still need buyer traffic and
-billing evidence. See [price comparisons and the break-even calculation](gamma-tool-market-economics.md).
+Before adoption, follow the steps in [price comparisons and the break-even
+calculation](gamma-tool-market-economics.md).
 
 ## How it works
 
@@ -263,7 +257,7 @@ All amounts are integer micro-USD.
   Units are capped at the operation's maximum.
 - **What the buyer pays:** `charge = ceil(owed × 1.10)`.
 - **Example:** a call asked at $0.01 charges the buyer $0.011, and the
-  miner is owed $0.01. The spread is 10% of the miner ask (about 9.09% of the buyer charge before operating costs). It is a ledger difference. Gamma spend does not transfer cash to Leadpoet.
+  miner is owed $0.01. The spread is 10% of the miner ask (about 9.09% of the buyer charge before operating costs).
 - **Unknown usage:** sometimes the usage is unknown, such as a 5xx answer,
   a timeout, or a 2xx with no cost in it. Then the buyer pays nothing and
   the miner is owed nothing. The miner bears that risk, at most the key's
@@ -292,15 +286,16 @@ All tool-market data is in `scripts/770-tool-market.sql`.
 - Every table is append-only, with row-level security on and no table
   grants. The service role reaches the data only through its functions.
 - The SQL enforces the money rules on stored state: tab budgets, daily
-  caps, one listing per key, one settlement per call, and no charge above
-  the call's reserve.
+  caps, one listing per key, and one settlement per call that matches any
+  stored one, stays within the call's reserve and owed cap, and charges
+  exactly the market fee.
 
 ## Configuration
 
 | Variable | Meaning |
 | --- | --- |
 | `LEADPOET_TOOL_MARKET_MODE` | `off` (default) or `live` |
-| `LEADPOET_TOOL_MARKET_APPROVED_SUPPLIERS` | comma-separated `tool:miner_hotkey` pairs reviewed for third-party resale. Empty by default. Remove the pair and reload gateway configuration to stop new routing. Private supply also requires separate privacy approval. |
+| `LEADPOET_TOOL_MARKET_APPROVED_SUPPLIERS` | comma-separated `tool:miner_hotkey` pairs reviewed for third-party resale. Empty by default. Remove the pair and reload gateway configuration to stop new routing; calls in flight can still settle. Private supply also requires separate privacy approval. |
 | `LEADPOET_TOOL_MARKET_TOOLS_OFF` | comma-separated tools turned off; empty by default, so all trade |
 | `LEADPOET_TOOL_MARKET_BUYER_HOTKEYS` | optional allowlist of buyer hotkeys, for a staff rollout |
 | `LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS` | hotkeys of miners with a private-supply agreement; serve private calls |
@@ -332,7 +327,6 @@ deployment, exactly as lead orders do.
   hotkeys can buy from themselves; with the 10% margin that loses money
   until payouts are wired, so payouts must value what a buyer burns and
   what a miner earns at the same per-epoch price.
-- **Supplier approval is per provider and miner.** Reload the list to stop new calls for that pair. Existing in-flight calls can still settle.
 - **A running vault is trusted until it restarts.** The gateway checks the
   vault's keys against the KMS on each connect, and only an approved build
   gets those keys. Removing an approval on Base does not stop a vault
@@ -362,8 +356,8 @@ deployment, exactly as lead orders do.
   closes it, and the CLI makes 30-day keys by default; a signed "close my
   keys" route would let a buyer free a lost one.
 - **A signed balance read needs no funds.** Each costs a few chain reads,
-  and every signed request adds a nonce row (a reading row only when the
-  reading changed). Rate-limit the route at the edge before opening it widely.
+  and every signed request adds a nonce row (and a reading row for each
+  newer finalized block). Rate-limit the route at the edge before opening it widely.
 - **Anyone can fill the vault's connections.** It serves at most 128 at
   once, and one that sends nothing holds its slot for 10 s, so a stranger
   can keep every call at `503 no_supply` (nothing is charged). Limit the

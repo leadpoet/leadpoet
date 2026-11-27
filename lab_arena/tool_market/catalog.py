@@ -222,7 +222,7 @@ def _prospeo_cost(document: Any) -> Optional[int]:
 
 
 def _found_email(container: str) -> Callable[[Any], Optional[int]]:
-    """One credit when the answer holds an email at ``path``; finding none is free."""
+    """One credit when the answer holds an email in ``container``; finding none is free."""
 
     def read(document: Any) -> Optional[int]:
         if not isinstance(document, dict) or container not in document:

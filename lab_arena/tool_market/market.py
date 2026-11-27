@@ -315,7 +315,7 @@ class ToolMarket:
         asks = [a for a in book.rank(book.Ask.from_row(row) for row in self._supply(tool))
                 if min(book.owed_microusd(op, op.max_units, a.ask_microusd) for op in ops) <= a.remaining_microusd]
         return {"tool": tool, "unit": catalog.TOOLS[tool],
-                "operations": sorted(name for (t, name) in catalog.OPERATIONS if t == tool),
+                "operations": sorted(op.name for op in ops),
                 "request_privacy": catalog.REQUEST_PRIVACY[tool],
                 "asks": [{"ask_microusd": a.ask_microusd, "buyer_pays_microusd": book.charge_microusd(a.ask_microusd),
                           "private": self._private(tool, a)} for a in asks]}

@@ -295,3 +295,14 @@ def test_watcher_exports_standing_experiments_without_legacy_offer_approval(lab,
     last = lab.tick(first)
     assert (last["released"], last["pending"]) == (2, 0)
     assert lab.index()[batch]["P9-s1"]["released"] == ["good", "pending"]
+
+
+def test_new_paid_case_precedes_rebuilding_a_valid_old_archive(lab):
+    lab.add(FIRST, "old", case="P7-s1")
+    old = lab.tick()
+    prior = lab.index()
+    prior[FIRST]["P7-s1"].pop("export_version")
+    snapshots._save(lab.out, {"schema": "collection.private-export-index.v1", "offers": prior})
+    lab.add(FIRST, "new", case="P7-s2")
+    snapshots.observe(lab.root, lab.out, SimpleNamespace(rpc=lab.rpc), None, {**old,"last_group":""}, max_groups=1)
+    assert lab.builds[-1] == ["new"]

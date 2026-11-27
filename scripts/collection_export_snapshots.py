@@ -231,7 +231,8 @@ def observe(private_root, directory, db, objects, previous=None, *, max_groups=1
                 raise ValueError("previously registered work disappeared")
             for case, members in sorted(by_case.items()):
                 prior_group = prior.get(case, {})
-                same = members == prior_group.get("members") and prior_group.get("export_version") == 2
+                same_members = members == prior_group.get("members")
+                same = same_members and prior_group.get("export_version") == 2
                 exists = (
                     not prior_group.get("file") or (directory / batch / prior_group["file"]).is_file()
                 )
@@ -244,7 +245,10 @@ def observe(private_root, directory, db, objects, previous=None, *, max_groups=1
                     groups[case] = {**(prior_group if kept else {}), "members": members, "queued": True}
                 old_partial = any(m["job_status"] == "failed" for m in members.values())
                 if groups[case].get("queued"):
-                    work.append((0, batch, case))
+                    # A verified archive is already available during a format upgrade.
+                    # New funded work comes first; the regular retry pass backfills old packs.
+                    upgrade_only = same_members and exists and prior_group.get("file") and not same
+                    work.append((1 if upgrade_only else 0, batch, case))
                 elif prior_group.get("held") or old_partial:
                     work.append((1, batch, case))
         if not set(old) <= set(offers):

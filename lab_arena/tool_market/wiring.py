@@ -16,7 +16,7 @@ from lab_arena import chain as chain_module
 from lab_arena.lead_orders.gamma import GammaBalanceReader
 from lab_arena.lead_orders.vault_client import VaultClient, VaultTransport
 from lab_arena.store import PostgrestTransport
-from lab_arena.tool_market.config import ToolMarketConfig, ToolMarketConfigError
+from lab_arena.tool_market.config import NETUID, ToolMarketConfig, ToolMarketConfigError
 from lab_arena.tool_market.market import ToolMarket
 from lab_arena.tool_market.store import ToolMarketStore
 from lead_order_vault import trust as vault_trust
@@ -37,7 +37,7 @@ class MarketGammaReader(GammaBalanceReader):
         self.cutover = cutover
         head = chain.finalized_head()
         self.genesis = chain_module.normalize_block_hash(cutover.network_genesis_hash)
-        if (chain.config.netuid != 71 or chain.config.netuid != cutover.netuid
+        if (chain.config.netuid != NETUID or chain.config.netuid != cutover.netuid
                 or chain.finalized_block_hash(0, head=head) != self.genesis):
             raise chain_module.ArenaChainError("Gamma network differs from SN71 cutover")
         self.registered_at = self._registration(head)
@@ -83,7 +83,7 @@ def build_from_environment(config: ToolMarketConfig):
         _required("LAB_ARENA_SUPABASE_URL", env), service_key=_required("LAB_ARENA_SERVICE_KEY", env),
     ))
     chain_config = chain_module.ArenaChainConfig(
-        endpoint=_required("LAB_ARENA_CHAIN_ENDPOINT", env), netuid=config.netuid,
+        endpoint=_required("LAB_ARENA_CHAIN_ENDPOINT", env), netuid=NETUID,
         network_name=env.get("LAB_ARENA_NETWORK", "finney"),
         request_timeout_seconds=int(env.get("LAB_ARENA_CHAIN_TIMEOUT_SECONDS", "30")),
     )

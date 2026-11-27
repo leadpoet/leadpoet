@@ -26,7 +26,8 @@ PRIVATE_SUPPLIERS_ENV = "LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS"
 GAMMA_SERVICE_ENV = "LEADPOET_TOOL_MARKET_GAMMA_SERVICE"
 TERMS_VERSION_ENV = "LEADPOET_TOOL_MARKET_TERMS_VERSION"
 PUBLIC_BASE_URL_ENV = "LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL"
-NETUID_ENV = "LAB_ARENA_NETUID"  # the chain reads' netuid (wiring.py)
+NETUID = 71  # the only subnet whose Gamma counts
+NETUID_ENV = "LAB_ARENA_NETUID"  # shared with the rest of Arena; must name NETUID
 
 MODE_OFF = "off"
 MODE_LIVE = "live"
@@ -58,7 +59,6 @@ class ToolMarketConfig:
     terms_version: str = ""
     terms_sha256: str = ""
     public_base_url: str = ""
-    netuid: int = 71
 
     lead_search_verify_max_ask: Optional[int] = None
     approved_suppliers: FrozenSet[Tuple[str, str]] = frozenset()
@@ -101,15 +101,14 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
                              and 0 < int(verify_limit) <= MAX_ASK[TOOLS["zerobounce"]]):
         raise ToolMarketConfigError("%s must be a positive per-call ask within the catalog limit" % VERIFY_MAX_ASK_ENV)
     terms_version = env.get(TERMS_VERSION_ENV, "").strip()
-    if env.get(NETUID_ENV, "71").strip() != "71":
-        raise ToolMarketConfigError("%s must be 71: the market counts only SN71's Gamma" % NETUID_ENV)
+    if env.get(NETUID_ENV, str(NETUID)).strip() != str(NETUID):
+        raise ToolMarketConfigError("%s must be %d: the market counts only that subnet's Gamma" % (NETUID_ENV, NETUID))
     config = ToolMarketConfig(
         lead_search_verify_max_ask=int(verify_limit) if verify_limit else None,
         mode=mode, tools=tools, approved_suppliers=frozenset(approved), buyer_hotkeys=buyers, private_suppliers=private,
         gamma_service=env.get(GAMMA_SERVICE_ENV, "").strip(),
         terms_version=terms_version, terms_sha256=PUBLISHED_TERMS.get(terms_version, ""),
         public_base_url=env.get(PUBLIC_BASE_URL_ENV, "").strip().rstrip("/"),
-        netuid=71,
     )
     if not off <= set(TOOLS):
         raise ToolMarketConfigError("%s names a tool the catalog does not have" % TOOLS_OFF_ENV)
@@ -129,6 +128,7 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
 
 
 __all__ = [
+    "NETUID",
     "PUBLISHED_TERMS",
     "TERMS_URL",
     "ToolMarketConfig",

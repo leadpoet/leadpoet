@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from lab_arena.tool_market import catalog
-from lab_arena.tool_market.config import TERMS_URL, ToolMarketConfig
+from lab_arena.tool_market.config import NETUID, TERMS_URL, ToolMarketConfig
 
 _KINDS = {"str": {"type": "string"}, "int": {"type": "integer"}, "bool": {"type": "boolean"},
           "str_list": {"type": "array", "items": {"type": "string"}}, "enum": {"type": "string"}}
@@ -26,7 +26,7 @@ def services_document(config: ToolMarketConfig) -> Dict[str, Any]:
         "name": "Subnet 71 tool market",
         "description": "Pay-per-call GTM data tools (email checks, people and company lookups, web search) "
                        "on vendor keys that miners supply. Each call costs its supplier's ask plus 10%.",
-        "publishers": [{"netuid": config.netuid, "hotkey": config.gamma_service}],
+        "publishers": [{"netuid": NETUID, "hotkey": config.gamma_service}],
         "services": [{"type": "openapi", "endpoint": base + "/tool-market/openapi.json",
                       "spec": base + "/tool-market/openapi.json"}],
         "payments": [{"type": "gamma", "signature": "btauth/1", "balance": base + "/tool-market/gamma/balance"}],
@@ -62,7 +62,7 @@ def openapi(config: ToolMarketConfig) -> Dict[str, Any]:
             "type": "apiKey", "in": "header", "name": "X-Bittensor-Signature",
             "description": "btauth/1 (https://www.bittensor.com/docs/guides/signed-requests), sr25519, with "
                            "X-Bittensor-Receiver " + config.gamma_service + ". Spend Gamma at that hotkey "
-                           "on netuid %d first." % config.netuid}}},
+                           "on netuid %d first." % NETUID}}},
         "paths": {
             "/tool-market/call": {"post": {
                 "summary": "Call one tool operation, charged to the signing hotkey's Gamma balance.",

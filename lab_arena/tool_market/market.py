@@ -458,17 +458,18 @@ class ToolMarket:
             if not asks:
                 raise ToolMarketError(503, "no_supply")
             needs = [book.charge_microusd(owed_cap) for _, owed_cap in asks]
-            opened = open_for(max(needs))
+            opened, unread = open_for(max(needs)), None
             if opened["status"] == "insufficient_balance":
                 have = int(opened["balance"].get("balance_microusd") or 0)
                 try:  # credit Gamma spent since the last reading
                     have = int(self.balance(hotkey).get("balance_microusd") or 0)
-                except ToolMarketError:
-                    pass  # the chain is busy or down: the stored balance still counts
+                except ToolMarketError as error:
+                    unread = error  # the chain is busy or down: the stored balance still counts
                 if min(needs) <= have:
                     opened = open_for(min(max(needs), have))
             if opened["status"] != "opened":
-                raise ToolMarketError(402, "insufficient_balance")
+                # Unread new Gamma may cover it: say retry, not spend more.
+                raise unread or ToolMarketError(402, "insufficient_balance")
             try:
                 return self._buy(tool, op, max_ask, private, tab, hotkey, url, headers, payload, asks)
             except ToolMarketError as error:

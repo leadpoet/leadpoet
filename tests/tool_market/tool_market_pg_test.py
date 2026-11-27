@@ -806,7 +806,7 @@ def test_a_miners_tab_never_buys_from_their_own_key(world):
     # The market skips its own keys first; the reserve refuses them too.
     assert world.store.reserve_call(
         call_id=str(uuid.uuid4()), token_hash=market_module.token_hash(token), tool="harvestapi",
-        operation="profile", key_id=key_id, ask_microusd=10_000, owed_cap_microusd=10_000) == "own_key"
+        operation="linkedin_profile", key_id=key_id, ask_microusd=10_000, owed_cap_microusd=10_000) == "own_key"
 
 
 def test_only_a_registered_hotkey_lists_keys(world):
@@ -942,10 +942,12 @@ def test_a_funded_hotkey_calls_with_its_signature_alone_until_its_balance_runs_o
     assert (invalid.value.status, invalid.value.code) == (400, "invalid_hotkey")
 
 
-def test_signed_calls_share_a_small_balance_and_hold_only_what_their_keys_need(world):
+def test_concurrent_signed_calls_each_hold_only_their_keys_need(world):
     world.miner_key("shared-key", 10_000)  # 11,000 a call; the most a profile call may cost is 275,000
     buyer = hotkey()
-    world.gamma.units[buyer] = 25_000 * 1000  # two calls' worth
+    # Stored and above that ceiling, so holding the ceiling or the whole balance would refuse the second call.
+    world.gamma.units[buyer] = 280_000 * 1000
+    world.market.gamma_balance(buyer)
     who, inner = world.who(buyer), []
 
     def second_call_while_the_first_is_in_flight():
@@ -993,7 +995,7 @@ def test_a_signed_call_fails_over_to_a_pricier_key_and_skips_the_buyers_own(worl
     assert [sent[0] for sent in world.vendor.sent] == ["limited-cheap", "pricier"]
 
 
-def test_a_signed_call_credits_new_gamma_to_fail_over_and_holds_only_what_its_keys_need(world):
+def test_a_signed_call_credits_new_gamma_to_fail_over_to_a_pricier_key(world):
     world.miner_key("stale-cheap", 9_000)
     world.miner_key("stale-pricier", 10_000)  # 11,000 a call
     world.vendor.script["stale-cheap"] = [ok({}, status=429)]
@@ -1002,14 +1004,6 @@ def test_a_signed_call_credits_new_gamma_to_fail_over_and_holds_only_what_its_ke
     world.market.gamma_balance(buyer)  # stored: enough for the cheap key only
     world.gamma.units[buyer] = 50_000 * 1000  # then more Gamma on chain
     assert world.market.call("", PROFILE, world.who(buyer))["charge_microusd"] == 11_000
-    # A balance far above both keys' need: concurrent calls each hold only that need.
-    rich, inner = hotkey(), []
-    world.gamma.units[rich] = 280_000 * 1000  # above the 275,000 a profile call may cost at most
-    world.market.gamma_balance(rich)
-    world.vendor.script["stale-cheap"] = [lambda: inner.append(
-        world.market.call("", PROFILE, world.who(rich))) or ok(), ok()]
-    assert world.market.call("", PROFILE, world.who(rich))["charge_microusd"] == 9_900
-    assert inner[0]["charge_microusd"] == 9_900
 
 
 def test_a_busy_chain_still_lets_the_stored_balance_pay(world):
@@ -1022,6 +1016,11 @@ def test_a_busy_chain_still_lets_the_stored_balance_pay(world):
         world.market._chain_reads.acquire()
     try:
         assert world.market.call("", PROFILE, world.who(buyer))["charge_microusd"] == 9_900
+        # Short now, and the new Gamma unread: retry, not "spend more".
+        world.gamma.units[buyer] = 50_000 * 1000
+        with pytest.raises(ToolMarketError) as busy:
+            world.market.call("", PROFILE, world.who(buyer))
+        assert (busy.value.status, busy.value.code) == (503, "gamma_unavailable")
     finally:
         for _ in range(market_module.CHAIN_READS):
             world.market._chain_reads.release()

@@ -109,8 +109,10 @@ A key is in its tool's book only while all of these hold:
 - its miner accepted the current terms;
 - its latest ask is a price, not a withdrawal;
 - its latest health event is `valid` or `unchecked`;
-- what it earned in the last 24 h is under its daily cap. A miner picks
-  the cap, at most $20 a day per key at launch.
+- what it earned in the last 24 h, with unknown usage and calls in flight
+  at the most they could owe, is under its daily cap. A miner picks the
+  cap, at most $20 a day per key at launch. A call skips a key without
+  room for it.
 
 Health events come from vault checks and from calls.
 
@@ -125,10 +127,10 @@ Health events come from vault checks and from calls.
   balance; a tool with no check, or a key checked in the last minute, only
   skips the key. A 403 only skips it; the miner sees refusals in their
   statement.
-- A key goes to the back of its book, still in it, after a bare 429 or a
-  403 in the last minute, or in the last hour a 402 that did not fail it or
-  3 vendor 5xx answers. Timeouts and oversized answers do not count, since a
-  buyer can cause them to push a rival's key back.
+- A key goes to the back of its book, still in it, after a bare 429 in the
+  last minute, a 402 that did not fail it in the last hour, or in the last
+  hour a 403 or unknown usage for 3 different buyers. A buyer can cause
+  those two, so one buyer cannot push a rival's key back.
 - A 429 with no `Retry-After` skips the key for this call only. Hunter's
   403 is its rate limit, so it counts as a 429. A 429 with
   `Retry-After` goes back to the buyer.
@@ -142,9 +144,10 @@ Health events come from vault checks and from calls.
   (`409 key_cannot_be_checked`): a key a call found dead there stays out,
   and the miner lists a new key (the 30-day limit applies).
 
-A miner's own tab never buys from their own keys. For security, a hotkey
-registers at most one key per tool every 30 days, revoked keys included. A
-revoked key that never served a call does not count.
+Only a hotkey registered on the subnet lists keys (`403
+miner_not_registered`). A miner's own tab never buys from their own keys.
+For security, a hotkey registers at most one key per tool every 30 days,
+revoked keys included. A revoked key that never took a call does not count.
 
 An ask may be at most $0.25 per credit, or 100% of the vendor's own price
 for a vendor-USD tool. A buyer can send `max_ask_microusd` with a call, and
@@ -200,7 +203,8 @@ All amounts are integer micro-USD.
   buyer among others.
 - **Unknown usage:** sometimes the usage is unknown, such as a 5xx answer,
   a timeout, or a 2xx with no cost in it. Then the buyer pays nothing and
-  the miner is owed nothing. The miner bears that risk.
+  the miner is owed nothing. The miner bears that risk, at most the key's
+  daily cap a day.
   - A request that may have reached the vendor is never retried on another
     key, so it cannot be used twice.
   - A buyer shapes some of these, such as an answer too large to return.
@@ -266,9 +270,10 @@ deployment, exactly as lead orders do.
   gets those keys. Removing an approval on Base does not stop a vault
   already running; its owner stops it.
 - **Exa's cost is an estimate.** Exa calls `costDollars` an estimate.
-- **Some keys cannot be checked.** Exa and HarvestAPI have no free key
-  check, so a dead key is found by its first failed call. Hunter's check
-  proves the key but reads no balance.
+- **Hunter's check reads no balance.** It proves the key only.
+- **Calls in flight hold a key's cap.** Up to 10 minutes each, so buyers
+  who open many calls and drop them can keep a key out of the book that
+  long; each buyer is held to 20 such calls per tool.
 - **The book is read on every call.** It computes each key's last 24 h
   and last hour from the call ledger. That is fine at launch volumes;
   cache the public catalog and books before heavy anonymous traffic.

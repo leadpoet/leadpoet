@@ -137,7 +137,6 @@ CREATE TABLE public.tool_market_calls (
   tool TEXT NOT NULL,
   operation TEXT NOT NULL CHECK(operation ~ '^[a-z_]{1,40}$'),
   key_id UUID NOT NULL REFERENCES public.tool_market_keys(key_id),
-  miner_hotkey TEXT NOT NULL,
   ask_microusd BIGINT NOT NULL CHECK(ask_microusd>0),
   reserve_microusd BIGINT NOT NULL CHECK(reserve_microusd>0),
   -- The most the miner can be owed for this call; the daily cap counts it.
@@ -163,7 +162,6 @@ CREATE TABLE public.tool_market_call_settlements (
   settled_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
   CHECK(status='settled' OR (units=0 AND owed_microusd=0 AND charge_microusd=0))
 );
-CREATE INDEX tool_market_call_settlements_epoch ON public.tool_market_call_settlements(epoch);
 
 DO $tables770$
 DECLARE t TEXT;
@@ -227,35 +225,40 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $open77
   AND NOT EXISTS(SELECT 1 FROM public.tool_market_tab_closures x WHERE x.tab_id=p_tab.tab_id);
 $open770$;
 
--- What a key has earned or holds over the last 24 h, in owed (miner) terms:
--- settled calls count what they owe, young open calls the most they can owe.
+-- What a key has earned, held or may have spent over the last 24 h, in
+-- owed (miner) terms: settled calls count what they owe; unknown usage and
+-- young open calls the most they can owe. So the miner's daily cap also
+-- bounds what unknown usage can cost them, however many buyers cause it.
 CREATE FUNCTION public.tool_market__key_day_v1(p_key_id UUID)
 RETURNS BIGINT LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $day770$
- SELECT coalesce(sum(coalesce(s.owed_microusd,
-   CASE WHEN c.opened_at>clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1())
-    THEN c.owed_cap_microusd ELSE 0 END)),0)::BIGINT
+ SELECT coalesce(sum(CASE WHEN s.status='uncertain' THEN c.owed_cap_microusd
+   WHEN s.call_id IS NOT NULL THEN s.owed_microusd
+   WHEN c.opened_at>clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1())
+    THEN c.owed_cap_microusd ELSE 0 END),0)::BIGINT
  FROM public.tool_market_calls c LEFT JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
  WHERE c.key_id=p_key_id AND c.opened_at>clock_timestamp()-interval '24 hours';
 $day770$;
 
 CREATE FUNCTION public.tool_market__key_active_v1(p_key_id UUID)
 RETURNS BOOLEAN LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $active770$
- SELECT EXISTS(SELECT 1 FROM public.tool_market_keys k WHERE k.key_id=p_key_id)
-  AND NOT EXISTS(SELECT 1 FROM public.tool_market_key_revocations r WHERE r.key_id=p_key_id);
+ SELECT NOT EXISTS(SELECT 1 FROM public.tool_market_key_revocations r WHERE r.key_id=p_key_id);
 $active770$;
 
 -- A key goes to the back of its book, and stays in it, after a bare rate
--- limit or a 403 in the last minute (Hunter's rate limit is a 403; a key
--- whose plan lacks the route is retried once a minute at most), or in the
--- last hour a 402 it was not failed for or 3 vendor 5xx answers. Timeouts and oversized answers do not
--- count: a buyer can cause those, and could push a rival's key back.
+-- limit in the last minute, a 402 it was not failed for in the last hour,
+-- or, in the last hour, a 403 or unknown usage (5xx, timeout, oversized
+-- answer) from 3 different buyers. A buyer can cause the last two, so no
+-- one buyer can push a rival's key back; a key that is really flaky, or
+-- whose plan lacks a route, is seen by many.
 CREATE FUNCTION public.tool_market__key_demoted_v1(p_key_id UUID)
 RETURNS BOOLEAN LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $demoted770$
- SELECT count(*) FILTER (WHERE s.status='skipped' AND s.http_status IN (403,429)
+ SELECT count(*) FILTER (WHERE s.status='skipped' AND s.http_status=429
    AND s.settled_at>clock_timestamp()-interval '1 minute')>0
   OR count(*) FILTER (WHERE s.status='skipped' AND s.http_status=402)>0
-  OR count(*) FILTER (WHERE s.status='uncertain' AND s.http_status>=500)>=3
+  OR count(DISTINCT t.hotkey) FILTER (WHERE s.status='uncertain'
+   OR (s.status='skipped' AND s.http_status=403))>=3
  FROM public.tool_market_calls c JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
+  JOIN public.tool_market_tabs t ON t.tab_id=c.tab_id
  WHERE c.key_id=p_key_id AND c.opened_at>clock_timestamp()-interval '1 hour';
 $demoted770$;
 
@@ -268,8 +271,8 @@ $lock770$;
 -- Buyers: balance, terms, tabs
 -- ---------------------------------------------------------------------------
 
-CREATE FUNCTION public.tool_market_balance_v1(p_hotkey TEXT)
-RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $balance770$
+CREATE FUNCTION public.tool_market__balance_v1(p_hotkey TEXT)
+RETURNS JSONB LANGUAGE plpgsql STABLE SET search_path=pg_catalog,public AS $balance770$
 DECLARE r public.tool_market_gamma_readings; held BIGINT; credit BIGINT;
 BEGIN
  SELECT * INTO r FROM public.tool_market_gamma_readings WHERE hotkey=p_hotkey
@@ -298,7 +301,7 @@ BEGIN
  END IF;
  INSERT INTO public.tool_market_gamma_readings(hotkey,block_number,block_hash,spent_units,available)
  VALUES(p_hotkey,p_block_number,lower(p_block_hash),CASE WHEN p_available THEN p_units ELSE 0 END,p_available);
- RETURN public.tool_market_balance_v1(p_hotkey);
+ RETURN public.tool_market__balance_v1(p_hotkey);
 END;
 $reading770$;
 
@@ -332,7 +335,7 @@ BEGIN
    AND terms_sha256=p_terms_sha256) THEN
   RETURN jsonb_build_object('status','terms_required');
  END IF;
- balance:=public.tool_market_balance_v1(p_hotkey);
+ balance:=public.tool_market__balance_v1(p_hotkey);
  IF NOT (balance->>'available')::BOOLEAN OR (balance->>'balance_microusd')::BIGINT<p_budget THEN
   RETURN jsonb_build_object('status','balance_low','balance',balance);
  END IF;
@@ -342,6 +345,13 @@ BEGIN
  RETURN jsonb_build_object('status','opened','tab_id',p_tab_id,'budget_microusd',p_budget,'expires_at',expires);
 END;
 $open_tab770$;
+
+-- Whose tab a token opens and whether it is open: the call path's first read.
+CREATE FUNCTION public.tool_market_tab_state_v1(p_token_hash TEXT)
+RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $tab_state770$
+ SELECT jsonb_build_object('hotkey',t.hotkey,'open',public.tool_market__tab_open_v1(t))
+ FROM public.tool_market_tabs t WHERE t.token_hash=p_token_hash;
+$tab_state770$;
 
 CREATE FUNCTION public.tool_market_tab_v1(p_token_hash TEXT)
 RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $tab770$
@@ -373,7 +383,7 @@ $close770$;
 -- One active listing per key: the same vendor key sealed twice, by one miner
 -- or two, is refused while the first is listed. For security, a hotkey
 -- registers at most one key per tool every 30 days, revoked keys included.
--- A revoked key that never served a call does not count.
+-- A revoked key that never took a call does not count.
 CREATE FUNCTION public.tool_market_register_key_v1(p_key_id UUID,p_tool TEXT,p_hotkey TEXT,p_envelope TEXT,
  p_fingerprint TEXT,p_daily_cap BIGINT,p_status TEXT,p_balance NUMERIC,p_host TEXT,p_signed_at BIGINT,
  p_signed_body TEXT,p_signature TEXT)
@@ -386,8 +396,7 @@ BEGIN
  PERFORM public.tool_market__lock_v1('miner_tool',p_hotkey||':'||p_tool);
  SELECT max(k.registered_at)+interval '30 days' INTO next_at FROM public.tool_market_keys k
   WHERE k.miner_hotkey=p_hotkey AND k.tool=p_tool AND (public.tool_market__key_active_v1(k.key_id) OR EXISTS(
-   SELECT 1 FROM public.tool_market_calls c JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
-    WHERE c.key_id=k.key_id AND s.status='settled'));
+   SELECT 1 FROM public.tool_market_calls c WHERE c.key_id=k.key_id));
  IF next_at>clock_timestamp() THEN
   RETURN jsonb_build_object('status','too_soon','next_at',next_at);
  END IF;
@@ -448,11 +457,12 @@ $ask770$;
 -- The tool's tradeable supply. A key trades while it is listed, its miner
 -- accepted the current terms, its latest ask is a price, its latest event
 -- is valid or unchecked, and its last 24 h are under its daily cap. The
--- caller ranks it (``book.rank``).
+-- caller ranks it (``book.rank``) and skips a key without room for a call.
 CREATE FUNCTION public.tool_market_book_v1(p_tool TEXT,p_terms_sha256 TEXT)
 RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $book770$
  WITH keyed AS (
-  SELECT k.key_id,k.miner_hotkey,k.envelope,k.key_fingerprint,k.daily_cap_microusd,
+  SELECT k.key_id,k.miner_hotkey,k.envelope,
+   k.daily_cap_microusd-public.tool_market__key_day_v1(k.key_id) remaining,
    (SELECT a FROM public.tool_market_asks a WHERE a.key_id=k.key_id ORDER BY a.ask_sequence DESC LIMIT 1) ask,
    (SELECT e.status FROM public.tool_market_key_events e WHERE e.key_id=k.key_id ORDER BY e.event_id DESC LIMIT 1) health
   FROM public.tool_market_keys k
@@ -460,11 +470,10 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
    AND EXISTS(SELECT 1 FROM public.tool_market_terms m WHERE m.role='miner' AND m.hotkey=k.miner_hotkey
     AND m.terms_sha256=p_terms_sha256))
  SELECT coalesce(jsonb_agg(jsonb_build_object('key_id',key_id,'miner_hotkey',miner_hotkey,'envelope',envelope,
-   'key_fingerprint',key_fingerprint,'ask_microusd',(ask).ask_microusd,'ask_sequence',(ask).ask_sequence,
+   'ask_microusd',(ask).ask_microusd,'ask_sequence',(ask).ask_sequence,'remaining_microusd',remaining,
    'demoted',public.tool_market__key_demoted_v1(key_id))),'[]'::JSONB)
  FROM keyed
- WHERE (ask).ask_microusd IS NOT NULL AND health IN ('valid','unchecked')
-  AND public.tool_market__key_day_v1(key_id)<daily_cap_microusd;
+ WHERE (ask).ask_microusd IS NOT NULL AND health IN ('valid','unchecked') AND remaining>0;
 $book770$;
 
 -- ---------------------------------------------------------------------------
@@ -505,9 +514,9 @@ BEGIN
  IF public.tool_market__key_day_v1(p_key_id)+p_owed_cap>k.daily_cap_microusd THEN
   RETURN jsonb_build_object('status','key_cap');
  END IF;
- INSERT INTO public.tool_market_calls(call_id,tab_id,tool,operation,key_id,miner_hotkey,ask_microusd,reserve_microusd,
+ INSERT INTO public.tool_market_calls(call_id,tab_id,tool,operation,key_id,ask_microusd,reserve_microusd,
   owed_cap_microusd)
- VALUES(p_call_id,tab.tab_id,p_tool,p_operation,p_key_id,k.miner_hotkey,p_ask,p_reserve,p_owed_cap);
+ VALUES(p_call_id,tab.tab_id,p_tool,p_operation,p_key_id,p_ask,p_reserve,p_owed_cap);
  RETURN jsonb_build_object('status','reserved');
 END;
 $reserve770$;

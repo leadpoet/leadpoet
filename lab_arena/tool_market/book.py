@@ -56,6 +56,8 @@ class Ask:
     envelope: str
     ask_microusd: int
     ask_sequence: int
+    # What the key may still earn today (its daily cap less its last 24 h).
+    remaining_microusd: int
     # Rate-limited in the last minute, or unreliable in the last hour.
     demoted: bool = False
 
@@ -63,7 +65,7 @@ class Ask:
     def from_row(cls, row: Mapping) -> "Ask":
         return cls(key_id=str(row["key_id"]), miner_hotkey=str(row["miner_hotkey"]), envelope=str(row["envelope"]),
                    ask_microusd=int(row["ask_microusd"]), ask_sequence=int(row["ask_sequence"]),
-                   demoted=bool(row.get("demoted")))
+                   remaining_microusd=int(row["remaining_microusd"]), demoted=bool(row.get("demoted")))
 
 
 def rank(asks: Iterable[Ask]) -> List[Ask]:

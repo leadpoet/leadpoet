@@ -43,7 +43,8 @@ def test_markup_rounds_up_and_never_charges_less_than_owed():
 
 
 def test_cheapest_ask_first_and_earlier_wins_a_tie():
-    asks = [book.Ask("c", ALICE, "e", 30, 1), book.Ask("a", ALICE, "e", 10, 3), book.Ask("b", ALICE, "e", 10, 2)]
+    asks = [book.Ask("c", ALICE, "e", 30, 1, 99), book.Ask("a", ALICE, "e", 10, 3, 99),
+            book.Ask("b", ALICE, "e", 10, 2, 99)]
     assert [a.key_id for a in book.rank(asks)] == ["b", "a", "c"]
 
 

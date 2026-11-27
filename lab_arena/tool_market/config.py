@@ -13,7 +13,7 @@ from typing import FrozenSet, Mapping, Optional
 from urllib.parse import urlsplit
 
 from lab_arena.lead_orders.auth import normalize_host
-from lab_arena.lead_orders.config import DEFAULT_GAMMA_PALLET, DEFAULT_GAMMA_STORAGE, is_valid_hotkey
+from lab_arena.lead_orders.config import is_valid_hotkey
 from lab_arena.lead_orders.config import GAMMA_SERVICE_ENV as LEAD_ORDERS_GAMMA_SERVICE_ENV
 from lab_arena.tool_market.catalog import TOOLS
 
@@ -55,8 +55,6 @@ class ToolMarketConfig:
     # requests in their vendor accounts. Serves calls marked private.
     private_suppliers: FrozenSet[str] = frozenset()
     gamma_service: str = ""
-    gamma_pallet: str = DEFAULT_GAMMA_PALLET
-    gamma_storage: str = DEFAULT_GAMMA_STORAGE
     terms_version: str = ""
     terms_sha256: str = ""
     public_base_url: str = ""

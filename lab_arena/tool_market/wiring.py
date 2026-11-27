@@ -50,9 +50,9 @@ def build_from_environment(environ: Optional[Mapping[str, str]] = None):
     vault = VaultClient(deployment, _required("LEAD_ORDER_VAULT_CALLER_TOKEN", env))
     market = ToolMarket(
         config=config, store=store, vault=vault, transport=VaultTransport(vault),
-        gamma_reader=GammaBalanceReader(arena_chain, service_id=config.gamma_service, pallet=config.gamma_pallet,
-                                        storage=config.gamma_storage),
+        gamma_reader=GammaBalanceReader(arena_chain, service_id=config.gamma_service),
         current_epoch=lambda: chain_module.current_settlement_epoch(arena_chain, cutover),
+        is_registered=lambda hotkey: chain_module.is_registered(arena_chain.metagraph(), hotkey),
     )
     return config, market
 

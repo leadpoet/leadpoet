@@ -128,8 +128,10 @@ class World:
         self.vendor = FakeVendor(self.vault)
         self.gamma = FakeGamma()
         self.store = store
+        self.unregistered = set()
         self.market = ToolMarket(config=self.config, store=store, vault=self.vault, transport=self.vendor,
-                                 gamma_reader=self.gamma, current_epoch=lambda: 7)
+                                 gamma_reader=self.gamma, current_epoch=lambda: 7,
+                                 is_registered=lambda hk: hk not in self.unregistered)
 
     def who(self, hk):
         return BuyerIdentity(hotkey=hk, signed_at=1, host="gw.example", signature="0x" + "ab" * 64,
@@ -240,16 +242,16 @@ def test_rate_limited_and_unreliable_keys_go_to_the_back_of_the_book(world):
     world.miner_key("flaky-key", 8_000)
     world.miner_key("limited-key", 9_000)
     world.miner_key("steady-key", 10_000)
-    _, token = world.buyer()
     world.vendor.script["flaky-key"] = [ok(status=500)]
-    for _ in range(3):  # answers of unknown usage, never retried elsewhere
+    for _ in range(3):  # unknown usage for 3 buyers, never retried elsewhere
+        _, token = world.buyer()
         assert world.market.call(token, PROFILE)["status"] == 500
     world.vendor.script["limited-key"] = [ok(status=429, headers={})]
     world.market.call(token, PROFILE)
     world.vendor.sent.clear()
     world.market.call(token, PROFILE)
-    # The flaky key (3 unknowns this hour) and the limited key (a bare 429
-    # this minute) are tried after the steady one.
+    # The flaky key (3 buyers saw unknown usage this hour) and the limited
+    # key (a bare 429 this minute) are tried after the steady one.
     assert [s[0] for s in world.vendor.sent] == ["steady-key"]
 
 
@@ -257,29 +259,28 @@ def test_only_vendor_errors_push_a_key_back_not_what_a_buyer_can_cause(world):
     world.miner_key("pushback-cheap", 8_000)
     world.miner_key("pushback-other", 10_000)
     _, token = world.buyer()
-    # An oversized answer is unknown usage a buyer can cause: the miner
-    # bears it, but the key keeps its place.
-    world.vendor.script["pushback-cheap"] = [VaultTransportError("response_too_large", forwarded=True)] * 3 + [ok()]
+    # A buyer can cause unknown usage (an oversized answer) or a 403 (a
+    # shaped request): the miner bears it, but one buyer cannot push the
+    # key back, however often.
+    world.vendor.script["pushback-cheap"] = [VaultTransportError("response_too_large", forwarded=True)] * 3 \
+        + [ok(status=403)] * 3 + [ok()]
     for _ in range(3):
         with pytest.raises(ToolMarketError):
             world.market.call(token, PROFILE)
-    world.market.call(token, PROFILE)
-    assert world.market.order_book("harvestapi")["asks"][0]["ask_microusd"] == 8_000
-    # A 403 (a plan without the route, or a rate limit) pushes it back for a minute.
-    world.vendor.script["pushback-cheap"] = [ok(status=403)]
-    world.market.call(token, PROFILE)
+    for _ in range(3):
+        world.market.call(token, PROFILE)  # skipped, served by the other key
     world.vendor.sent.clear()
     world.market.call(token, PROFILE)
-    assert [s[0] for s in world.vendor.sent] == ["pushback-other"]
+    assert [s[0] for s in world.vendor.sent] == ["pushback-cheap"]
 
 
 def test_a_tab_short_for_one_key_still_buys_from_a_cheaper_one(world):
     world.miner_key("short-pricey", 200_000)
     world.miner_key("short-cheap", 10_000)
     _, token = world.buyer(budget=50_000)
-    world.vendor.script["short-cheap"] = [ok(status=500), ok(status=500), ok(status=500), ok()]
-    for _ in range(3):
-        world.market.call(token, PROFILE)  # 5xx: the cheap key goes to the back
+    world.vendor.script["short-cheap"] = [ok(status=429, headers={}), ok()]
+    with pytest.raises(ToolMarketError):
+        world.market.call(token, PROFILE)  # a bare 429: the cheap key goes to the back
     assert world.market.order_book("harvestapi")["asks"][0]["ask_microusd"] == 200_000
     assert world.market.call(token, PROFILE)["charge_microusd"] == 11_000
     assert world.vendor.sent[-1][0] == "short-cheap"  # the 220,000 reserve would not fit
@@ -425,6 +426,27 @@ def test_a_key_stops_trading_at_its_daily_cap(world):
     with pytest.raises(ToolMarketError) as capped:
         world.market.call(token, PROFILE)  # 20,000 earned + 10,000 more would pass 25,000
     assert capped.value.code == "no_supply"
+
+
+def test_unknown_usage_counts_toward_a_keys_daily_cap(world):
+    # Whatever buyers cause, a miner never bears more than their cap a day.
+    miner, _ = world.miner_key("uncertain-capped", 10_000, cap=25_000)
+    world.vendor.script["uncertain-capped"] = [ok(status=500)]
+    for _ in range(2):
+        _, token = world.buyer()
+        world.market.call(token, PROFILE)
+    with pytest.raises(ToolMarketError) as capped:
+        world.market.call(token, PROFILE)  # 20,000 at risk + 10,000 more would pass 25,000
+    assert capped.value.code == "no_supply" and len(world.vendor.sent) == 2
+
+
+def test_keys_without_room_for_a_call_do_not_use_up_its_attempts(world):
+    for n in range(market_module.MAX_ASKS_PER_CALL + 2):
+        world.miner_key(f"tiny-cap-{n}", 1_000, cap=1)
+    world.miner_key("roomy-key", 10_000)
+    _, token = world.buyer()
+    assert world.market.call(token, PROFILE)["charge_microusd"] == 11_000
+    assert [s[0] for s in world.vendor.sent] == ["roomy-key"]
 
 
 def test_a_key_that_died_since_its_check_is_found_by_its_first_call(world):
@@ -617,6 +639,31 @@ def test_a_miners_tab_never_buys_from_their_own_key(world):
     with pytest.raises(ToolMarketError) as own:
         world.market.call(token, PROFILE)
     assert own.value.code == "no_supply" and world.vendor.sent == []
+
+
+def test_only_a_registered_hotkey_lists_keys(world):
+    miner = hotkey()
+    world.accept(miner, "miner")
+    world.unregistered.add(miner)
+    body = {"tool": "exa", "daily_cap_microusd": USD, "envelope": world.vault.seal("exa", miner, "unregistered")}
+    with pytest.raises(ToolMarketError) as refused:
+        world.register(miner, body)
+    assert (refused.value.status, refused.value.code) == (403, "miner_not_registered")
+    world.unregistered.clear()
+    world.register(miner, body)
+
+
+def test_a_revoked_key_with_any_call_starts_the_30_days(world):
+    # Even a call of unknown usage, so a dead key cannot be swapped at once.
+    miner, key_id = world.miner_key("swap-key", 900_000, tool="exa")
+    world.vendor.script["swap-key"] = [ok(status=500)]
+    _, token = world.buyer()
+    world.market.call(token, SEARCH)
+    world.market.revoke_key(world.who(miner), key_id)
+    with pytest.raises(ToolMarketError) as soon:
+        world.register(miner, {"tool": "exa", "daily_cap_microusd": USD,
+                               "envelope": world.vault.seal("exa", miner, "swap-key-2")})
+    assert soon.value.code == "key_registration_too_soon"
 
 
 def test_a_hotkey_registers_one_key_per_tool_every_30_days(world):

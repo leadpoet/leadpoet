@@ -41,8 +41,8 @@ from lead_order_vault import tools as vault_tools
 TOKEN_PREFIX = "tmt_"
 # Keys tried for one call before the buyer is told there is no supply.
 MAX_KEYS_PER_CALL = 3
-# Reserve attempts per call, refused ones included (a key at its cap, an ask
-# that just moved), so one call cannot walk a whole book.
+# Reserve attempts per call, refused ones included (an ask that just moved,
+# a key that just reached its cap), so one call cannot walk a whole book.
 MAX_ASKS_PER_CALL = 10
 RECHECK_SPACING_SECONDS = 60
 MAX_USAGE_PAGE = 500
@@ -82,7 +82,7 @@ def _int(value: Any, low: int, high: int, code: str) -> int:
 
 class ToolMarket:
     def __init__(self, *, config: ToolMarketConfig, store: ToolMarketStore, vault: Any, transport: Any,
-                 gamma_reader: Any, current_epoch: Callable[[], int],
+                 gamma_reader: Any, current_epoch: Callable[[], int], is_registered: Callable[[str], bool],
                  new_id: Callable[[], str] = lambda: str(uuid.uuid4()),
                  new_token: Callable[[], str] = lambda: TOKEN_PREFIX + secrets.token_urlsafe(32)) -> None:
         self._config = config
@@ -91,6 +91,7 @@ class ToolMarket:
         self._transport = transport
         self._gamma = gamma_reader
         self._epoch = current_epoch
+        self._is_registered = is_registered
         self._new_id = new_id
         self._new_token = new_token
         self._rechecked: Dict[str, float] = {}
@@ -165,7 +166,12 @@ class ToolMarket:
     # Miners -----------------------------------------------------------------
     def register_key(self, identity: BuyerIdentity, body: Mapping[str, Any], signed_body: bytes) -> Dict[str, Any]:
         """List a key. ``signed_body`` is the request body as signed; it is kept
-        with the key, so the miner's attestation can be verified again later."""
+        with the key, so the miner's attestation can be verified again later.
+
+        Only a hotkey registered on the subnet lists keys: a registration
+        costs TAO, so a key the vault cannot check costs more than a
+        signature, and only registered hotkeys are paid anyway.
+        """
 
         if set(body) != {"tool", "envelope", "daily_cap_microusd", "attestation"}:
             raise ToolMarketError(400, "request_invalid")
@@ -175,6 +181,12 @@ class ToolMarket:
         if tool not in self._config.tools:
             raise ToolMarketError(404, "tool_unavailable")
         cap = _int(body["daily_cap_microusd"], 1, MAX_KEY_DAILY_CAP_MICROUSD, "daily_cap_invalid")
+        try:
+            registered = self._is_registered(identity.hotkey)
+        except ArenaChainError:
+            raise ToolMarketError(503, "chain_unavailable") from None
+        if not registered:
+            raise ToolMarketError(403, "miner_not_registered")
         envelope = body["envelope"]
         try:
             header, _ = vault_envelope.read_header(envelope)
@@ -298,7 +310,7 @@ class ToolMarket:
             raise ToolMarketError(401, "tab_unknown")
         tab = token_hash(token)
         # Before the chain and the book are read, so a bad token costs one lookup.
-        opened = self._store.tab(tab)
+        opened = self._store.tab_state(tab)
         if opened is None:
             raise ToolMarketError(401, "tab_unknown")
         if not opened["open"]:
@@ -313,14 +325,16 @@ class ToolMarket:
         for ask in book.rank(book.Ask.from_row(row) for row in self._supply(tool)):
             if tried >= MAX_KEYS_PER_CALL or attempts >= MAX_ASKS_PER_CALL:
                 break
-            if ask.ask_microusd > max_ask or (private and not self._private(tool, ask)):
-                continue
+            owed_cap = book.owed_microusd(op, op.max_units, ask.ask_microusd)
+            if ask.ask_microusd > max_ask or (private and not self._private(tool, ask)) \
+                    or owed_cap > ask.remaining_microusd or ask.miner_hotkey == opened["hotkey"]:
+                continue  # known from the book: no reserve could succeed
             attempts += 1
             call_id = self._new_id()
             status = self._store.reserve_call(
                 call_id=call_id, token_hash=tab, tool=tool, operation=op.name, key_id=ask.key_id,
                 ask_microusd=ask.ask_microusd, reserve_microusd=book.reserve_microusd(op, ask.ask_microusd),
-                owed_cap_microusd=book.owed_microusd(op, op.max_units, ask.ask_microusd))
+                owed_cap_microusd=owed_cap)
             if status == "tab_closed":
                 raise ToolMarketError(401, "tab_closed")
             if status == "tab_budget":

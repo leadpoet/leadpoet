@@ -55,7 +55,7 @@ def _get_state() -> Tuple[Any, Any]:
         if _state is not None:
             return _state
         if _failed is not None and time.monotonic() - _failed[0] < BUILD_RETRY_SECONDS:
-            raise _failed[1]
+            raise _failed[1].with_traceback(None)
         try:
             built = _builder() if _builder is not None else support.build_state()
         except Exception as error:

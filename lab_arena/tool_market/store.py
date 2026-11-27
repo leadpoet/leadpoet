@@ -27,6 +27,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_terms_sha256", _T),
     ),
     "tool_market_tab_v1": (("p_token_hash", _T),),
+    "tool_market_tab_state_v1": (("p_token_hash", _T),),
     "tool_market_close_tab_v1": (("p_token_hash", _T),),
     "tool_market_register_key_v1": (
         ("p_key_id", _U), ("p_tool", _T), ("p_hotkey", _T), ("p_envelope", _T), ("p_fingerprint", _T),
@@ -97,6 +98,9 @@ class ToolMarketStore:
 
     def tab(self, token_hash: str) -> Optional[Dict[str, Any]]:
         return self._rpc("tool_market_tab_v1", p_token_hash=token_hash)
+
+    def tab_state(self, token_hash: str) -> Optional[Dict[str, Any]]:
+        return self._rpc("tool_market_tab_state_v1", p_token_hash=token_hash)
 
     def close_tab(self, token_hash: str) -> Optional[Dict[str, Any]]:
         return self._rpc("tool_market_close_tab_v1", p_token_hash=token_hash)

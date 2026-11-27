@@ -94,7 +94,8 @@ def _document(body: bytes) -> Any:
         if isinstance(value, (list, dict)):
             if depth > MAX_ANSWER_DEPTH:
                 return None
-            stack.extend((item, depth + 1) for item in (value.values() if isinstance(value, dict) else value))
+            stack.extend((item, depth + 1) for item in (value.values() if isinstance(value, dict) else value)
+                         if isinstance(item, (list, dict)))
     try:
         json.dumps(document, allow_nan=False, ensure_ascii=False).encode("utf-8")
     except (ValueError, UnicodeEncodeError):
@@ -227,13 +228,12 @@ class ToolMarket:
             raise ToolMarketError(400, "envelope_mismatch")
         if header.miner_hotkey != identity.hotkey:
             raise ToolMarketError(400, "envelope_hotkey_mismatch")
-        # A listing refused as too soon is answered from memory for a minute, so
-        # re-posting it cannot make the vault probe a vendor in a loop.
-        refused = "refused:%s:%s" % (identity.hotkey, tool)
-        with self._lock:
-            if time.monotonic() - self._rechecked.get(refused, -RECHECK_SPACING_SECONDS) < RECHECK_SPACING_SECONDS:
-                raise ToolMarketError(429, "key_registration_too_soon", retry_after_seconds=RECHECK_SPACING_SECONDS)
+        # One vendor probe per hotkey and tool a minute, unless it ends in a
+        # listing, so re-posting a refused key cannot loop vendor checks.
+        probe = "register:%s:%s" % (identity.hotkey, tool)
         with self._slot("check:" + identity.hotkey, 1, "check_in_flight"):
+            if not self._recheck_due(probe):
+                raise ToolMarketError(429, "key_registration_too_soon", retry_after_seconds=RECHECK_SPACING_SECONDS)
             checked = self._check(tool, envelope)
         if checked.get("status") not in ("valid", "unchecked"):
             raise ToolMarketError(422, str(checked.get("reason") or "key_invalid"))
@@ -244,13 +244,12 @@ class ToolMarket:
             fingerprint=checked["key_fingerprint"], daily_cap_microusd=cap, status=checked["status"],
             host=identity.host, signed_at=identity.signed_at,
             signed_body=signed_body.decode("utf-8"), signature=identity.signature.lower().removeprefix("0x"))
-        if result["status"] == "too_soon":  # checked before duplicates, so it covers re-posting a listed key
-            with self._lock:
-                self._rechecked[refused] = time.monotonic()
         if result["status"] == "duplicate":
             raise ToolMarketError(409, "key_already_listed")
         if result["status"] == "too_soon":
             raise ToolMarketError(429, "key_registration_too_soon", next_at=result["next_at"])
+        with self._lock:
+            self._rechecked.pop(probe, None)
         return dict(result, health=checked["status"])
 
     def check_key(self, identity: BuyerIdentity, key_id: Any) -> Dict[str, Any]:
@@ -263,9 +262,9 @@ class ToolMarket:
         key = self._own_key(identity, key_id)
         if vault_tools.TOOLS[key["tool"]].balance_url is None:
             raise ToolMarketError(409, "key_cannot_be_checked")
-        if not self._recheck_due(key["key_id"]):
-            raise ToolMarketError(429, "check_too_soon", retry_after_seconds=RECHECK_SPACING_SECONDS)
         with self._slot("check:" + identity.hotkey, 1, "check_in_flight"):
+            if not self._recheck_due(key["key_id"]):
+                raise ToolMarketError(429, "check_too_soon", retry_after_seconds=RECHECK_SPACING_SECONDS)
             checked = self._recheck(key["key_id"], key["tool"], key["envelope"])
         return {"key_id": key["key_id"], "tradeable": checked is not None and checked["status"] != "invalid"}
 
@@ -519,15 +518,15 @@ class ToolMarket:
 
         return ask.miner_hotkey in self._config.private_suppliers or catalog.REQUEST_PRIVACY[tool] == "private"
 
-    def _recheck_due(self, key_id: str) -> bool:
-        """At most one failure check per key a minute in this process, so a
-        burst of calls cannot hammer a miner's account."""
+    def _recheck_due(self, name: str) -> bool:
+        """At most one vendor check a minute per key (or registration probe)
+        in this process, so a burst cannot hammer a miner's account."""
 
         now = time.monotonic()
         with self._lock:
-            if now - self._rechecked.get(key_id, -RECHECK_SPACING_SECONDS) < RECHECK_SPACING_SECONDS:
+            if now - self._rechecked.get(name, -RECHECK_SPACING_SECONDS) < RECHECK_SPACING_SECONDS:
                 return False
-            self._rechecked[key_id] = now
+            self._rechecked[name] = now
             return True
 
     def _own_key(self, identity: BuyerIdentity, key_id: Any) -> Dict[str, Any]:

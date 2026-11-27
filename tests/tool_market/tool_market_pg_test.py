@@ -408,12 +408,13 @@ def test_tabs_need_terms_balance_and_budget(world):
 
 def test_listing_rules(world):
     miner, key_id = world.miner_key("listed-key", 10_000)
-    other = hotkey()
+    other, third = hotkey(), hotkey()
     world.accept(other, "miner")
+    world.accept(third, "miner")
     # The same vendor key, sealed again by anyone, is refused while listed.
     with pytest.raises(ToolMarketError) as twice:
-        world.register(other, {"tool": "harvestapi", "daily_cap_microusd": USD,
-                               "envelope": world.vault.seal("harvestapi", other, "listed-key")})
+        world.register(third, {"tool": "harvestapi", "daily_cap_microusd": USD,
+                               "envelope": world.vault.seal("harvestapi", third, "listed-key")})
     assert twice.value.code == "key_already_listed"
     # An envelope sealed for another miner or tool is refused before the vault is asked.
     checks = world.vault.checks
@@ -706,7 +707,8 @@ def test_a_miners_tab_never_buys_from_their_own_key(world):
     miner, _ = world.miner_key("own-key", 10_000)
     world.gamma.units[miner] = 10**9
     world.accept(miner, "buyer")
-    token = world.market.open_tab(world.who(miner), {"budget_microusd": 100_000, "seconds": 600})["token"]
+    # A budget below the reserve: the own-key rule still decides.
+    token = world.market.open_tab(world.who(miner), {"budget_microusd": 5_000, "seconds": 600})["token"]
     with pytest.raises(ToolMarketError) as own:
         world.market.call(token, PROFILE)
     assert own.value.code == "no_supply" and world.vendor.sent == []

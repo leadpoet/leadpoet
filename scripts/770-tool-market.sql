@@ -496,6 +496,10 @@ BEGIN
  IF NOT public.tool_market__tab_open_v1(tab) THEN
   RETURN jsonb_build_object('status','tab_closed');
  END IF;
+ -- A miner's own tab never buys from their own key (a key's miner never changes).
+ IF EXISTS(SELECT 1 FROM public.tool_market_keys WHERE key_id=p_key_id AND miner_hotkey=tab.hotkey) THEN
+  RETURN jsonb_build_object('status','own_key');
+ END IF;
  IF public.tool_market__committed_v1(tab.tab_id)+p_reserve>tab.budget_microusd THEN
   RETURN jsonb_build_object('status','tab_budget');
  END IF;
@@ -508,9 +512,6 @@ BEGIN
   ORDER BY ask_sequence DESC LIMIT 1;
  IF k.key_id IS NULL OR NOT public.tool_market__key_active_v1(p_key_id) OR current_ask IS DISTINCT FROM p_ask THEN
   RETURN jsonb_build_object('status','ask_changed');
- END IF;
- IF k.miner_hotkey=tab.hotkey THEN  -- a miner's own tab never buys from their own key
-  RETURN jsonb_build_object('status','own_key');
  END IF;
  SELECT * INTO g FROM public.tool_market__key_ledger_v1(p_key_id,tab.hotkey);
  IF g.day+p_owed_cap>k.daily_cap_microusd OR g.buyer_unknown+p_owed_cap>k.daily_cap_microusd/4 THEN

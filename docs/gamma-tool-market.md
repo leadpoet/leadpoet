@@ -132,8 +132,8 @@ Only a hotkey registered on the subnet lists keys (`403
 miner_not_registered`). A miner's own tab never buys from their own keys.
 For security, a hotkey registers at most one key per tool every 30 days,
 revoked keys included. A revoked key that never took a call does not count.
-A listing refused as too soon is not checked with the vendor again for a
-minute.
+A listing that is refused is not checked with the vendor again, for that
+hotkey and tool, for a minute.
 
 `GET /tool-market/catalog` lists every tool that trades: its operations,
 one line on what each does, their parameters, its price ceiling, and the
@@ -198,7 +198,7 @@ All amounts are integer micro-USD.
     (`429 too_many_calls_in_flight`), and calls run on their own 32
     threads, so slow free answers cannot hold up the rest of the gateway.
     Key registrations and checks share 4 threads of their own, and a
-    miner has one in flight at a time (`429 check_in_flight`).
+    miner has one in flight at a time per process (`429 check_in_flight`).
 - **Late answers:** a call still open after 10 minutes holds nothing and
   can no longer settle.
 

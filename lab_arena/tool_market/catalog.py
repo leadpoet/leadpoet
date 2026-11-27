@@ -201,6 +201,10 @@ def _findymail_status(status: int, _: Any) -> int:
     return 401 if status == 423 else status
 
 
+def _hunter_status(status: int, _: Any) -> int:
+    return {403: 429, 429: 402}.get(status, status)
+
+
 def _prospeo_status(status: int, document: Any) -> int:
     code = _get(document, "error_code")
     return {"INSUFFICIENT_CREDITS": 402, "INVALID_API_KEY": 401}.get(code, status) if isinstance(code, str) else status
@@ -257,7 +261,7 @@ _OPERATIONS: Sequence[Operation] = (
               {"domain": Param("str", max_length=253), "company": _NAME, "linkedin_handle": _NAME,
                "first_name": _NAME, "last_name": _NAME, "full_name": _NAME,
                "max_duration": Param("int", low=3, high=20)},
-              cost=_found_email("data", "email"), real_status=lambda status, _: {403: 429, 429: 402}.get(status, status),
+              cost=_found_email("data", "email"), real_status=_hunter_status,
               does="Find a person's work email from their name and company."),
     # Exa: each answer carries ``costDollars.total``, which Exa calls an estimate.
     Operation("exa", "search", "POST", _EXA + "/search", UNIT_VENDOR_USD, 50_000,

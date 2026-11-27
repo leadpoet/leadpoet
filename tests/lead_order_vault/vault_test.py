@@ -876,20 +876,17 @@ def test_every_request_the_broker_sends_fits_the_vault():
     from lab_arena.lead_orders import broker
     from lead_order_vault.tools import TOOLS
 
-    def _route_allowed(provider, method, path, query):
-        return TOOLS[provider].route(method, path, query)
-
-    assert _route_allowed("openrouter", "POST", "/" + broker.OPENROUTER_CHAT_PATH, "")
-    assert _route_allowed("openrouter", "POST", "/" + broker.OPENROUTER_DECISIONS_PATH, "")
+    assert TOOLS["openrouter"].route("POST", "/" + broker.OPENROUTER_CHAT_PATH, "")
+    assert TOOLS["openrouter"].route("POST", "/" + broker.OPENROUTER_DECISIONS_PATH, "")
     from urllib.parse import quote, urlsplit
     from lab_arena.broker import OPENROUTER_GENERATION_URL
     for generation in ("gen-1", "gen-1.a:b"):
         readback = urlsplit(OPENROUTER_GENERATION_URL + quote(generation, safe=""))
-        assert _route_allowed("openrouter", "GET", readback.path, readback.query)
+        assert TOOLS["openrouter"].route("GET", readback.path, readback.query)
     from lead_order_vault.vault import FORWARDED_HEADERS
     assert set(broker.DEEPLINE_FORWARDED_HEADERS) <= FORWARDED_HEADERS
     for tool in broker.DEEPLINE_OPERATIONS:
-        assert _route_allowed("deepline", "POST", "/api/v2/integrations/%s/execute" % tool, "")
+        assert TOOLS["deepline"].route("POST", "/api/v2/integrations/%s/execute" % tool, "")
 
 
 # -- the gateway's client, against the real HTTP server ---------------------------

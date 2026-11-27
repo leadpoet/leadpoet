@@ -310,20 +310,66 @@ def test_receipt_signature_and_rows_verify_and_tampering_fails():
 
 def test_payout_document_shadow_without_price_and_live_with_price():
     entries = [money.OwedEntry("o1", ALICE, 1, 1, 600_000), money.OwedEntry("o2", BOB, 2, 2, 900_000)]
-    shadow = rewards.epoch_payout_document(POLICY, epoch=3, mode="shadow", entries=entries, miner_emission_microusd=None)
+    shadow = rewards.epoch_payout_document(POLICY, epoch=3, mode="shadow", entries=entries, valuation=None)
     assert shadow["payments"] == [] and shadow["owed_microusd"] == 1_500_000 and rewards.lane_fractions(shadow) == {}
     with pytest.raises(rewards.EmissionPriceUnavailable):
-        rewards.epoch_payout_document(POLICY, epoch=3, mode="live", entries=entries, miner_emission_microusd=None)
+        rewards.epoch_payout_document(POLICY, epoch=3, mode="live", entries=entries, valuation=None)
     with pytest.raises(rewards.EmissionPriceUnavailable):
-        rewards.UnavailableEmissionPrice().miner_emission_microusd(3)
+        rewards.UnavailableEmissionPrice().valuation(3)
     # $4 of miner emission, 30% cap = $1.20: o1 in full, $0.60 of o2, $0.30 carried.
-    live = rewards.epoch_payout_document(POLICY, epoch=3, mode="live", entries=entries, miner_emission_microusd=4_000_000)
+    valuation = {"emission_microusd": 4_000_000, "block": 50}
+    live = rewards.epoch_payout_document(POLICY, epoch=3, mode="live", entries=entries, valuation=valuation)
     assert live["cap_microusd"] == 1_200_000 and live["carry_forward_microusd"] == 300_000
     assert [p["paid_microusd"] for p in live["payments"]] == [600_000, 600_000]
     assert rewards.lane_fractions(live) == {ALICE: Fraction(3, 20), BOB: Fraction(3, 20)}
+    # The price inputs are published, so the cap can be recomputed from the document alone.
+    assert live["emission_valuation"] == valuation and live["miner_emission_microusd"] == 4_000_000
     lowered = rewards.epoch_payout_document(POLICY, epoch=3, mode="live", entries=entries,
-                                            miner_emission_microusd=4_000_000, payable_cap_microusd=100)
+                                            valuation=valuation, payable_cap_microusd=100)
     assert lowered["paid_microusd"] == 100
+
+
+def chain_price(*, epoch=7, alpha_price=1_500_000, tao_usd=lambda now: (200 * 10**6, now - 10)):
+    """The real valuation over a fake chain: 3 alpha to miners at block 50."""
+    from types import SimpleNamespace as NS
+
+    from lab_arena import collection_rewards
+
+    block_hash = "0x" + "b" * 64
+    emitted = {"event": {"module_id": "SubtensorModule", "event_id": "IncentiveAlphaEmittedToMiners",
+                         "attributes": {"netuid": 71, "emissions": [10**9, 2 * 10**9]}}}
+    chain = NS(
+        config=NS(netuid=71, network_name="test"), finalized_block_hash=lambda number: block_hash,
+        client=NS(get_events=lambda _hash: [emitted], runtime_call=lambda **_: alpha_price),
+    )
+    return rewards.ChainEmissionPrice(
+        scope=lambda: {"epoch": epoch, "valid_from_block": 50},
+        valuation=lambda block: collection_rewards.emission_valuation(chain, block, now=lambda: 500, price_source=tao_usd),
+        tao_price_source="test:tao/usd",
+    )
+
+
+def test_chain_emission_price_is_alpha_times_alpha_price_times_tao_price_at_the_epoch_block():
+    # 3 alpha x 0.0015 TAO per alpha x $200 per TAO = $0.90 of miner emission.
+    assert chain_price().valuation(7) == {
+        "block": 50, "block_hash": "0x" + "b" * 64, "miner_alpha_rao": 3 * 10**9, "tao_rao_per_alpha": 1_500_000,
+        "tao_price_microusd": 200 * 10**6, "price_updated_at": 490, "observed_at": 500,
+        "emission_microusd": 900_000, "tao_price_source": "test:tao/usd",
+    }
+
+
+def test_chain_emission_price_fails_closed():
+    def refused(now):
+        raise ValueError("stale TAO/USD price")
+
+    for source, epoch in (
+        (chain_price(), 6),                 # a past epoch: today's TAO price says nothing about it
+        (chain_price(tao_usd=refused), 7),  # no fresh TAO/USD quote
+        (chain_price(alpha_price=0), 7),    # the chain gives no alpha price
+        (chain_price(tao_usd=lambda now: (0, now)), 7),  # a zero price would make the lane cap zero
+    ):
+        with pytest.raises(rewards.EmissionPriceUnavailable):
+            source.valuation(epoch)
 
 
 def test_signed_host_drops_default_ports_on_both_sides():

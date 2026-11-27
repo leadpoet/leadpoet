@@ -14,6 +14,7 @@ buyer, so no live order can be placed until a real mailer is wired in.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import secrets
 import time
@@ -661,11 +662,14 @@ class LeadOrderService:
         self.reconcile()
         self.repay_uncertain()
         try:
-            emission = self._emission_price.miner_emission_microusd(epoch)
-        except rewards.EmissionPriceUnavailable:
+            valuation = self._emission_price.valuation(epoch)
+        except rewards.EmissionPriceUnavailable as exc:
+            # Say why, so a lasting fault cannot stop payouts unnoticed.
+            logging.getLogger(__name__).warning(
+                "lead order epoch %s has no emission price: %s (%r)", epoch, exc, exc.__cause__)
             if self.config.weights_rewards:
                 return None  # live: no payout, Arena weights unchanged
-            emission = None
+            valuation = None
         entries = rewards.owed_entries(self._store.owed(through_epoch=epoch, mode=self.config.mode))
         if registered_hotkeys is not None:
             entries = lane_weights.registered_entries(entries, registered_hotkeys)
@@ -673,7 +677,7 @@ class LeadOrderService:
             raise LeadOrderServiceError(500, "registered_hotkeys_required")
         document = rewards.sign_payout(self._signer, rewards.epoch_payout_document(
             self.policy, epoch=epoch, mode=self.config.mode, entries=entries,
-            miner_emission_microusd=emission, payable_cap_microusd=payable_cap_microusd,
+            valuation=valuation, payable_cap_microusd=payable_cap_microusd,
         ))
         self._store.record_payout(epoch=epoch, mode=self.config.mode, document=document,
                                   payments=document["payments"])

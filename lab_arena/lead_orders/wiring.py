@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from lab_arena import chain as chain_module
-from lab_arena import signing
+from lab_arena import collection_rewards, signing
 from lab_arena.broker import HttpxProviderTransport, fetch_openrouter_price_table
 from lab_arena.credentials import CredentialManager
 from lab_arena.lead_orders import keys as lead_keys
@@ -24,6 +24,7 @@ from lab_arena.lead_orders.broker import LeadOrderBroker
 from lab_arena.lead_orders.config import LeadOrdersConfig, load_config
 from lab_arena.lead_orders.gamma import GammaBalanceReader
 from lab_arena.lead_orders.policy import load_policy
+from lab_arena.lead_orders.rewards import ChainEmissionPrice
 from lab_arena.lead_orders.service import LeadOrderService
 from lab_arena.lead_orders.store import LeadOrderStore
 from lab_arena.store import PostgrestTransport
@@ -94,10 +95,20 @@ def build_from_environment(environ: Optional[Mapping[str, str]] = None):
         leadpoet_secrets={"openrouter": config.leadpoet_openrouter_key, "deepline": config.leadpoet_deepline_key},
         price_table=_CachedPriceTable(), current_epoch=current_epoch,
     )
+
+    def epoch_scope() -> Mapping[str, Any]:
+        snapshot = chain_module.finalized_epoch_snapshot(arena_chain)
+        return {"epoch": int(snapshot.settlement_epoch_id(cutover)), "valid_from_block": int(snapshot.last_epoch_block)}
+
     service = LeadOrderService(
         config=config, policy=policy, policy_document=document, store=store, signer=signer,
         current_epoch=current_epoch, gamma_reader=gamma_reader, registrar=registrar,
         resolver=broker.resolve_uncertain,
+        emission_price=ChainEmissionPrice(
+            scope=epoch_scope,
+            valuation=lambda block: collection_rewards.emission_valuation(arena_chain, block),
+            tao_price_source="coingecko:bittensor/usd",
+        ),
     )
     return config, service, broker
 

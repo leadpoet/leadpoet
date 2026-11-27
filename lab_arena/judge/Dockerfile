@@ -20,7 +20,7 @@ FROM ${BASE_IMAGE}
 
 ARG LEADPOET_BUILD_COMMIT=unknown
 LABEL org.opencontainers.image.revision="${LEADPOET_BUILD_COMMIT}" \
-      org.opencontainers.image.title="leadpoet-lab-arena-judge"
+      org.opencontainers.image.title="subnet71-lab-arena-judge"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

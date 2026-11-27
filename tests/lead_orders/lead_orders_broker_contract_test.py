@@ -40,7 +40,7 @@ PRICE_TABLE = price_table_from_models_response({"data": [
 
 
 def broker(policy=POLICY) -> LeadOrderBroker:
-    return LeadOrderBroker(store=None, policy=policy, transport=None, registrar=None, leadpoet_secrets={},
+    return LeadOrderBroker(store=None, policy=policy, transport=None, registrar=None, owner_secrets={},
                            price_table=lambda: PRICE_TABLE, current_epoch=lambda: 1)
 
 
@@ -161,7 +161,7 @@ def test_jev_market_decision_uses_the_order_key_and_settles_through_the_broker()
 
     store, transport = Store(), Transport()
     paid = LeadOrderBroker(store=store, policy=POLICY, transport=transport, registrar=None,
-                           leadpoet_secrets={"openrouter": "test-order-provider-key"},
+                           owner_secrets={"openrouter": "test-order-provider-key"},
                            price_table=lambda: PRICE_TABLE, current_epoch=lambda: 4)
     response = paid.call("one-order-token", jev_decision())
     assert response.status == 200

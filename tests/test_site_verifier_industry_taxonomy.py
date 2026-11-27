@@ -8,11 +8,11 @@ from pathlib import Path
 from leadpoet_verifier.industry_taxonomy import (
     CONTEXTUAL_BROAD_CONCEPTS,
     INDUSTRY_CONCEPT_PATTERNS,
-    LEADPOET_PARENT_INDUSTRIES,
-    LEADPOET_SUBINDUSTRY_PARENTS,
+    PARENT_INDUSTRIES,
+    SUBINDUSTRY_PARENTS,
     industry_concepts,
     industry_tokens,
-    leadpoet_taxonomy_match,
+    taxonomy_match,
     normalized_industry_text,
     requested_industry_concepts,
 )
@@ -76,8 +76,8 @@ class IndustryTaxonomyTests(unittest.TestCase):
         # scripts/generate_verifier_industry_taxonomy.py when authority moves).
         self.assertEqual(len(expected_parents), 50)
         self.assertEqual(len(expected_subindustries), len(source))
-        self.assertEqual(LEADPOET_PARENT_INDUSTRIES, expected_parents)
-        self.assertEqual(LEADPOET_SUBINDUSTRY_PARENTS, expected_subindustries)
+        self.assertEqual(PARENT_INDUSTRIES, expected_parents)
+        self.assertEqual(SUBINDUSTRY_PARENTS, expected_subindustries)
 
     def test_exact_taxonomy_rejects_cross_parent_aliases_and_inconsistent_labels(self):
         cases = [
@@ -96,14 +96,14 @@ class IndustryTaxonomyTests(unittest.TestCase):
         ]
         for requested, industry, subindustry, expected in cases:
             with self.subTest(requested=requested, subindustry=subindustry):
-                decision, detail = leadpoet_taxonomy_match(
+                decision, detail = taxonomy_match(
                     requested,
                     industry,
                     subindustry,
                 )
                 self.assertIs(decision, expected, detail)
 
-        decision, detail = leadpoet_taxonomy_match(
+        decision, detail = taxonomy_match(
             "Software",
             "Software Development",
             "Revenue intelligence platform",

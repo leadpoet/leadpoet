@@ -5,7 +5,7 @@
   cost capped at its reservation) and the store keeps it once. A cost that
   becomes known later (a late answer or a generation read-back) is owed as a
   separate late reward per call (``lead_order_reward_late_v1``). Shadow
-  orders run on Leadpoet's keys and publish ``what_if_reward`` only.
+  orders run on the subnet's own keys and publish ``what_if_reward`` only.
 * Each epoch, ``epoch_payout_document`` pays owed USD oldest first under the
   lane cap and carries the rest forward. In shadow mode the document is
   published only and nothing is recorded as paid; in live mode the payments

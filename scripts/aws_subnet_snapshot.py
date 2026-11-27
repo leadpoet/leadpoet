@@ -138,7 +138,7 @@ def connection_config(mode, value, host):
 @contextlib.contextmanager
 def service(config):
     """Only private temporary files carry usernames/passwords to libpq."""
-    with tempfile.TemporaryDirectory(prefix="leadpoet-pg-") as directory:
+    with tempfile.TemporaryDirectory(prefix="subnet71-pg-") as directory:
         root = Path(directory)
         os.chmod(root, 0o700)
         # Config is constructed by connection_config; reject service-file injection.

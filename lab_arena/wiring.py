@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
+from leadpoet_canonical.env_names import env_get
 from lab_arena import broker as broker_module, chain as chain_module, code_review, contracts, images, reasoning_capture, runtime, scorer_image_access, scoring_provider_compat, signing, training_capture, training_coverage
 from lab_arena.api import create_app
 from lab_arena.credentials import CredentialManager
@@ -714,7 +715,7 @@ def build_service_from_environment(mode: str):
         netuid=chain_config.netuid,
         collection_emission_valuation=lambda block: collection_rewards.emission_valuation(arena_chain, block),
         market_payout_store=(market_payout_store if mode == "live" and
-                             os.environ.get("LEADPOET_TOOL_MARKET_MODE", "").strip() == "live" else None),
+                             env_get(None, "TOOL_MARKET_MODE", "").strip() == "live" else None),
         weekly_slot_decay_enabled=_weekly_slot_decay_enabled_from_environment(),
         scorer_image_access=image_access,
         reward_signer_factory=lambda: signing.KmsSigner(_required("LAB_ARENA_SIGNING_KEY_ID"), region_name=os.environ.get("AWS_REGION")),

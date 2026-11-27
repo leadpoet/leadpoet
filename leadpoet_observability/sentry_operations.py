@@ -22,6 +22,7 @@ import time
 from typing import Any, Dict, Iterable, Iterator, Mapping, Optional
 
 from . import sentry_bootstrap
+from leadpoet_canonical.env_names import env_get
 
 
 INCIDENT_FAILURE_CODES = frozenset(
@@ -278,7 +279,7 @@ _HASH_FIELDS = frozenset(
 _SHA_RE = re.compile(r"^(?:(?:sha256:|0x)?[0-9a-f]{16,128})$", re.I)
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_.:/-]{1,200}$")
 _current_context: ContextVar[Dict[str, Any]] = ContextVar(
-    "leadpoet_sentry_operation_context", default={}
+    "sentry_operation_context", default={}
 )
 _operation_logger = logging.getLogger("leadpoet.operations")
 _event_sequence = 0
@@ -310,7 +311,7 @@ def _emit_operation_log(event_type: str, fields: Mapping[str, Any]) -> None:
         )
         _operation_logger.log(
             level,
-            "leadpoet_operation_event %s",
+            "operation_event %s",
             json.dumps(
                 payload,
                 sort_keys=True,
@@ -983,8 +984,9 @@ def emit_restart_summary(
             max(
                 1.0,
                 float(
-                    os.environ.get(
-                        "LEADPOET_SENTRY_RESTART_STAGE_DEADLINE_SECONDS",
+                    env_get(
+                        None,
+                        "SUBNET71_SENTRY_RESTART_STAGE_DEADLINE_SECONDS",
                         "900",
                     )
                 ),

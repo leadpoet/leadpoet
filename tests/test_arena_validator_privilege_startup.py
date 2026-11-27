@@ -98,7 +98,7 @@ def test_reexec_keeps_venv_wallet_state_and_proxy_out_of_arguments(host, monkeyp
     )
     monkeypatch.setenv("LAB_ARENA_SIGNING_KEY_HASH", "trusted-pin")
     monkeypatch.setenv("LAB_ARENA_API_BASE_URL", "https://gateway.example")
-    monkeypatch.setenv("LEADPOET_SUBNET_EPOCH_CUTOVER_PATH", "epoch.json")
+    monkeypatch.setenv("SUBNET_EPOCH_CUTOVER_PATH", "epoch.json")
     argv = [
         "--netuid", "71",
         "--subtensor.network", "finney",
@@ -123,7 +123,7 @@ def test_reexec_keeps_venv_wallet_state_and_proxy_out_of_arguments(host, monkeyp
     assert child.wallet_path == str(tmp_path / "operator/.bittensor/wallets")
     assert child.work_dir == str(tmp_path / "runner")
     assert environment["LAB_ARENA_VALIDATOR_STATE_DIR"] == str(tmp_path / "existing-state")
-    assert environment["LEADPOET_SUBNET_EPOCH_CUTOVER_PATH"] == str(tmp_path / "epoch.json")
+    assert environment["SUBNET_EPOCH_CUTOVER_PATH"] == str(tmp_path / "epoch.json")
     assert environment["LAB_ARENA_SIGNING_KEY_HASH"] == "trusted-pin"
     assert environment["LAB_ARENA_API_BASE_URL"] == "https://gateway.example"
     assert environment["LAB_ARENA_WEBSHARE_PROXY_1"].endswith("proxy.example:443")
@@ -180,15 +180,15 @@ def test_sudo_preserves_only_explicit_sentry_ingest_settings():
     from leadpoet_observability.sentry_bootstrap import INGEST_ENVIRONMENT_KEYS
 
     original = {name: "fixture-private" for name in INGEST_ENVIRONMENT_KEYS}
-    original.update({"LEADPOET_SENTRY_API_TOKEN": "fixture-read-token",
+    original.update({"SUBNET71_SENTRY_API_TOKEN": "fixture-read-token",
                      "OPENROUTER_API_KEY": "fixture-provider-key"})
     command, environment, preserve = startup.rootful_startup_command(
         _parser().parse_args([]), [], original,
     )
     names = preserve.partition("=")[2].split(",")
     assert set(INGEST_ENVIRONMENT_KEYS) <= set(names)
-    assert "LEADPOET_SENTRY_API_TOKEN" not in environment
-    assert "LEADPOET_SENTRY_API_TOKEN" not in names
+    assert "SUBNET71_SENTRY_API_TOKEN" not in environment
+    assert "SUBNET71_SENTRY_API_TOKEN" not in names
     assert "OPENROUTER_API_KEY" not in names
     assert "fixture-private" not in repr(command) + preserve
     assert "fixture-read-token" not in repr(command) + preserve

@@ -205,10 +205,10 @@ def test_normal_launchers_do_not_initialize_a_less_private_client_first(
     root = Path(__file__).resolve().parents[1]
     if protected_launcher:
         path = tmp_path / "arena.env"
-        path.write_text("LEADPOET_SENTRY_ENABLED=1\n")
+        path.write_text("SUBNET71_SENTRY_ENABLED=1\n")
         path.chmod(0o600)
-        monkeypatch.setenv("LEADPOET_SENTRY_ENABLED", "")
-        monkeypatch.delenv("LEADPOET_SENTRY_ENABLED", raising=False)
+        monkeypatch.setenv("SUBNET71_SENTRY_ENABLED", "")
+        monkeypatch.delenv("SUBNET71_SENTRY_ENABLED", raising=False)
         script = root / "scripts/run_arena_validator.py"
         argv = [str(script), "--environment-file", str(path), "--check-only"]
     else:

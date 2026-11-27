@@ -19,6 +19,7 @@ from lab_arena.service import S3ObjectStore
 from lab_arena.store import PostgrestTransport
 from scripts.collection_review import read_file, write_new
 from scripts.run_locked_collection import load_batch, assignment
+from leadpoet_canonical.env_names import env_get
 
 
 def assigned_export_slots(capacity, first, completed, registered):
@@ -587,12 +588,12 @@ def main(argv=None):
                 "receipt": json.loads(read_file(args.receipt)),
                 "approval": json.loads(read_file(args.qualification)),
                 "reviewer_key": read_file(
-                    Path(os.environ["LEADPOET_COLLECTION_REVIEW_PUBLIC_KEY_FILE"]),
+                    Path((env_get(None, "COLLECTION_REVIEW_PUBLIC_KEY_FILE") or os.environ["COLLECTION_REVIEW_PUBLIC_KEY_FILE"])),
                     private=False,
                 ),
                 "approver_key": read_file(
                     Path(
-                        os.environ["LEADPOET_COLLECTION_QUALIFICATION_PUBLIC_KEY_FILE"]
+                        (env_get(None, "COLLECTION_QUALIFICATION_PUBLIC_KEY_FILE") or os.environ["COLLECTION_QUALIFICATION_PUBLIC_KEY_FILE"])
                     ),
                     private=False,
                 ),
@@ -623,7 +624,7 @@ def main(argv=None):
         receipt = json.loads(read_file(args.receipt))
         # The deployment owns this setting independently of the receipt submitted for review.
         public_key = read_file(
-            Path(os.environ["LEADPOET_COLLECTION_REVIEW_PUBLIC_KEY_FILE"]),
+            Path(env_get(None, "COLLECTION_REVIEW_PUBLIC_KEY_FILE") or os.environ["COLLECTION_REVIEW_PUBLIC_KEY_FILE"]),
             maximum=8192,
             private=False,
         )
@@ -645,9 +646,7 @@ def main(argv=None):
                     approver_key=(
                         read_file(
                             Path(
-                                os.environ[
-                                    "LEADPOET_COLLECTION_QUALIFICATION_PUBLIC_KEY_FILE"
-                                ]
+                                (env_get(None, "COLLECTION_QUALIFICATION_PUBLIC_KEY_FILE") or os.environ["COLLECTION_QUALIFICATION_PUBLIC_KEY_FILE"])
                             ),
                             maximum=8192,
                             private=False,

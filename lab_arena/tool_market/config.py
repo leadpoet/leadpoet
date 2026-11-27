@@ -1,6 +1,6 @@
 """Tool-market configuration from the environment. Off unless set otherwise.
 
-When live, every catalog tool trades. ``LEADPOET_TOOL_MARKET_TOOLS_OFF``
+When live, every catalog tool trades. ``TOOL_MARKET_TOOLS_OFF``
 turns single tools off, e.g. ``exa,hunter``; a new catalog tool is on
 unless it is named there.
 """
@@ -18,16 +18,17 @@ from lab_arena.lead_orders.config import is_valid_hotkey
 from lab_arena.lead_orders.config import GAMMA_SERVICE_ENV as LEAD_ORDERS_GAMMA_SERVICE_ENV
 from lab_arena.tool_market.catalog import MAX_EXACT_ASK, TOOLS
 from lab_arena.tool_market import platform
+from leadpoet_canonical.env_names import env_get
 
-MODE_ENV = "LEADPOET_TOOL_MARKET_MODE"
-TOOLS_OFF_ENV = "LEADPOET_TOOL_MARKET_TOOLS_OFF"
-VERIFY_MAX_ASK_ENV = "LEADPOET_TOOL_MARKET_VERIFY_MAX_ASK_MICROUSD"
-PLATFORM_MAX_ASKS_ENV = "LEADPOET_TOOL_MARKET_PLATFORM_MAX_ASKS"
-BUYERS_ENV = "LEADPOET_TOOL_MARKET_BUYER_HOTKEYS"
-PRIVATE_SUPPLIERS_ENV = "LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS"
-GAMMA_SERVICE_ENV = "LEADPOET_TOOL_MARKET_GAMMA_SERVICE"
-TERMS_VERSION_ENV = "LEADPOET_TOOL_MARKET_TERMS_VERSION"
-PUBLIC_BASE_URL_ENV = "LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL"
+MODE_ENV = "TOOL_MARKET_MODE"
+TOOLS_OFF_ENV = "TOOL_MARKET_TOOLS_OFF"
+VERIFY_MAX_ASK_ENV = "TOOL_MARKET_VERIFY_MAX_ASK_MICROUSD"
+PLATFORM_MAX_ASKS_ENV = "TOOL_MARKET_PLATFORM_MAX_ASKS"
+BUYERS_ENV = "TOOL_MARKET_BUYER_HOTKEYS"
+PRIVATE_SUPPLIERS_ENV = "TOOL_MARKET_PRIVATE_SUPPLIERS"
+GAMMA_SERVICE_ENV = "TOOL_MARKET_GAMMA_SERVICE"
+TERMS_VERSION_ENV = "TOOL_MARKET_TERMS_VERSION"
+PUBLIC_BASE_URL_ENV = "TOOL_MARKET_PUBLIC_BASE_URL"
 NETUID = 71  # the only subnet whose Gamma counts
 NETUID_ENV = "LAB_ARENA_NETUID"  # shared with the rest of Arena; must name NETUID
 
@@ -78,24 +79,24 @@ class ToolMarketConfig:
 
 def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig:
     env = os.environ if environ is None else environ
-    mode = (env.get(MODE_ENV) or MODE_OFF).strip().lower()
+    mode = (env_get(env, MODE_ENV) or MODE_OFF).strip().lower()
     if mode not in (MODE_OFF, MODE_LIVE):
         raise ToolMarketConfigError("%s must be off or live" % MODE_ENV)
     if mode == MODE_OFF:
         return ToolMarketConfig()
-    off = frozenset(t.strip() for t in env.get(TOOLS_OFF_ENV, "").split(",") if t.strip())
+    off = frozenset(t.strip() for t in env_get(env, TOOLS_OFF_ENV, "").split(",") if t.strip())
     tools = frozenset(TOOLS) - off
-    buyers = frozenset(h.strip() for h in env.get(BUYERS_ENV, "").split(",") if h.strip())
-    private = frozenset(h.strip() for h in env.get(PRIVATE_SUPPLIERS_ENV, "").split(",") if h.strip())
+    buyers = frozenset(h.strip() for h in env_get(env, BUYERS_ENV, "").split(",") if h.strip())
+    private = frozenset(h.strip() for h in env_get(env, PRIVATE_SUPPLIERS_ENV, "").split(",") if h.strip())
     try:
-        platform_limits = json.loads(env.get(PLATFORM_MAX_ASKS_ENV, "{}"))
+        platform_limits = json.loads(env_get(env, PLATFORM_MAX_ASKS_ENV, "{}"))
     except (ValueError, RecursionError):
         raise ToolMarketConfigError(f"{PLATFORM_MAX_ASKS_ENV} must be a JSON object") from None
     # ZeroBounce's ceiling has its own, older variable, and only that one: unset, verification uses the market price.
     if not isinstance(platform_limits, dict) or "zerobounce_validate" in platform_limits:
         raise ToolMarketConfigError(f"{PLATFORM_MAX_ASKS_ENV} must be a JSON object without zerobounce_validate, "
                                     f"whose ceiling is {VERIFY_MAX_ASK_ENV}")
-    verify_limit = env.get(VERIFY_MAX_ASK_ENV, "").strip()
+    verify_limit = env_get(env, VERIFY_MAX_ASK_ENV, "").strip()
     if verify_limit:
         if not (verify_limit.isascii() and verify_limit.isdigit() and len(verify_limit) <= len(str(MAX_EXACT_ASK))):
             raise ToolMarketConfigError("%s must be a positive per-call ask" % VERIFY_MAX_ASK_ENV)
@@ -105,15 +106,15 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
            for key, limit in platform_limits.items()):
         raise ToolMarketConfigError(f"{PLATFORM_MAX_ASKS_ENV} and {VERIFY_MAX_ASK_ENV} need a supported operation "
                                     "and a positive per-call ask")
-    terms_version = env.get(TERMS_VERSION_ENV, "").strip()
+    terms_version = env_get(env, TERMS_VERSION_ENV, "").strip()
     if env.get(NETUID_ENV, str(NETUID)).strip() != str(NETUID):
         raise ToolMarketConfigError("%s must be %d: the market counts only that subnet's Gamma" % (NETUID_ENV, NETUID))
     config = ToolMarketConfig(
         platform_max_asks=platform_limits,
         mode=mode, tools=tools, buyer_hotkeys=buyers, private_suppliers=private,
-        gamma_service=env.get(GAMMA_SERVICE_ENV, "").strip(),
+        gamma_service=env_get(env, GAMMA_SERVICE_ENV, "").strip(),
         terms_version=terms_version, terms_sha256=PUBLISHED_TERMS.get(terms_version, ""),
-        public_base_url=env.get(PUBLIC_BASE_URL_ENV, "").strip().rstrip("/"),
+        public_base_url=env_get(env, PUBLIC_BASE_URL_ENV, "").strip().rstrip("/"),
     )
     if not off <= set(TOOLS):
         raise ToolMarketConfigError("%s names a tool the catalog does not have" % TOOLS_OFF_ENV)
@@ -123,7 +124,7 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
     if not is_valid_hotkey(config.gamma_service):
         raise ToolMarketConfigError("%s must be the tool market's Gamma service SS58 hotkey" % GAMMA_SERVICE_ENV)
     # One Gamma deposit must not fund two products.
-    if config.gamma_service == env.get(LEAD_ORDERS_GAMMA_SERVICE_ENV, "").strip():
+    if config.gamma_service == env_get(env, LEAD_ORDERS_GAMMA_SERVICE_ENV, "").strip():
         raise ToolMarketConfigError("%s must differ from %s" % (GAMMA_SERVICE_ENV, LEAD_ORDERS_GAMMA_SERVICE_ENV))
     if config.terms_version not in PUBLISHED_TERMS:
         raise ToolMarketConfigError("%s must name published terms" % TERMS_VERSION_ENV)

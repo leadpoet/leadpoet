@@ -10,7 +10,7 @@ def normalized_industry_text(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
 
 
-def _load_leadpoet_taxonomy() -> tuple[
+def _load_taxonomy() -> tuple[
     dict[str, str],
     dict[str, tuple[str, frozenset[str]]],
 ]:
@@ -33,12 +33,12 @@ def _load_leadpoet_taxonomy() -> tuple[
     return parents, subindustries
 
 
-LEADPOET_PARENT_INDUSTRIES, LEADPOET_SUBINDUSTRY_PARENTS = (
-    _load_leadpoet_taxonomy()
+PARENT_INDUSTRIES, SUBINDUSTRY_PARENTS = (
+    _load_taxonomy()
 )
 
 
-def leadpoet_taxonomy_match(
+def taxonomy_match(
     requested: Any,
     candidate_industry: Any,
     candidate_subindustry: Any,
@@ -52,18 +52,18 @@ def leadpoet_taxonomy_match(
     """
 
     requested_key = normalized_industry_text(requested)
-    requested_parent = LEADPOET_PARENT_INDUSTRIES.get(requested_key)
+    requested_parent = PARENT_INDUSTRIES.get(requested_key)
     if requested_parent is None:
         return None, {}
 
     candidate_parent_key = normalized_industry_text(candidate_industry)
-    candidate_parent = LEADPOET_PARENT_INDUSTRIES.get(candidate_parent_key)
+    candidate_parent = PARENT_INDUSTRIES.get(candidate_parent_key)
     candidate_subindustry_key = normalized_industry_text(candidate_subindustry)
-    subindustry_entry = LEADPOET_SUBINDUSTRY_PARENTS.get(candidate_subindustry_key)
+    subindustry_entry = SUBINDUSTRY_PARENTS.get(candidate_subindustry_key)
     if subindustry_entry is None and candidate_parent is None:
         # Some providers emit a Subnet 71 subindustry label in their broader
         # industry field. Treat that exact label as taxonomy evidence too.
-        subindustry_entry = LEADPOET_SUBINDUSTRY_PARENTS.get(candidate_parent_key)
+        subindustry_entry = SUBINDUSTRY_PARENTS.get(candidate_parent_key)
 
     detail: dict[str, Any] = {
         "requested_parent": requested_parent,
@@ -71,7 +71,7 @@ def leadpoet_taxonomy_match(
         "candidate_subindustry": subindustry_entry[0] if subindustry_entry else None,
         "candidate_subindustry_parents": (
             sorted(
-                LEADPOET_PARENT_INDUSTRIES[parent]
+                PARENT_INDUSTRIES[parent]
                 for parent in subindustry_entry[1]
             )
             if subindustry_entry

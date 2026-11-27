@@ -39,7 +39,7 @@ def unavailable_alternative(stage="exa_no_results", *, sd_stage="all_tiers_exhau
 def _propagate_to_breakdown(monkeypatch, result):
     """Use the actual score-single-signal mapping, then existing company retry."""
     monkeypatch.setattr(verifier, "verify_three_stage", AsyncMock(return_value=result))
-    monkeypatch.setenv("LEADPOET_COMPETITION_EVALUATION_DATE", "2026-10-19")
+    monkeypatch.setenv("COMPETITION_EVALUATION_DATE", "2026-10-19")
     signal = IntentSignal(source="social_media", description=CLAIM, url=ORIGINAL,
                           date="2026-05-20", snippet=CLAIM, matched_icp_signal=0)
     icp = _icp().model_copy(update={

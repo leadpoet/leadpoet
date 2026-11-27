@@ -51,7 +51,7 @@ def main() -> int:
         print(json.dumps({"action": "register_reviewer_runtime", "arguments": arguments,
                           "writes": False}, sort_keys=True))
         return 0
-    if os.environ.get("LEADPOET_ARENA_REVIEWER_RUNTIME_APPLY") != "1":
+    if os.environ.get("ARENA_REVIEWER_RUNTIME_APPLY") != "1":
         raise ValueError("runtime activation requires the operator apply environment")
     load_scoped_environment(args.environment_file)
     transport = PostgrestTransport(

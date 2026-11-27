@@ -1,7 +1,7 @@
 # Lead-order key vault
 
 A miner's OpenRouter or Deepline key is opened only inside a small public
-service running on Phala Cloud (Intel TDX). Leadpoet stores an encrypted
+service running on Phala Cloud (Intel TDX). The subnet operator stores an encrypted
 envelope it cannot open, and sends each provider request through the vault,
 which swaps the envelope for the key and returns a signed receipt.
 
@@ -43,7 +43,7 @@ Each update is a new build plus one public approval on Base.
   miner owns the runtime key. It never makes a call. `check` makes only free,
   read-only requests and issues no receipt. A key whose check answers
   `402` is reported out of credit (`<key>_no_credit`), not unavailable.
-- Only Leadpoet's broker, with the caller token, may use `check` and `call`.
+- Only the subnet operator's broker, with the caller token, may use `check` and `call`.
 - No database, no files, no request logs.
 - Each connection carries one request, which must arrive within 10 seconds.
   A provider call ends within its timeout in total.
@@ -58,8 +58,8 @@ Each update is a new build plus one public approval on Base.
 Each forwarded call returns a receipt signed by the vault's receipts key. It
 carries the boot id, the key fingerprint, the miner hotkey, host and path,
 SHA-256 of the target, headers and bodies, and a per-key sequence number.
-A miner checks the sequence numbers in the receipts Leadpoet reports: a gap
-is a call Leadpoet did not report, or one of the rarer cases under Known
+A miner checks the sequence numbers in the receipts the subnet operator reports: a gap
+is a call the subnet operator did not report, or one of the rarer cases under Known
 limits. Check receipts against the receipts key
 from `cli verify`, never against the `public_key` a receipt carries.
 
@@ -100,7 +100,7 @@ names any key to seal again because the vault's key changed. It exits 2 when
 something is wrong. All commands refuse until the vault is deployed.
 
 Your provider's own usage log is the full check of what was spent on your
-key. Compare it with what Leadpoet reports now and then.
+key. Compare it with what the subnet operator reports now and then.
 
 ## Releasing
 
@@ -137,10 +137,10 @@ every approved hash should be one you can rebuild.
 ## Known limits
 
 - A vault fault after a call is numbered, before its receipt is signed,
-  also leaves a gap. So does a receipt Leadpoet failed to store; the
+  also leaves a gap. So does a receipt the subnet operator failed to store; the
   gateway logs each one.
 - Sequence numbers restart with the vault, and nothing lists past boots.
-  Leadpoet could hide every call of a whole boot, not only one just before
+  The subnet operator could hide every call of a whole boot, not only one just before
   a restart or after a key's last reported call. The provider's usage log
   catches it.
 - If Phala rotates its KMS root, miners must seal their keys again, with a

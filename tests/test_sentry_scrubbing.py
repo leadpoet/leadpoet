@@ -401,7 +401,7 @@ def test_sensitive_dynamic_mapping_keys_never_leave_event():
     assert scrubbed["extra"]["ordinary_field"] == "safe"
 
 
-def test_leadpoet_tag_keys_are_not_false_positives():
+def test_owner_tag_keys_are_not_false_positives():
     event = {"tags": {"leadpoet.component": "gateway", "leadpoet.validator.mode": "coordinator"}}
     scrubbed = scrub_event(event)["tags"]
     assert scrubbed["leadpoet.component"] == "gateway"

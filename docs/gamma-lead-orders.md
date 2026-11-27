@@ -1,11 +1,11 @@
 # Gamma lead orders
 
-Anyone holding Leadpoet Gamma on netuid 71 can order sales leads. Miners'
+Anyone holding Subnet 71 Gamma on netuid 71 can order sales leads. Miners'
 OpenRouter and Deepline keys pay the provider calls and are repaid from
 emissions at spend × (1 + premium). The lead-finding code is private and runs
-in Leadpoet's own runner; everything that decides money is in this repository.
+in the subnet operator's own runner; everything that decides money is in this repository.
 
-Status: built behind `LEADPOET_LEAD_ORDERS_MODE=off` (the default). Nothing
+Status: built behind `LEAD_ORDERS_MODE=off` (the default). Nothing
 runs until a reviewed boundary is added to `AGENTS.md`. While off, every route
 answers 404 and no store, chain, KMS or provider client is built.
 
@@ -18,9 +18,9 @@ rewards, weights, service), `gateway/api/lead_orders.py` (routes) and
 | Mode | Who can order | Keys used | Rewards |
 | --- | --- | --- | --- |
 | `off` | nobody | none | none |
-| `staff` | hotkeys in `LEADPOET_LEAD_ORDERS_STAFF_HOTKEYS`, no Gamma | Leadpoet's keys only | none |
-| `shadow` | staff hotkeys, no Gamma | Leadpoet's keys only | what-if only: published in the receipt, never owed or weighted |
-| `live` | any hotkey with Gamma balance | ranked miner keys, then Leadpoet's | weighted, under the lane cap |
+| `staff` | hotkeys in `LEAD_ORDERS_STAFF_HOTKEYS`, no Gamma | the subnet's own keys only | none |
+| `shadow` | staff hotkeys, no Gamma | the subnet's own keys only | what-if only: published in the receipt, never owed or weighted |
+| `live` | any hotkey with Gamma balance | ranked miner keys, then the subnet's own | weighted, under the lane cap |
 
 Keys follow each order's own mode, not the gateway's current mode: only a
 `live` order spends miner keys, even after the gateway moves to `live`.
@@ -70,7 +70,7 @@ and receipt always use that stored version, never the current one.
 
 ## Money
 
-- Balance (USD) = Gamma the hotkey spent to the Leadpoet service on netuid 71
+- Balance (USD) = Gamma the hotkey spent to the Subnet 71 service on netuid 71
   (chain counter `GammaSpent(netuid, service, hotkey)` at a finalized block,
   10^9 units per USD) − sum of charges on settled orders − open holds.
 - Order hold = N × price. Refused if balance < hold, N < minimum, or the daily
@@ -83,7 +83,7 @@ and receipt always use that stored version, never the current one.
   premium)), where each call's rewardable spend is min(cost, reserved). A cost
   above the call's reservation is still charged to the buyer, but the excess
   earns no reward; the miner's statement shows it as `excess_microusd`.
-  Leadpoet's own keys earn nothing. If an order's total rewardable spend
+  The subnet's own keys earn nothing. If an order's total rewardable spend
   passes its ceiling, every reward on it is scaled by ceiling / total.
 - A call whose cost the provider did not report (no cost field on a 2xx, a
   timeout, a transport error) is settled `uncertain`: its reservation keeps
@@ -131,11 +131,11 @@ and receipt always use that stored version, never the current one.
   shadow orders owe nothing (their what-if rewards are in their receipts).
 - A `live` payout counts only `live` orders; recording a payment against a
   non-live order is refused. Staff and shadow orders earn nothing.
-- The Gamma service id (`LEADPOET_LEAD_ORDERS_GAMMA_SERVICE`) must be the
+- The Gamma service id (`LEAD_ORDERS_GAMMA_SERVICE`) must be the
   SS58 hotkey registered as a service on the subnet. Runtime 493 uses an
   AccountId32 for this key; numeric service ids are refused before a chain read.
   The storage item name is configurable
-  (`LEADPOET_LEAD_ORDERS_GAMMA_STORAGE`, default `GammaSpent`). A chain without
+  (`LEAD_ORDERS_GAMMA_STORAGE`, default `GammaSpent`). A chain without
   it reads as no balance, and `live` orders are refused (`gamma_unavailable`).
   A counter that goes backwards is refused with 422 `gamma_counter_backwards`.
 
@@ -143,7 +143,7 @@ and receipt always use that stored version, never the current one.
 
 Per provider, miner keys are ranked by USD spend settled on `live` orders over
 the last `ranking_window_epochs`, highest first; ties and new keys by
-registration time. Leadpoet's key is always last. On 401, 402, 403,
+registration time. The subnet's own key is always last. On 401, 402, 403,
 429-with-no-retry or a spent limit the broker moves to the next key for the
 rest of the order.
 
@@ -184,7 +184,7 @@ keep no copies, honour the suppression feed, report problems.
 
 ## Runner protocol (private runner ⇄ gateway)
 
-Bearer `LEADPOET_LEAD_ORDERS_RUNNER_SECRET` on every call. JSON bodies.
+Bearer `LEAD_ORDERS_RUNNER_SECRET` on every call. JSON bodies.
 
 `POST /internal/lead-orders/claim` → `204` when nothing is queued, else the
 order below. The token is issued and the deadline set at claim (now +
@@ -234,7 +234,7 @@ USD amounts are decimal strings with at least two places.
 ```
 
 Lead data never passes through the gateway. The runner stores the file in
-Leadpoet's private storage and returns an opaque, expiring download URL; the
+the subnet operator's private storage and returns an opaque, expiring download URL; the
 gateway hands that URL to the buyer. `delivery_url` must be `https://`.
 `failed` charges the minimum charge on spend so far. A failed order is never
 retried automatically. Finishing twice changes nothing and returns the first
@@ -248,7 +248,7 @@ receipt_hash}`.
 the one-order token as the provider API key, pick the key, inject the real
 credential, reserve the worst-case cost before sending, settle at the
 provider-reported cost, and write one ledger row per call: order, provider,
-miner hotkey (null for Leadpoet's key), key fingerprint, cost in micro-USD.
+miner hotkey (null for the subnet's own key), key fingerprint, cost in micro-USD.
 
 The token goes in `Authorization: Bearer <token>`, so provider SDKs work with
 the base URLs unchanged. It is bound to one order and stops working once that
@@ -327,7 +327,7 @@ use no key, so they have no ledger row.
 Each request carries `X-Hotkey`, `X-Timestamp` (±60 s) and `X-Signature`, an
 sr25519 signature over `METHOD\nHOST\nPATH\nTIMESTAMP\nsha256(body)`. HOST
 is the gateway's public host, lowercased (the host of
-`LEADPOET_LEAD_ORDERS_PUBLIC_BASE_URL`, with a port only if it is not a
+`LEAD_ORDERS_PUBLIC_BASE_URL`, with a port only if it is not a
 default one: `:443` and `:80` are dropped on both sides),
 so a signature made for another gateway, such as Arena's, is refused here.
 Miner-terms acceptances store the signed host too.
@@ -367,7 +367,7 @@ credentials, daily_cap_usd}` takes a key sealed to the lead-order key vault
 (`docs/gamma-lead-order-vault.md`). `credentials` is `{envelope}` for
 Deepline and `{envelope, management_envelope}` for OpenRouter, as
 `python -m lead_order_vault.cli seal` prints them. The vault checks the key
-with its provider; Leadpoet stores only the envelope and returns `{status,
+with its provider; the subnet operator stores only the envelope and returns `{status,
 key_id, public_fingerprint, daily_cap_usd}`; one active key per miner and
 provider. `POST /lead-orders/keys/{key_id}/revoke`.
 
@@ -467,7 +467,7 @@ validator's weight signer: wiring it in is a separate reviewed change.
 - A key registered before the vault is not sealed to it. The broker skips
   it and `vault-receipts` lists it as needing a new seal.
 - The suppression hashes are unsalted (see the suppression feed).
-- Miners see what Leadpoet calls on their keys. Every call runs on miner keys
+- Miners see what the subnet operator calls on their keys. Every call runs on miner keys
   in `live` (Gavin's choice, Nov 20 2026), so a miner can read the request
   shapes, models and Deepline operations in their own provider account. The
   lead-finding code stays private; the method behind it is visible.

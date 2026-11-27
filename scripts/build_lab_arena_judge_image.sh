@@ -41,7 +41,7 @@ verify_docker_operation_locks_v2(
 PY
   python3 "$ROOT/validator_tee/host/docker_operation_guard_v2.py" \
     --wait --timeout-seconds 1800 --interval-seconds 3 >&2
-  BUILD_INVENTORY_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/leadpoet-arena-judge.XXXXXX")"
+  BUILD_INVENTORY_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/subnet71-arena-judge.XXXXXX")"
   BUILD_IMAGE_INVENTORY="$BUILD_INVENTORY_ROOT/images.txt"
   BUILD_INVENTORY_READY=0
   cleanup_build() {

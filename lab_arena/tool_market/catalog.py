@@ -406,7 +406,7 @@ TOOLS: Dict[str, str] = {op.tool: op.unit for op in _OPERATIONS}
 # How private a tool's requests are from the key's owner, in the vendor's own
 # dashboard or history. "visible": the vendor documents a request history.
 # "unverified": not documented, so treat it as visible. "private" is set only
-# after Leadpoet checks a vendor account itself. Vendor docs, Nov 27 2026.
+# after the subnet operator checks a vendor account itself. Vendor docs, Nov 27 2026.
 REQUEST_PRIVACY: Dict[str, str] = {
     "zerobounce": "visible",  # validation results, kept up to 30 days
     "hunter": "visible",  # a request history per call

@@ -1221,7 +1221,7 @@ def inject_credential(outbound: operations.OutboundRequest, secret: str) -> Tupl
     """Place the credential exactly where the operation table says."""
 
     placement = outbound.credential
-    headers: Dict[str, str] = {"accept": "application/json, text/html;q=0.9, */*;q=0.1", "user-agent": "leadpoet-lab-arena-broker/1"}
+    headers: Dict[str, str] = {"accept": "application/json, text/html;q=0.9, */*;q=0.1", "user-agent": "subnet71-lab-arena-broker/1"}
     for name, value in getattr(outbound, "headers", {}).items():
         headers[str(name).lower()] = str(value)
     if outbound.content_type:
@@ -1742,7 +1742,7 @@ def _deepline_execution_response_readback(
             lookup = transport.send(
                 method="GET", url=DEEPLINE_EXECUTION_BY_KEY_URL + quote(execution_key, safe=""),
                 headers={"accept": "application/json", "authorization": "Bearer " + secret,
-                         "user-agent": "leadpoet-lab-arena-broker/1"}, body=b"",
+                         "user-agent": "subnet71-lab-arena-broker/1"}, body=b"",
                 timeout_seconds=(min(DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS,
                     max(0.001, recovery_deadline - time.monotonic()))
                     if recovery_deadline is not None else DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS),
@@ -1900,7 +1900,7 @@ def _deepline_exact_readback(
     deadline = min(reconciliation_deadline, time.monotonic() + timeout)
     headers = {
         "accept": "application/json", "authorization": "Bearer " + secret,
-        "user-agent": "leadpoet-lab-arena-broker/1",
+        "user-agent": "subnet71-lab-arena-broker/1",
     }
     for index in range(_DEEPLINE_BILLING_MAX_ATTEMPTS if poll else 1):
         now = time.monotonic()
@@ -2053,7 +2053,7 @@ def _deepline_ledger_readback(
     headers = {
         "accept": "application/json",
         "authorization": "Bearer " + secret,
-        "user-agent": "leadpoet-lab-arena-broker/1",
+        "user-agent": "subnet71-lab-arena-broker/1",
     }
     base_url = DEEPLINE_BILLING_LEDGER_URL + "?since_at=%d&limit=50" % since_at
     cursor = None
@@ -2200,7 +2200,7 @@ def _openrouter_generation_readback_once(
     headers = {
         "accept": "application/json",
         "authorization": "Bearer " + secret,
-        "user-agent": "leadpoet-lab-arena-broker/1",
+        "user-agent": "subnet71-lab-arena-broker/1",
     }
     url = OPENROUTER_GENERATION_URL + quote(generation_id, safe="")
     try:

@@ -336,7 +336,7 @@ def probe_https_exit_ip(
         endpoint,
         headers={
             "Accept": "application/json",
-            "User-Agent": "leadpoet-proxy-preflight/1",
+            "User-Agent": "subnet71-proxy-preflight/1",
         },
         method="GET",
     )

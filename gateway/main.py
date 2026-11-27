@@ -33,7 +33,7 @@ for _path in (_ATTESTED_RUNTIME_DIR, _PACKAGE_PARENT):
 # Opt-in, fail-closed error monitoring (docs/sentry_error_monitoring.md).
 # Wired before the config/service imports so an import-time crash of the
 # gateway host process is still captured. Complete no-op unless the
-# LEADPOET_SENTRY_* environment gate is satisfied.
+# SUBNET71_SENTRY_* environment gate is satisfied.
 try:
     from leadpoet_observability import (
         capture_failure as _capture_sentry_failure,
@@ -50,7 +50,7 @@ except Exception as _sentry_exc:  # error monitoring must never break startup
     _record_sentry_retry = lambda *args, **kwargs: None
     _record_sentry_stage = lambda *args, **kwargs: None
     print(
-        "leadpoet_sentry_wiring_skipped error=%s" % type(_sentry_exc).__name__,
+        "sentry_wiring_skipped error=%s" % type(_sentry_exc).__name__,
         flush=True,
     )
 
@@ -381,7 +381,7 @@ app.include_router(metrics_api.router)
 
 app.include_router(arena_proxy_router)
 app.include_router(arena_testnet_proxy_router)
-# Gamma lead orders: every route is 404 until LEADPOET_LEAD_ORDERS_MODE is set.
+# Gamma lead orders: every route is 404 until LEAD_ORDERS_MODE is set.
 app.include_router(lead_orders_router)
 app.include_router(tool_market_router)
 

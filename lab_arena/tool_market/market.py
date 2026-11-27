@@ -805,7 +805,7 @@ class ToolMarket:
 
     def _private(self, tool: str, ask: book.Ask) -> bool:
         """A key that may serve a private call: its miner signed a private-supply
-        agreement, or Leadpoet checked that the vendor shows owners no requests."""
+        agreement, or the subnet operator checked that the vendor shows owners no requests."""
 
         return ask.miner_hotkey in self._config.private_suppliers or catalog.REQUEST_PRIVACY[tool] == "private"
 

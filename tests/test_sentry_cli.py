@@ -166,7 +166,7 @@ def test_unavailable_actions_timing_api_is_an_empty_best_effort_result(monkeypat
     monkeypatch.setenv("GITHUB_API_URL", "https://api.github.invalid")
     monkeypatch.setenv("GITHUB_REPOSITORY", "leadpoet/leadpoet")
     monkeypatch.setenv("GITHUB_RUN_ID", "123")
-    monkeypatch.setenv("LEADPOET_GITHUB_JOB_TOKEN", "seeded-job-token")
+    monkeypatch.setenv("SUBNET71_GITHUB_JOB_TOKEN", "seeded-job-token")
 
     def _unavailable(*_args, **_kwargs):
         raise OSError("offline")

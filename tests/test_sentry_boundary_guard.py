@@ -2,7 +2,7 @@
 
 Error monitoring is a single, explicit, opt-in bootstrap in
 ``leadpoet_observability/sentry_bootstrap.py`` (namespaced
-``LEADPOET_SENTRY_*`` variables, hard-off payload capture, fail-closed
+``SUBNET71_SENTRY_*`` variables, hard-off payload capture, fail-closed
 scrubbing in ``sentry_scrubbing.py``). This guard fails the build the
 moment any change crosses that boundary:
 
@@ -106,7 +106,7 @@ def test_enclave_and_tee_surfaces_never_reference_error_monitoring() -> None:
 
 
 def test_no_ambient_sentry_variables_referenced() -> None:
-    # LEADPOET_SENTRY_* is the only permitted namespace. An ambient
+    # SUBNET71_SENTRY_* is the only permitted namespace. An ambient
     # SENTRY_DSN / SENTRY_ENVIRONMENT reference would let the SDK acquire a
     # destination outside the explicit bootstrap options.
     pattern = re.compile(r"(?<![A-Z_])SENTRY_[A-Z]")
@@ -121,7 +121,7 @@ def test_no_ambient_sentry_variables_referenced() -> None:
         if pattern.search(_read(relative)):
             offenders.append(relative)
     assert not offenders, (
-        "Only namespaced LEADPOET_SENTRY_* variables may exist. "
+        "Only namespaced SUBNET71_SENTRY_* variables may exist. "
         f"Offending files: {offenders}"
     )
 
@@ -149,9 +149,9 @@ def test_bootstrap_hard_off_options_present() -> None:
         'before_send=',
         'before_breadcrumb=',
         'before_send_transaction=',
-        'LEADPOET_SENTRY_ENABLED',
-        'LEADPOET_SENTRY_DSN',
-        'LEADPOET_SENTRY_TRACES_SAMPLE_RATE',
+        'SUBNET71_SENTRY_ENABLED',
+        'SUBNET71_SENTRY_DSN',
+        'SUBNET71_SENTRY_TRACES_SAMPLE_RATE',
     ):
         assert marker in source, (
             "the bootstrap's hard-off capture contract drifted: missing "
@@ -164,7 +164,7 @@ def test_bootstrap_hard_off_options_present() -> None:
 
 def test_bootstrap_fails_closed_and_swallows_wiring_failures() -> None:
     source = _read(BOOTSTRAP)
-    assert "leadpoet_sentry_scrub_failed" in source and "return None" in source, (
+    assert "sentry_scrub_failed" in source and "return None" in source, (
         "a scrub failure must DROP the event (fail closed), never send it"
     )
     assert "except BaseException" in source, (

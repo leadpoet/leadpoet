@@ -14,18 +14,19 @@ from pathlib import Path
 import re
 from typing import Dict, Mapping, Optional
 from urllib.parse import urlsplit
+from leadpoet_canonical.env_names import env_get
 
 
 PRODUCTION_SUPABASE_ORIGIN = "https://gateway.subnet71.com"
 PRODUCTION_CHAIN_HOST = "entrypoint-finney.opentensor.ai"
 PRODUCTION_CHAIN_ARCHIVE_HOST = "archive.chain.opentensor.ai"
-PRODUCTION_PARITY_MODE_ENV = "LEADPOET_PRODUCTION_PARITY_MODE"
-PRODUCTION_PARITY_RUN_ID_ENV = "LEADPOET_PRODUCTION_PARITY_RUN_ID"
+PRODUCTION_PARITY_MODE_ENV = "PRODUCTION_PARITY_MODE"
+PRODUCTION_PARITY_RUN_ID_ENV = "PRODUCTION_PARITY_RUN_ID"
 PRODUCTION_PARITY_SUPABASE_ORIGIN_ENV = (
-    "LEADPOET_PRODUCTION_PARITY_SUPABASE_ORIGIN"
+    "PRODUCTION_PARITY_SUPABASE_ORIGIN"
 )
 PRODUCTION_PARITY_BENCHMARK_DATE_ENV = (
-    "LEADPOET_PRODUCTION_PARITY_BENCHMARK_DATE"
+    "PRODUCTION_PARITY_BENCHMARK_DATE"
 )
 PRODUCTION_PARITY_ENV_NAMES = (
     PRODUCTION_PARITY_MODE_ENV,
@@ -43,7 +44,7 @@ class ProductionParityBoundaryV2Error(ValueError):
 
 
 def _optional_text(environment: Mapping[str, object], name: str) -> Optional[str]:
-    value = environment.get(name)
+    value = env_get(environment, name)
     if value is None:
         return None
     if not isinstance(value, str):

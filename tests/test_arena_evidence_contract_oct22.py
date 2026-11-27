@@ -406,7 +406,7 @@ def test_fetch_title_survives_real_score_receipt_and_review(monkeypatch, provide
     monkeypatch.setattr(verifier, "_call_openrouter", AsyncMock(
         return_value=_provider_answer("supported"),
     ))
-    monkeypatch.setenv("LEADPOET_COMPETITION_EVALUATION_DATE", "2026-09-20")
+    monkeypatch.setenv("COMPETITION_EVALUATION_DATE", "2026-09-20")
     signal = _signal()
     verdicts = []
     score, _confidence, _status, _, matched = asyncio.run(_score_single_intent_signal(
@@ -440,7 +440,7 @@ def test_unavailable_source_cannot_supply_title_or_submitted_claim_evidence(monk
     monkeypatch.setattr(verifier, "_scrape_exa", AsyncMock(return_value=unavailable))
     judge = AsyncMock()
     monkeypatch.setattr(verifier, "_call_openrouter", judge)
-    monkeypatch.setenv("LEADPOET_COMPETITION_EVALUATION_DATE", "2026-09-20")
+    monkeypatch.setenv("COMPETITION_EVALUATION_DATE", "2026-09-20")
     signal = _signal()
     verdicts = []
     score, *_ = asyncio.run(_score_single_intent_signal(

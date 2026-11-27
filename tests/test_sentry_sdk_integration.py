@@ -58,7 +58,7 @@ def test_restart_cli_keeps_real_failures_without_inventing_timeout(
     monkeypatch.setattr(sentry_sdk, "init", init_without_network)
     monkeypatch.setenv(sentry_bootstrap.ENABLED_ENV, "1")
     monkeypatch.setenv(sentry_bootstrap.DSN_ENV, "https://public@example.invalid/1")
-    monkeypatch.setenv("LEADPOET_SENTRY_RESTART_STAGE_DEADLINE_SECONDS", "900")
+    monkeypatch.setenv("SUBNET71_SENTRY_RESTART_STAGE_DEADLINE_SECONDS", "900")
     ledger = tmp_path / "restart.jsonl"
     ledger.write_text("\n".join(json.dumps(row) for row in [
         {"stage": "pre_shutdown_checks_complete", "status": "reached", "elapsed_seconds": 66.464},

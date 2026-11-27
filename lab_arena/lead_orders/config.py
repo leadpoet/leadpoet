@@ -12,19 +12,20 @@ import re
 from dataclasses import dataclass, field
 from typing import FrozenSet, Mapping, Optional
 from urllib.parse import urlsplit
+from leadpoet_canonical.env_names import env_get
 
-MODE_ENV = "LEADPOET_LEAD_ORDERS_MODE"
-STAFF_HOTKEYS_ENV = "LEADPOET_LEAD_ORDERS_STAFF_HOTKEYS"
-BLOCKED_HOTKEYS_ENV = "LEADPOET_LEAD_ORDERS_BLOCKED_HOTKEYS"
-RUNNER_SECRET_ENV = "LEADPOET_LEAD_ORDERS_RUNNER_SECRET"
-POLICY_PATH_ENV = "LEADPOET_LEAD_ORDERS_POLICY_PATH"
-GAMMA_SERVICE_ENV = "LEADPOET_LEAD_ORDERS_GAMMA_SERVICE"
-GAMMA_PALLET_ENV = "LEADPOET_LEAD_ORDERS_GAMMA_PALLET"
-GAMMA_STORAGE_ENV = "LEADPOET_LEAD_ORDERS_GAMMA_STORAGE"
-TERMS_VERSION_ENV = "LEADPOET_LEAD_ORDERS_TERMS_VERSION"
-PUBLIC_BASE_URL_ENV = "LEADPOET_LEAD_ORDERS_PUBLIC_BASE_URL"
-LEADPOET_OPENROUTER_KEY_ENV = "LEADPOET_LEAD_ORDERS_OPENROUTER_API_KEY"
-LEADPOET_DEEPLINE_KEY_ENV = "LEADPOET_LEAD_ORDERS_DEEPLINE_API_KEY"
+MODE_ENV = "LEAD_ORDERS_MODE"
+STAFF_HOTKEYS_ENV = "LEAD_ORDERS_STAFF_HOTKEYS"
+BLOCKED_HOTKEYS_ENV = "LEAD_ORDERS_BLOCKED_HOTKEYS"
+RUNNER_SECRET_ENV = "LEAD_ORDERS_RUNNER_SECRET"
+POLICY_PATH_ENV = "LEAD_ORDERS_POLICY_PATH"
+GAMMA_SERVICE_ENV = "LEAD_ORDERS_GAMMA_SERVICE"
+GAMMA_PALLET_ENV = "LEAD_ORDERS_GAMMA_PALLET"
+GAMMA_STORAGE_ENV = "LEAD_ORDERS_GAMMA_STORAGE"
+TERMS_VERSION_ENV = "LEAD_ORDERS_TERMS_VERSION"
+PUBLIC_BASE_URL_ENV = "LEAD_ORDERS_PUBLIC_BASE_URL"
+OWNER_OPENROUTER_KEY_ENV = "LEAD_ORDERS_OPENROUTER_API_KEY"
+OWNER_DEEPLINE_KEY_ENV = "LEAD_ORDERS_DEEPLINE_API_KEY"
 
 MODE_OFF = "off"
 MODE_STAFF = "staff"
@@ -79,8 +80,8 @@ class LeadOrdersConfig:
     gamma_storage: str = DEFAULT_GAMMA_STORAGE
     terms_version: str = ""
     public_base_url: str = ""
-    leadpoet_openrouter_key: str = field(default="", repr=False)
-    leadpoet_deepline_key: str = field(default="", repr=False)
+    owner_openrouter_key: str = field(default="", repr=False)
+    owner_deepline_key: str = field(default="", repr=False)
 
     @property
     def enabled(self) -> bool:
@@ -101,7 +102,7 @@ class LeadOrdersConfig:
     @property
     def uses_miner_keys(self) -> bool:
         """Whether miners may register keys. Only live orders spend them;
-        shadow orders run on Leadpoet's keys and compute what-if rewards."""
+        shadow orders run on the subnet's own keys and compute what-if rewards."""
 
         return self.mode in (MODE_SHADOW, MODE_LIVE)
 
@@ -130,24 +131,24 @@ class LeadOrdersConfig:
 
 def load_config(environ: Optional[Mapping[str, str]] = None) -> LeadOrdersConfig:
     env = os.environ if environ is None else environ
-    mode = (env.get(MODE_ENV) or MODE_OFF).strip().lower()
+    mode = (env_get(env, MODE_ENV) or MODE_OFF).strip().lower()
     if mode not in MODES:
         raise LeadOrdersConfigError("%s must be one of %s" % (MODE_ENV, ", ".join(MODES)))
     if mode == MODE_OFF:
         return LeadOrdersConfig()
     config = LeadOrdersConfig(
         mode=mode,
-        staff_hotkeys=_hotkeys(env.get(STAFF_HOTKEYS_ENV, ""), STAFF_HOTKEYS_ENV),
-        blocked_hotkeys=_hotkeys(env.get(BLOCKED_HOTKEYS_ENV, ""), BLOCKED_HOTKEYS_ENV),
-        runner_secret=env.get(RUNNER_SECRET_ENV, ""),
-        policy_path=env.get(POLICY_PATH_ENV, "").strip(),
-        gamma_service=env.get(GAMMA_SERVICE_ENV, "").strip(),
-        gamma_pallet=(env.get(GAMMA_PALLET_ENV) or DEFAULT_GAMMA_PALLET).strip(),
-        gamma_storage=(env.get(GAMMA_STORAGE_ENV) or DEFAULT_GAMMA_STORAGE).strip(),
-        terms_version=env.get(TERMS_VERSION_ENV, "").strip(),
-        public_base_url=env.get(PUBLIC_BASE_URL_ENV, "").strip().rstrip("/"),
-        leadpoet_openrouter_key=env.get(LEADPOET_OPENROUTER_KEY_ENV, ""),
-        leadpoet_deepline_key=env.get(LEADPOET_DEEPLINE_KEY_ENV, ""),
+        staff_hotkeys=_hotkeys(env_get(env, STAFF_HOTKEYS_ENV, ""), STAFF_HOTKEYS_ENV),
+        blocked_hotkeys=_hotkeys(env_get(env, BLOCKED_HOTKEYS_ENV, ""), BLOCKED_HOTKEYS_ENV),
+        runner_secret=env_get(env, RUNNER_SECRET_ENV, ""),
+        policy_path=env_get(env, POLICY_PATH_ENV, "").strip(),
+        gamma_service=env_get(env, GAMMA_SERVICE_ENV, "").strip(),
+        gamma_pallet=(env_get(env, GAMMA_PALLET_ENV) or DEFAULT_GAMMA_PALLET).strip(),
+        gamma_storage=(env_get(env, GAMMA_STORAGE_ENV) or DEFAULT_GAMMA_STORAGE).strip(),
+        terms_version=env_get(env, TERMS_VERSION_ENV, "").strip(),
+        public_base_url=env_get(env, PUBLIC_BASE_URL_ENV, "").strip().rstrip("/"),
+        owner_openrouter_key=env_get(env, OWNER_OPENROUTER_KEY_ENV, ""),
+        owner_deepline_key=env_get(env, OWNER_DEEPLINE_KEY_ENV, ""),
     )
     if len(config.runner_secret.encode("utf-8")) < MIN_RUNNER_SECRET_BYTES:
         raise LeadOrdersConfigError("%s must be at least %d bytes" % (RUNNER_SECRET_ENV, MIN_RUNNER_SECRET_BYTES))
@@ -161,7 +162,7 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> LeadOrdersConfig
         raise LeadOrdersConfigError("Gamma pallet and storage names are invalid")
     if mode == MODE_LIVE and not is_valid_hotkey(config.gamma_service):
         # Runtime 493 keys GammaSpent by the service's AccountId32, not a number.
-        raise LeadOrdersConfigError("%s must be the Leadpoet Gamma service's SS58 hotkey in live mode" % GAMMA_SERVICE_ENV)
+        raise LeadOrdersConfigError("%s must be the Subnet 71 Gamma service's SS58 hotkey in live mode" % GAMMA_SERVICE_ENV)
     if mode in (MODE_STAFF, MODE_SHADOW) and not config.staff_hotkeys:
         raise LeadOrdersConfigError("%s is required in %s mode" % (STAFF_HOTKEYS_ENV, mode))
     return config

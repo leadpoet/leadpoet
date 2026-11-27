@@ -18,15 +18,15 @@ def test_sentry_is_initialized_after_config_and_cannot_block_service(
     import leadpoet_observability
 
     path = tmp_path / "gateway.env"
-    path.write_text("LAB_ARENA_MODE=live\nLEADPOET_SENTRY_ENABLED=1\n")
+    path.write_text("LAB_ARENA_MODE=live\nSUBNET71_SENTRY_ENABLED=1\n")
     monkeypatch.setenv("LAB_ARENA_MODE", "")
     monkeypatch.delenv("LAB_ARENA_MODE", raising=False)
-    monkeypatch.setenv("LEADPOET_SENTRY_ENABLED", "")
-    monkeypatch.delenv("LEADPOET_SENTRY_ENABLED", raising=False)
+    monkeypatch.setenv("SUBNET71_SENTRY_ENABLED", "")
+    monkeypatch.delenv("SUBNET71_SENTRY_ENABLED", raising=False)
     calls = []
 
     def initialize(*, component):
-        assert os.environ["LEADPOET_SENTRY_ENABLED"] == "1"
+        assert os.environ["SUBNET71_SENTRY_ENABLED"] == "1"
         calls.append(component)
         if bootstrap_fails:
             raise RuntimeError("fixture-private-detail")

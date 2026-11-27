@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 from uuid import UUID
 
+from leadpoet_canonical.env_names import env_get
 from lab_arena import broker, provider_costs, store
 from lab_arena.credentials import CredentialError, CredentialManager
 from scripts.run_lab_arena_service import load_scoped_environment
@@ -197,7 +198,7 @@ def main(argv=None):
 
             def look_up(item):
                 if item["provider"] == "judge":
-                    key = os.getenv("LEADPOET_COLLECTION_JUDGE_KEY") or os.getenv(
+                    key = env_get(None, "COLLECTION_JUDGE_KEY") or os.getenv(
                         "LAB_ARENA_OPENROUTER_API_KEY"
                     )
                     return reconcile_owner(db, http, item, key)

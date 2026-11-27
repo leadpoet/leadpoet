@@ -105,7 +105,7 @@ def test_verified_context_stays_bound_from_score_receipt_to_review(
     })
     monkeypatch.setattr(three_stage, "_call_openrouter", provider)
     monkeypatch.setattr(three_stage, "_fetch_sd_then_exa", fetch)
-    monkeypatch.setenv("LEADPOET_COMPETITION_EVALUATION_DATE", "2026-09-20")
+    monkeypatch.setenv("COMPETITION_EVALUATION_DATE", "2026-09-20")
 
     verdicts: list[dict] = []
     score, confidence, date_status, _, matched_index = asyncio.run(

@@ -28,7 +28,7 @@ PROOF = {'parent_source_url': PARENT, 'parent_quote': RELATION,
 def native_loop(monkeypatch, *, proof=PROOF, parent_text=RELATION, href=HOME,
                 child_text=FACT, child_final=None, decision='match', omit_relation=False,
                 child_first=False):
-    monkeypatch.setenv('LEADPOET_COMPETITION_EVALUATION_DATE', '2026-10-24')
+    monkeypatch.setenv('COMPETITION_EVALUATION_DATE', '2026-10-24')
     run, _, _, _ = install(monkeypatch)
     reads, research, reviews = [], [], []
     child_final = CHILD if child_final is None else child_final
@@ -269,7 +269,7 @@ def test_retry_cannot_reuse_changed_or_missing_relationship_authority(monkeypatc
     if change == 'parent_text': cache['pages'][PARENT]['text'] += ' Changed.'
     if change == 'child_text': cache['pages'][CHILD]['text'] += ' Changed.'
     if change == 'parent_missing': del cache['pages'][PARENT]
-    if change == 'date': monkeypatch.setenv('LEADPOET_COMPETITION_EVALUATION_DATE', '2026-10-25')
+    if change == 'date': monkeypatch.setenv('COMPETITION_EVALUATION_DATE', '2026-10-25')
     if change == 'parent_identity': cache[c.PRIVATE_INDUSTRY_BINDINGS_KEY]['parent_domain'] = 'other.example'
     if change == 'pointer_bytes':
         cache[c.PRIVATE_INDUSTRY_BINDINGS_KEY]['brands'][CHILD]['printed_reference'] = HOME

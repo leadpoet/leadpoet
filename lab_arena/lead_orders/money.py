@@ -131,7 +131,7 @@ def rewardable_spend_by_hotkey(
 ) -> Dict[str, int]:
     """Settled spend per miner hotkey that earns a reward.
 
-    ``calls`` holds ``(miner_hotkey or None for Leadpoet's key, cost)`` for
+    ``calls`` holds ``(miner_hotkey or None for the subnet's own key, cost)`` for
     every settled call on the order. A final call can settle above its
     reservation (Deepline is reserved at a flat estimate), so the order's total
     spend can pass its ceiling. Rewards never pay for spend above the ceiling:
@@ -165,7 +165,7 @@ def order_miner_rewards(
     *,
     ceiling_microusd: int,
 ) -> Dict[str, int]:
-    """USD owed per miner hotkey for one settled order. Leadpoet earns nothing."""
+    """USD owed per miner hotkey for one settled order. The subnet's own keys earn nothing."""
 
     return {
         hotkey: reward

@@ -26,7 +26,7 @@ from leadpoet_verifier.industry_taxonomy import (
     CONTEXTUAL_BROAD_CONCEPTS as _CONTEXTUAL_BROAD_CONCEPTS,
     industry_concepts as _industry_concepts,
     industry_tokens as _industry_tokens,
-    leadpoet_taxonomy_match as _leadpoet_taxonomy_match,
+    taxonomy_match as _taxonomy_match,
     normalized_industry_text as _normalized_text,
     requested_industry_concepts as _requested_industry_concepts,
 )
@@ -195,7 +195,7 @@ def industry_fit(
     candidate_labels = sorted(
         {_normalized_text(value) for value in candidate_values if _normalized_text(value)}
     )
-    taxonomy_decision, taxonomy_detail = _leadpoet_taxonomy_match(
+    taxonomy_decision, taxonomy_detail = _taxonomy_match(
         requested,
         candidate_industry,
         candidate_subindustry,

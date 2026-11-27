@@ -159,7 +159,7 @@ def test_independent_builder_does_not_invent_resource_exhaustion(monkeypatch):
 def test_gateway_build_command_binds_reproducible_epoch(tmp_path):
     command = gateway_pcr0_builder._deterministic_docker_build_command(
         gateway_root=tmp_path / "gateway",
-        image="leadpoet-gateway-verify:test",
+        image="subnet71-gateway-verify:test",
         role="gateway_coordinator",
     )
 

@@ -54,6 +54,7 @@ from lab_arena.contracts import (
     require_keys,
     require_only_keys,
 )
+from leadpoet_canonical.env_names import env_get
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -764,14 +765,14 @@ def load_arena_cutover(
 ) -> SubnetEpochCutover:
     """Load the settlement cutover manifest without mutating the process environment.
 
-    Explicit ``LEADPOET_SUBNET_EPOCH_CUTOVER_JSON`` / ``_PATH`` values win;
+    Explicit ``SUBNET_EPOCH_CUTOVER_JSON`` / ``_PATH`` values win;
     when neither is set the repository's public SN71 manifest is used. The
     manifest is fully validated by the repository helper; failures raise.
     """
 
     source: Dict[str, str] = dict(os.environ if environ is None else environ)
-    has_json = bool(str(source.get(CUTOVER_JSON_ENV, "") or "").strip())
-    has_path = bool(str(source.get(CUTOVER_PATH_ENV, "") or "").strip())
+    has_json = bool(str(env_get(source, CUTOVER_JSON_ENV, "") or "").strip())
+    has_path = bool(str(env_get(source, CUTOVER_PATH_ENV, "") or "").strip())
     if not has_json and not has_path:
         source[CUTOVER_PATH_ENV] = str(default_manifest_path)
     try:

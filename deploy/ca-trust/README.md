@@ -73,7 +73,7 @@ record its exact path. Copy the complete three trees, then verify the backup
 against the before manifest:
 
 ```bash
-CA_BACKUP=$(sudo -n mktemp -d /var/tmp/leadpoet-ca-backup.XXXXXXXX)
+CA_BACKUP=$(sudo -n mktemp -d /var/tmp/subnet71-ca-backup.XXXXXXXX)
 sudo -n cp -a --parents /etc/pki/ca-trust /usr/share/pki/ca-trust-source /usr/share/pki/ca-trust-legacy "$CA_BACKUP"
 ```
 

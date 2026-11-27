@@ -26,7 +26,7 @@ def offline_policy(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv('OPENROUTER_API_KEY', 'offline-placeholder-no-network')
     monkeypatch.setenv('ARENA_INDUSTRY_EVIDENCE_MODEL', 'openai/gpt-6.1-sol')
-    monkeypatch.setenv('LEADPOET_COMPETITION_EVALUATION_DATE', '2026-10-24')
+    monkeypatch.setenv('COMPETITION_EVALUATION_DATE', '2026-10-24')
 
 
 @pytest.mark.parametrize('kind', [

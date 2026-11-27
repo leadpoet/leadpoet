@@ -121,7 +121,7 @@ def probe_runsc(destination: Path) -> Path:
     # Current gVisor releases require companion binaries next to runsc.
     # Fetch and verify the official bundle instead of a standalone executable.
     def download(url):
-        request = urllib.request.Request(url, headers={"User-Agent": "leadpoet-lab-arena-runsc-probe/1"})
+        request = urllib.request.Request(url, headers={"User-Agent": "subnet71-lab-arena-runsc-probe/1"})
         with urllib.request.urlopen(request, timeout=300) as response:
             return response.read()
 

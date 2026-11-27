@@ -13,6 +13,7 @@ import urllib.request
 
 from .sentry_bootstrap import flush_sentry, init_sentry
 from .sentry_operations import emit_release_summary, emit_restart_summary
+from leadpoet_canonical.env_names import env_get
 
 
 _RELEASE_STEP_NAMES = {
@@ -128,7 +129,9 @@ def _github_stage_durations(job_name: str) -> dict[str, float]:
         api_url = os.environ["GITHUB_API_URL"]
         repository = os.environ["GITHUB_REPOSITORY"]
         run_id = os.environ["GITHUB_RUN_ID"]
-        token = os.environ["LEADPOET_GITHUB_JOB_TOKEN"]
+        token = env_get(None, "SUBNET71_GITHUB_JOB_TOKEN")
+        if not token:
+            raise KeyError("SUBNET71_GITHUB_JOB_TOKEN")
         request = urllib.request.Request(
             f"{api_url}/repos/{repository}/actions/runs/{run_id}/jobs?per_page=100",
             headers={
@@ -198,7 +201,7 @@ def main(argv=None) -> int:
         # No values: arguments may contain local paths and the DSN is ambient.
         try:
             print(
-                "leadpoet_sentry_cli_skipped error=%s" % type(exc).__name__,
+                "sentry_cli_skipped error=%s" % type(exc).__name__,
                 flush=True,
             )
         except Exception:

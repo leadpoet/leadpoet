@@ -46,7 +46,7 @@ def call_leaves(calls: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def key_totals(leaves: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-    """Per key: provider, miner hotkey (null for Leadpoet), calls, settled USD."""
+    """Per key: provider, miner hotkey (null for the subnet's own key), calls, settled USD."""
 
     totals: Dict[tuple, Dict[str, Any]] = {}
     for leaf in leaves:

@@ -674,7 +674,7 @@ actual token income separately requires the subsequent chain distribution.
 
 Build the private batch review on the authorized gateway/worker host with the
 original private manifest and rubric. All outputs below are new private files.
-The installed `LEADPOET_COLLECTION_REVIEW_PUBLIC_KEY_FILE` pins the actual
+The installed `COLLECTION_REVIEW_PUBLIC_KEY_FILE` pins the actual
 human reviewer's Ed25519 public key; a key supplied by a receipt cannot
 authorize a release.
 

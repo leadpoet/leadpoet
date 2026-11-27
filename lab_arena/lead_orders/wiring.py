@@ -100,7 +100,7 @@ def build_from_environment(environ: Optional[Mapping[str, str]] = None):
     broker = LeadOrderBroker(
         store=store, policy=policy, transport=HttpxProviderTransport(), registrar=registrar,
         miner_transport=miner_transport,
-        leadpoet_secrets={"openrouter": config.leadpoet_openrouter_key, "deepline": config.leadpoet_deepline_key},
+        owner_secrets={"openrouter": config.owner_openrouter_key, "deepline": config.owner_deepline_key},
         price_table=_CachedPriceTable(), current_epoch=current_epoch,
     )
     service = LeadOrderService(

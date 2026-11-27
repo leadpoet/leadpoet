@@ -43,26 +43,26 @@ boundary.
 ## Configuration
 
 ```bash
-export LEADPOET_SENTRY_ENABLED=1
-export LEADPOET_SENTRY_DSN="https://<key>@<org>.ingest.sentry.io/<project>"
+export SUBNET71_SENTRY_ENABLED=1
+export SUBNET71_SENTRY_DSN="https://<key>@<org>.ingest.sentry.io/<project>"
 
 # Optional
-export LEADPOET_SENTRY_ENVIRONMENT=production
-export LEADPOET_SENTRY_RELEASE=<exact-40-character-git-sha>
-export LEADPOET_SENTRY_TRACES_SAMPLE_RATE=0.01
-export LEADPOET_SENTRY_EXTRA_PROTECTED_MODULES=
-export LEADPOET_SENTRY_MESSAGE_MODE=scrub  # or redact-all
-export LEADPOET_SENTRY_RESTART_STAGE_DEADLINE_SECONDS=900
+export SUBNET71_SENTRY_ENVIRONMENT=production
+export SUBNET71_SENTRY_RELEASE=<exact-40-character-git-sha>
+export SUBNET71_SENTRY_TRACES_SAMPLE_RATE=0.01
+export SUBNET71_SENTRY_EXTRA_PROTECTED_MODULES=
+export SUBNET71_SENTRY_MESSAGE_MODE=scrub  # or redact-all
+export SUBNET71_SENTRY_RESTART_STAGE_DEADLINE_SECONDS=900
 ```
 
-Both `LEADPOET_SENTRY_ENABLED` and `LEADPOET_SENTRY_DSN` are required.
+Both `SUBNET71_SENTRY_ENABLED` and `SUBNET71_SENTRY_DSN` are required.
 Anything less is a complete no-op. Ambient `SENTRY_*` variables are ignored;
 all SDK options are explicit. Successful manual traces default to 1% and are
 clamped to 10%. Terminal errors are not sampled. The SDK shutdown flush is
 bounded to one second.
 
 Arena hosts always use the existing `redact-all` policy, regardless of
-`LEADPOET_SENTRY_MESSAGE_MODE`. They retain exception type and scrubbed stack
+`SUBNET71_SENTRY_MESSAGE_MODE`. They retain exception type and scrubbed stack
 locations, remove error messages, and drop breadcrumbs. Arena modules and
 entrypoint paths are also protected when another wired host observes them.
 No SDK is added to model sandboxes or enclave runtimes.
@@ -72,9 +72,9 @@ legacy secret cannot override that identity; an unavailable identity is
 reported as `unknown` without blocking startup.
 
 The Arena service accepts only four Sentry ingest settings from its existing
-protected gateway environment cache: `LEADPOET_SENTRY_ENABLED`,
-`LEADPOET_SENTRY_DSN`, `LEADPOET_SENTRY_ENVIRONMENT`, and
-`LEADPOET_SENTRY_RELEASE`. The private validator launcher accepts the same
+protected gateway environment cache: `SUBNET71_SENTRY_ENABLED`,
+`SUBNET71_SENTRY_DSN`, `SUBNET71_SENTRY_ENVIRONMENT`, and
+`SUBNET71_SENTRY_RELEASE`. The private validator launcher accepts the same
 four settings in its existing mode-0600 Arena operator environment file. The
 canonical restart snapshots them into the private service environment, and
 optional sudo re-exec preserves only those named ingest settings. The Sentry
@@ -82,10 +82,10 @@ API read token and gateway provider aliases are never imported by these paths.
 
 The normal Arena validator restart does not hydrate the legacy validator
 Secrets Manager environment. Enabling its existing opt-in gate requires
-`LEADPOET_SENTRY_ENABLED` and `LEADPOET_SENTRY_DSN` from the existing protected
+`SUBNET71_SENTRY_ENABLED` and `SUBNET71_SENTRY_DSN` from the existing protected
 Sentry source in its Arena operator environment before a separately authorized
-canonical release. `LEADPOET_SENTRY_ENVIRONMENT` is optional; do not copy a
-stale `LEADPOET_SENTRY_RELEASE`, since Arena derives its loaded source identity.
+canonical release. `SUBNET71_SENTRY_ENVIRONMENT` is optional; do not copy a
+stale `SUBNET71_SENTRY_RELEASE`, since Arena derives its loaded source identity.
 No new secret is required. Public validators with the gate unset stay inert.
 
 This wiring captures uncaught process/thread errors and ERROR logs. Caught
@@ -94,7 +94,7 @@ events. No extra tracing or logical event system is introduced.
 
 ## Read-only Codex API access
 
-`LEADPOET_SENTRY_API_TOKEN` is an operator-only read credential stored in both
+`SUBNET71_SENTRY_API_TOKEN` is an operator-only read credential stored in both
 `leadpoet/prod/gateway/env` and `leadpoet/prod/validator/env`. It is separate
 from the ingestion DSN. Restart hydration removes it from cached environment
 files and runtime exports, so it does not enter gateway, validator,

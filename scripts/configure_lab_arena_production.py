@@ -26,13 +26,14 @@ from typing import Mapping, Sequence
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+from leadpoet_canonical.env_names import env_get  # noqa: E402
 
 GATEWAY_HOST = "ec2-user@52.91.135.79"
 VALIDATOR_HOST = "ec2-user@100.59.201.156"
 GATEWAY_SECRET = "leadpoet/prod/gateway/env"
 VALIDATOR_SECRET = "leadpoet/prod/validator/env"
 DEFAULT_SSH_KEY = Path.home() / ".ssh" / "leadpoet-2026-07-28.pem"
-AUTH_ENV = "LEADPOET_LAB_ARENA_PRODUCTION_APPLY"
+AUTH_ENV = "LAB_ARENA_PRODUCTION_APPLY"
 KNOWN_ACCOUNTS = frozenset({"187445349696", "493765492819"})
 IAM_ACCOUNT = "493765492819"
 VALIDATOR_IAM_ROLE = "leadpoet-validator-s3-cloudwatch-role"
@@ -765,7 +766,7 @@ def build_parser() -> argparse.ArgumentParser:
     authority.add_argument("--aws-instance-role", action="store_true", help="use the host IAM role credential chain for the validator IAM guard only")
     parser.add_argument("--miner-credential-kms-key-id", default=None, help="override the miner KMS key; an empty value disables admission during staged deployment")
     parser.add_argument("--service-key-fd", type=int, help="inherited descriptor containing only the scoped service key")
-    parser.add_argument("--ssh-key", type=Path, default=Path(os.getenv("LEADPOET_LAB_ARENA_SSH_KEY") or DEFAULT_SSH_KEY))
+    parser.add_argument("--ssh-key", type=Path, default=Path(env_get(None, "LAB_ARENA_SSH_KEY") or DEFAULT_SSH_KEY))
     parser.add_argument("--gateway-host", default=GATEWAY_HOST)
     parser.add_argument("--validator-host", default=VALIDATOR_HOST)
     parser.add_argument("--allowed-account", action="append", required=True)

@@ -211,7 +211,7 @@ def test_fake_order_with_mixed_keys_still_loses():
     assert reward - Fraction(6 * USD) * Fraction(9, 10) - charge < 0
 
 
-def test_rewards_skip_leadpoet_and_scale_past_ceiling():
+def test_rewards_skip_owner_and_scale_past_ceiling():
     calls = [(MINER, 3 * USD), (OTHER, 1 * USD), (None, 2 * USD)]
     spend = money.rewardable_spend_by_hotkey(calls, ceiling_microusd=5 * USD)
     assert spend == {MINER: 2_500_000, OTHER: 833_333}

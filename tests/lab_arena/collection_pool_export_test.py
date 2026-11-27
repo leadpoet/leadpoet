@@ -135,6 +135,33 @@ def test_interrupted_pool_prefix_exports_before_its_final_bill(pool_fixture, tmp
 
     before, old, partial = tick()
     prior_bytes = old.read_bytes()
+    from scripts import collection_export_snapshots as snapshots
+
+    # A pre-upgrade index cannot bind the interruption or rule out a late
+    # quarantine. Keep the old bytes intact but hide the group's current link.
+    def old_index_without_pointers(state):
+        data = json.loads((output / "snapshots" / (state["snapshot"] + ".json")).read_bytes())
+        member = data["offers"][spec.batch_id][case]["members"][rid]
+        member.pop("interruption")
+        member.pop("quarantine")
+        snapshots._save(output, data)
+
+    old_index_without_pointers(before)
+    backfill = observe(root, output, env.db, env.objects, before, max_groups=0)
+    data = json.loads((output / "snapshots" / (backfill["snapshot"] + ".json")).read_bytes())
+    queued = data["offers"][spec.batch_id][case]
+    assert queued["queued"] and not queued.get("file") and not queued.get("released")
+    assert old.read_bytes() == prior_bytes
+    before, old, partial = tick(backfill)
+
+    def unexpected_pack(*args, **kwargs):
+        pytest.fail("unchanged immutable partial triggered a full archive rebuild")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(snapshots, "_pack", unexpected_pack)
+        repeated = observe(root, output, env.db, env.objects, {**before, "pass": 3})
+        assert repeated["snapshot"] == before["snapshot"]
+
     assert partial["billing_status"] == "pending" and partial["unresolved_miner_calls"] == 1
     assert partial["miner_cost_microusd"] is None and partial["settled_miner_cost_microusd"] == 10
     with ZipFile(old) as archive:
@@ -171,3 +198,44 @@ def test_interrupted_pool_prefix_exports_before_its_final_bill(pool_fixture, tmp
     snapshot = json.loads((output / "snapshots" / (damaged["snapshot"] + ".json")).read_bytes())
     group = snapshot["offers"][spec.batch_id][case]
     assert rid not in group["released"] and group["held"][rid] == "missing_artifact"
+
+    # A missing upstream object can return without any change to ledger or pointers.
+    monkeypatch.setattr(env.objects, "get_bounded", read_original)
+    healthy = observe(root, output, env.db, env.objects, {**damaged, "pass": 3})
+    assert healthy["released"] == 2 and healthy["held"] == 0
+
+    # An unsealed crash can gain further journal bytes. Keep retrying it.
+    read_optional = env.objects.get_optional_bounded
+    def no_interruption(key, maximum):
+        if key == f"collection/{spec.batch_id}/{rid}/interruption.json":
+            return None
+        return read_optional(key, maximum)
+    with monkeypatch.context() as patch:
+        patch.setattr(env.objects, "get_optional_bounded", no_interruption)
+        unsealed = observe(root, output, env.db, env.objects, healthy)
+        attempted = []
+        rebuild = snapshots._pack
+        def counted(*args):
+            attempted.append(args[5])
+            return rebuild(*args)
+        patch.setattr(snapshots, "_pack", counted)
+        observe(root, output, env.db, env.objects, {**unsealed, "pass": 3})
+        assert attempted == [case]
+
+    # A later privacy marker changes the group's input even when its bill is static.
+    from lab_arena.collection_journal import WorkflowJournal
+    old_index_without_pointers(healthy)
+    WorkflowJournal(env.objects, spec.batch_id, rid).save("quarantine", {"run_id": rid, "stage": "private"})
+    waiting = observe(root, output, env.db, env.objects, healthy, max_groups=0)
+    data = json.loads((output / "snapshots" / (waiting["snapshot"] + ".json")).read_bytes())
+    assert not data["offers"][spec.batch_id][case].get("file")
+    stopped = observe(root, output, env.db, env.objects, waiting)
+    snapshot = json.loads((output / "snapshots" / (stopped["snapshot"] + ".json")).read_bytes())
+    group = snapshot["offers"][spec.batch_id][case]
+    assert group["held"] == {rid: "quarantine"} and group["released"] == [env.jobs[0]["job_id"]]
+    with ZipFile(output / spec.batch_id / group["file"]) as z:
+        assert json.loads(z.read(f"trajectories/{rid}.jsonl"))["messages"] == []
+    with monkeypatch.context() as patch:
+        patch.setattr(snapshots, "_pack", unexpected_pack)
+        repeat = observe(root, output, env.db, env.objects, {**stopped, "pass": 3})
+        assert repeat["snapshot"] == stopped["snapshot"] and old.read_bytes() == prior_bytes

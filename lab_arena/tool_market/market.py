@@ -52,7 +52,8 @@ MAX_USAGE_PAGE = 500
 CALL_TIMEOUT_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MIN_TAB_SECONDS = 60
-# A signed call's own tab outlives the call window (``tool_market__open_seconds_v1``).
+# A signed call's own tab: closed when the call ends, else it lapses after one
+# call window (``tool_market__open_seconds_v1``).
 CALL_TAB_SECONDS = 600
 MAX_TAB_SECONDS = 30 * 24 * 3600  # a tab is the buyer's API key
 MAX_TAB_MICROUSD = 1_000_000_000  # $1,000

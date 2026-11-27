@@ -118,16 +118,17 @@ All under `/tool-market`.
   `GET /openapi.json`, `GET /catalog`, `GET /books/{tool}`, and
   `GET /gamma/balance?hotkey=<ss58>` (`{hotkey, credited_usd, used_usd,
   remaining_usd}` as decimal strings; zeros for a hotkey that never spent).
-- **btauth/1** (`X-Bittensor-*` headers): `POST /call`. Errors are
+- **btauth/1** (`X-Bittensor-*` headers): `POST /call`, and every signed
+  route below except `POST /terms` and `POST /keys`. Errors are
   `401 btauth_*` with `WWW-Authenticate: btauth/1`, and a request with both
   btauth headers and `Authorization` is `400 btauth_ambiguous_credentials`.
 - **Tab token** (`Authorization: Bearer`): `POST /call`, `GET /tab`,
   `POST /tab/close`.
-- **Signed by the hotkey, in the lead-order scheme** (the stored signature
-  must be re-checkable later): `POST /terms`, `POST /tabs`,
-  `GET /usage`, and for miners `POST /keys`, `POST /keys/{id}/check`,
-  `POST /keys/{id}/revoke`, `POST /asks` and `GET /statement` (their keys,
-  health and what each earned).
+- **Signed by the hotkey**: `POST /terms`, `POST /tabs`, `GET /usage`, and
+  for miners `POST /keys`, `POST /keys/{id}/check`, `POST /keys/{id}/revoke`,
+  `POST /asks` and `GET /statement` (their keys, health and what each
+  earned). `POST /terms` and `POST /keys` take only the lead-order scheme:
+  their stored signature must be re-checkable later.
 
 `GET /catalog` lists every tool that trades: its operations, one line on
 what each does, their parameters, its price ceiling, and the first ask a

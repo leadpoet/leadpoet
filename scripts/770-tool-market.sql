@@ -318,7 +318,8 @@ BEGIN
    IS NOT DISTINCT FROM (p_genesis,p_netuid,p_service,p_registered_at) THEN
   RETURN TRUE;
  END IF;
- IF EXISTS(SELECT FROM public.tool_market_gamma_readings) OR EXISTS(SELECT FROM public.tool_market_tabs) THEN
+ -- Any tab needed credit, so a reading: readings alone show the source in use.
+ IF EXISTS(SELECT FROM public.tool_market_gamma_readings) THEN
   RAISE EXCEPTION 'Gamma credit source in use; repointing requires reconciliation' USING ERRCODE='55000';
  END IF;
  INSERT INTO public.tool_market_gamma_source(genesis,netuid,service,registered_at)

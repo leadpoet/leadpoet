@@ -310,10 +310,7 @@ BEGIN
   RETURN TRUE;
  END IF;
  IF EXISTS(SELECT FROM public.tool_market_gamma_readings) OR EXISTS(SELECT FROM public.tool_market_tabs) THEN
-  IF actual.source_id IS NULL THEN
-   RAISE EXCEPTION 'unbound Gamma ledger requires reconciliation' USING ERRCODE='55000';
-  END IF;
-  RAISE EXCEPTION 'Gamma credit source differs' USING ERRCODE='55000';
+  RAISE EXCEPTION 'Gamma credit source in use; repointing requires reconciliation' USING ERRCODE='55000';
  END IF;
  INSERT INTO public.tool_market_gamma_source(genesis,netuid,service,registered_at)
   VALUES(p_genesis,p_netuid,p_service,p_registered_at);

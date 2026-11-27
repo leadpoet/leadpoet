@@ -4,7 +4,7 @@ The Subnet 71 tool market sells metered access to go-to-market (GTM) data tools.
 Miners supply the vendor keys and set a price per unit. Agents and buyers
 pay in Gamma and call one API. Gamma is Subnet 71's on-chain spending: what a
 buyer's hotkey spent to the market's Gamma service on netuid 71
-(`GammaSpent`). Each call selects an eligible key from the price-ranked book, subject to health, privacy, price and budget limits. The attested vault and the vendor execute the request. Miners supply the account capacity.
+(`GammaSpent`). Each call selects an eligible key from the price-ranked book, subject to health, privacy, price and budget limits. The attested vault and the vendor execute the request.
 
 It is off by default. Every route answers 404 until
 `LEADPOET_TOOL_MARKET_MODE=live`. In live mode a tool needs an approved supplier before it can serve calls.

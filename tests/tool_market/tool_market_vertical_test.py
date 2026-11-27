@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from gateway.api import tool_market as routes
+from lab_arena.chain import wallet_signature_verifier
 from lab_arena.lead_orders.auth import signed_message
 from lab_arena.lead_orders.vault_client import VaultClient, VaultTransport
 from lab_arena.tool_market.config import ToolMarketConfig, PUBLISHED_TERMS
@@ -49,7 +50,7 @@ def test_private_platform_lookup_from_funded_tab_to_miner_statement(store, monke
                         gamma_reader=gamma, current_epoch=lambda: 71, is_registered=lambda hk: hk == miner.ss58_address)
     app = FastAPI()
     app.include_router(routes.router)
-    routes.configure(builder=lambda: (cfg, market))
+    routes.configure(builder=lambda: (cfg, market), verifier=wallet_signature_verifier)
     try:
         with TestClient(app) as http:
             def signed(key, path, payload=None):

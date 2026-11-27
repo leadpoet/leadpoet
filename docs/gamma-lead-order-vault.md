@@ -41,7 +41,8 @@ Each update is a new build plus one public approval on Base.
   the whole key, plain, URL-encoded or JSON-escaped, is withheld.
 - An OpenRouter management key is used once, at `/v1/check`, to prove the
   miner owns the runtime key. It never makes a call. `check` makes only free,
-  read-only requests and issues no receipt.
+  read-only requests and issues no receipt. A key whose check answers
+  `402` is reported out of credit (`<key>_no_credit`), not unavailable.
 - Only Leadpoet's broker, with the caller token, may use `check` and `call`.
 - No database, no files, no request logs.
 - Each connection carries one request, which must arrive within 10 seconds.

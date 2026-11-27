@@ -137,11 +137,15 @@ def echoes(secret: str, data: bytes) -> bool:
     """The key appears in ``data`` literally, URL-encoded, or JSON-escaped,
     in one JSON body or in any ``data:`` line of a streamed one."""
 
-    key = secret.encode("utf-8")
-    # The encoded form is searched as is too: decoding a whole body can pair
-    # a stray "%" before it with the key's first character.
-    spellings = (key, quote(secret, safe="").encode("ascii"))
-    if any(form in data for form in spellings) or key in unquote_to_bytes(data):
+    # The key and its URL-encoded form, each as is and decoded once: decoding
+    # alone misses an encoded key after a stray "%" or one encoded twice.
+    spellings = (secret.encode("utf-8"), quote(secret, safe="").encode("ascii"))
+
+    def holds(text: bytes) -> bool:
+        decoded = unquote_to_bytes(text) if b"%" in text else text
+        return any(form in text or form in decoded for form in spellings)
+
+    if holds(data):
         return True
     if b"\\" not in data:  # without an escape, JSON decoding changes nothing
         return False
@@ -157,7 +161,7 @@ def echoes(secret: str, data: bytes) -> bool:
             value = pending.pop()
             if isinstance(value, str):
                 text = value.encode("utf-8", errors="surrogatepass")
-                if any(form in text for form in spellings) or (b"%" in text and key in unquote_to_bytes(text)):
+                if holds(text):
                     return True
             elif isinstance(value, (list, tuple)):
                 pending.extend(value)

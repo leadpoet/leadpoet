@@ -140,7 +140,9 @@ An ask may be at most $0.25 per credit, or 100% of the vendor's own price
 for a vendor-USD tool. A buyer can send `max_ask_microusd` with a call, and
 no key asking more serves it.
 
-`GET /tool-market/books/{tool}` shows the asks and what a buyer pays for
+`GET /tool-market/catalog` lists every tool that trades: its operations and
+their parameters, its price ceiling, and the cheapest ask with what a buyer
+pays for it. `GET /tool-market/books/{tool}` shows the asks and what a buyer pays for
 each. It shows no miner hotkeys and no key data.
 
 ## Money
@@ -225,5 +227,7 @@ deployment, exactly as lead orders do.
   vault. Lead orders keep them; this lane can add them the same way.
 - **Ask increases apply at once.** A buyer who cares sends
   `max_ask_microusd`; a delay on increases can follow.
+- **No MCP server yet.** Agents call the HTTP API with a tab token. An MCP
+  server that lists the catalog's operations as tools is a separate package.
 - **Lead orders still exist.** They stay as they are, and off. Retiring them
   is a separate decision.

@@ -124,6 +124,11 @@ async def _handle(request: Request, work: Callable[[Any, Any, bytes], Any], *, s
 
 # -- public ---------------------------------------------------------------------
 
+@router.get("/tool-market/catalog")
+async def tool_catalog(request: Request) -> Response:
+    return await _handle(request, lambda m, who, body: m.tool_catalog(), signed=False)
+
+
 @router.get("/tool-market/books/{tool}")
 async def order_book(tool: str, request: Request) -> Response:
     return await _handle(request, lambda m, who, body: m.order_book(tool), signed=False)

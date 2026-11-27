@@ -229,6 +229,25 @@ class ToolMarket:
                 "asks": [{"ask_microusd": a.ask_microusd, "buyer_pays_microusd": book.charge_microusd(a.ask_microusd)}
                          for a in asks]}
 
+    def tool_catalog(self) -> Dict[str, Any]:
+        """Every tool that trades: its operations and their parameters, its
+        price ceiling, and the cheapest ask now. Public, for agents."""
+
+        tools = []
+        for tool in sorted(self._config.tools):
+            listed = self.order_book(tool)
+            best = listed["asks"][0] if listed["asks"] else None
+            tools.append({
+                "tool": tool, "unit": listed["unit"], "max_ask_microusd": catalog.MAX_ASK[listed["unit"]],
+                "best_ask_microusd": best and best["ask_microusd"],
+                "buyer_pays_microusd": best and best["buyer_pays_microusd"],
+                "operations": [{"operation": op.name, "max_units": op.max_units,
+                                "params": {name: {"kind": p.kind, "required": p.required, **(
+                                    {"choices": list(p.choices)} if p.choices else {})}
+                                           for name, p in op.params.items()}}
+                               for (t, _), op in sorted(catalog.OPERATIONS.items()) if t == tool]})
+        return {"tools": tools}
+
     # Calls ------------------------------------------------------------------
     def call(self, token: str, body: Mapping[str, Any]) -> Dict[str, Any]:
         if not isinstance(body, Mapping) or set(body) - {"params", "max_ask_microusd"} != {"tool", "operation"}:

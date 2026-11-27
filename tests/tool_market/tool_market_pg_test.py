@@ -252,6 +252,18 @@ def test_rate_limited_and_unreliable_keys_go_to_the_back_of_the_book(world):
     assert [s[0] for s in world.vendor.sent] == ["steady-key"]
 
 
+def test_the_catalog_lists_each_tool_its_operations_and_best_price(world):
+    world.miner_key("cat-cheap", 9_000)
+    world.miner_key("cat-dear", 12_000)
+    tools = {t["tool"]: t for t in world.market.tool_catalog()["tools"]}
+    assert set(tools) == set(world.config.tools)
+    harvest = tools["harvestapi"]
+    assert (harvest["best_ask_microusd"], harvest["buyer_pays_microusd"], harvest["max_ask_microusd"]) \
+        == (9_000, 9_900, 250_000)
+    assert {op["operation"] for op in harvest["operations"]} == {"linkedin_profile", "linkedin_company"}
+    assert tools["exa"]["best_ask_microusd"] is None  # nobody sells it yet
+
+
 def test_tabs_need_terms_balance_and_budget(world):
     world.miner_key("budget-key", 10_000)
     broke = hotkey()

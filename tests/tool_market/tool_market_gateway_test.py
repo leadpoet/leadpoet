@@ -39,6 +39,9 @@ class FakeMarket:
             raise ToolMarketError(402, "tab_budget")
         return {"call_id": "c", "status": 200, "body": {"ok": True}, "charge_microusd": 11_000}
 
+    def tool_catalog(self):
+        return {"tools": []}
+
     def order_book(self, tool):
         return {"tool": tool, "asks": []}
 
@@ -72,7 +75,7 @@ def signed(path, body, *, method="POST"):
 def test_every_route_is_404_when_the_mode_is_off(client, monkeypatch):
     monkeypatch.delenv("LEADPOET_TOOL_MARKET_MODE", raising=False)
     routes.configure()
-    for method, path in (("GET", "/tool-market/books/exa"), ("POST", "/tool-market/call"),
+    for method, path in (("GET", "/tool-market/books/exa"), ("GET", "/tool-market/catalog"), ("POST", "/tool-market/call"),
                          ("GET", "/tool-market/tab"), ("POST", "/tool-market/tab/close"),
                          ("POST", "/tool-market/terms"), ("GET", "/tool-market/balance"),
                          ("POST", "/tool-market/tabs"), ("POST", "/tool-market/keys"),
@@ -112,3 +115,4 @@ def test_calls_take_the_tab_token_and_return_the_market_answer(client):
     assert refused.status_code == 402 and refused.json() == {"error": "tab_budget"}
     assert market.seen[-1][1] == ""  # a non-bearer header passes no token
     assert client.get("/tool-market/books/exa").json() == {"tool": "exa", "asks": []}
+    assert client.get("/tool-market/catalog").json() == {"tools": []}

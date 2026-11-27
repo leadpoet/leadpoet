@@ -189,7 +189,7 @@ ALTER SEQUENCE public.tool_market_calls_sequence_seq OWNER TO lab_arena_owner;
 CREATE FUNCTION public.tool_market__open_seconds_v1() RETURNS INTEGER LANGUAGE sql IMMUTABLE AS $$ SELECT 600 $$;
 
 -- What a tab's calls hold: each its charge once settled, its reserve while
--- young and open, nothing after that. One join, so a long tab stays cheap.
+-- young and open, nothing after that. It reads every call on the tab.
 CREATE FUNCTION public.tool_market__committed_v1(p_tab_id UUID)
 RETURNS BIGINT LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $committed770$
  SELECT coalesce(sum(coalesce(s.charge_microusd,
@@ -205,13 +205,15 @@ $committed770$;
 -- A buyer can cause unknown usage (a timeout, an oversized answer), so at 20
 -- the buyer's next call to that tool is refused. Counting calls in flight
 -- keeps a burst of parallel calls inside the limit. Per tool, so one
--- vendor's outage does not stop a buyer's other tools. Tabs live at most a
--- day, so older tabs are skipped.
+-- vendor's outage does not stop a buyer's other tools. A call in the last
+-- hour was made on a tab open then, so tabs expired before that are skipped
+-- (and tabs live at most 30 days, which the hotkey index can use).
 CREATE FUNCTION public.tool_market__buyer_uncertain_v1(p_hotkey TEXT,p_tool TEXT)
 RETURNS BIGINT LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $uncertain770$
  SELECT count(*) FROM public.tool_market_tabs t JOIN public.tool_market_calls c ON c.tab_id=t.tab_id
   LEFT JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
- WHERE t.hotkey=p_hotkey AND t.opened_at>clock_timestamp()-interval '25 hours' AND c.tool=p_tool
+ WHERE t.hotkey=p_hotkey AND t.opened_at>clock_timestamp()-interval '30 days 1 hour'
+  AND t.expires_at>clock_timestamp()-interval '1 hour' AND c.tool=p_tool
   AND c.opened_at>clock_timestamp()-interval '1 hour'
   AND (s.status='uncertain' OR s.call_id IS NULL);
 $uncertain770$;

@@ -39,11 +39,13 @@ It is off by default. Every route answers 404 until
      for a vendor-USD tool. Every operation's largest call must owe
      something at the ask (`400 ask_too_low`), and the key's daily cap must
      hold 4 of them (`400 ask_too_high_for_cap`).
-3. **Open a tab.** A buyer pays Gamma to the tool market's service. They
-   sign `POST /tool-market/tabs` with a budget and a lifetime, and get back
-   a bearer token. While the tab is open, its whole budget is held against
-   the buyer's balance. Once it closes or expires, only what its calls
-   spent stays held.
+3. **Open a tab (an API key).** A buyer pays Gamma to the tool market's
+   service once; that spend is their balance and stays until used. They
+   sign `POST /tool-market/tabs` with a budget and a lifetime of up to 30
+   days, and get back a bearer token to use like any API key. While the
+   tab is open, its whole budget is held against the buyer's balance, and
+   the rest of the balance stays free for other tabs. Once it closes or
+   expires, only what its calls spent stays held.
 4. **Call.** `POST /tool-market/call` sends `{tool, operation, params}` with
    the tab token. The market tries keys cheapest first, with equal prices
    in ask order: it reserves on up to 10 asks and sends to up to 3 keys.
@@ -54,6 +56,26 @@ It is off by default. Every route answers 404 until
 Both buyers and miners sign the configured terms (`POST /tool-market/terms`,
 text in `docs/tool-market-terms.md`) before they trade, and again whenever
 their version changes.
+
+## For buyers
+
+`lab_arena/tool_market/client.py` is the whole buyer client, with no
+dependencies beyond `bittensor_wallet` for signing:
+
+```bash
+export SUBNET71_URL=https://<gateway>
+python -m lab_arena.tool_market.client terms             # once
+python -m lab_arena.tool_market.client balance
+python -m lab_arena.tool_market.client key --budget 20 --days 30
+export SUBNET71_API_KEY=<token it printed>
+python -m lab_arena.tool_market.client call hunter email_finder domain=acme.com full_name="Ada Lee"
+```
+
+For an agent, `python -m lab_arena.tool_market.client mcp` is a stdio MCP
+server with two tools: `find_tool` (the catalog) and `call_tool`. It holds
+only the API key, so an agent can spend at most that key's budget.
+`key-status` shows a key's spend and `key-close` returns its unspent
+budget.
 
 ## Routes
 
@@ -296,8 +318,11 @@ deployment, exactly as lead orders do.
   vault. Lead orders keep them; this lane can add them the same way.
 - **Ask increases apply at once.** A buyer who cares sends
   `max_ask_microusd`; a delay on increases can follow.
-- **No MCP server yet.** Agents call the HTTP API with a tab token. An MCP
-  server that lists the catalog's operations as tools is a separate package.
+- **A key's budget is fixed.** Gamma spent later does not raise an open
+  key's budget; create another key.
+- **Each call sums its key's earlier calls.** A 30-day key with many
+  thousands of calls makes each reserve slower; keep a running total if
+  keys get that busy.
 - **The terms name no governing law.** Subnet 71 has no legal entity
   yet; add one when an entity exists.
 - **Lead orders still exist.** They stay as they are, and off. Retiring them

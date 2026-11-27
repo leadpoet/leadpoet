@@ -50,7 +50,7 @@ MAX_USAGE_PAGE = 500
 CALL_TIMEOUT_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MIN_TAB_SECONDS = 60
-MAX_TAB_SECONDS = 24 * 3600
+MAX_TAB_SECONDS = 30 * 24 * 3600  # a tab is the buyer's API key
 MAX_TAB_MICROUSD = 1_000_000_000  # $1,000
 # Low at launch: what one key may earn in 24 h. Raising it is a code change.
 MAX_KEY_DAILY_CAP_MICROUSD = 20_000_000  # $20

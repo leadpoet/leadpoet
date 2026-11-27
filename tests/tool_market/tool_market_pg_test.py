@@ -596,6 +596,33 @@ def test_calls_in_flight_count_toward_the_unknown_usage_limit(world):
     assert reserve() == "uncertain_limit"
 
 
+def test_a_month_long_api_key_still_counts_toward_the_unknown_usage_limit(world, database):
+    world.miner_key("long-key", 10)
+    month = 30 * 24 * 3600
+    _, token = world.buyer(seconds=month)
+    with pytest.raises(ToolMarketError) as too_long:
+        world.buyer(seconds=month + 1)
+    assert too_long.value.code == "seconds_invalid"
+    tab = market_module.token_hash(token)
+    psycopg2, dsn = database
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    with connection.cursor() as cursor:  # the key was created two days ago, past the append-only trigger
+        cursor.execute("SET session_replication_role=replica")
+        cursor.execute("UPDATE public.tool_market_tabs SET opened_at=opened_at-interval '2 days' "
+                       "WHERE token_hash=%s", (tab,))
+    connection.close()
+    key_id = world.store.book(tool="harvestapi", terms_sha256=world.terms)[0]["key_id"]
+
+    def reserve():
+        return world.store.reserve_call(call_id=str(uuid.uuid4()), token_hash=tab, tool="harvestapi",
+                                        operation="linkedin_profile", key_id=key_id, ask_microusd=10,
+                                        reserve_microusd=11, owed_cap_microusd=10)
+
+    assert [reserve() for _ in range(20)] == ["reserved"] * 20
+    assert reserve() == "uncertain_limit"
+
+
 def test_a_settlement_cannot_charge_more_than_its_reserve_or_settle_twice(world):
     world.miner_key("rule-key", 10_000)
     _, token = world.buyer()

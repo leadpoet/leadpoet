@@ -48,8 +48,8 @@ def test_cheapest_ask_first_and_earlier_wins_a_tie():
 
 
 def test_key_failures_and_rate_limits():
-    assert book.key_failure(402) == "no_credit" and book.key_failure(401) and book.key_failure(403)
-    assert book.key_failure(400) is None and book.key_failure(429) is None
+    assert book.key_failure(402) == "no_credit" and book.key_failure(401)
+    assert not any(book.key_failure(s) for s in (400, 403, 429))
 
 
 def test_get_operations_send_only_listed_params():
@@ -58,7 +58,7 @@ def test_get_operations_send_only_listed_params():
     assert parts.path == "/v2/validate" and parse_qs(parts.query) == {"email": ["ada@acme.com"], "ip_address": ["1.2.3.4"]}
     assert body == b"" and headers == {"accept": "application/json"}  # the vault adds the key
     for params in ({}, {"email": "x", "api_key": "k"}, {"email": 5}, {"email": ""}, {"email": "x" * 321}, "x",
-                   {"email": "\U0001d51e" * 320}):  # 320 characters, but past the vault's 2000 once encoded
+                   {"email": "\U0001d51e" * 320}, {"email": "a\ud800@x.com"}):  # 320 characters, but past the vault's 2000 once encoded
         with pytest.raises(catalog.CatalogError):
             ZB.build(params)
     with pytest.raises(catalog.CatalogError):  # each value fits, but the URL would pass the vault's 4096

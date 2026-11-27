@@ -405,8 +405,8 @@ class ToolMarket:
         status = op.status(response.status, document)
         failure = book.key_failure(status)
         # A 429, Retry-After or not, is the key's limit (its miner's account),
-        # not the buyer's, so another key may serve.
-        if failure is not None or status == 429:
+        # not the buyer's, so another key may serve. A 403 only skips the key.
+        if failure is not None or status in (403, 429):
             settle("skipped", status)  # the real status, also when a 2xx body reported it
             if failure is not None:
                 self._key_failed(op.tool, ask, status, failure)
@@ -452,12 +452,9 @@ class ToolMarket:
         - 401 (a bad key or account) always fails it;
         - 402 (no credit) fails it only when the vendor's free check, due at
           most once a minute per key, sees no balance; otherwise, and for a
-          tool with no check, it only skips the key;
-        - 403 only skips it.
+          tool with no check, it only skips the key.
         """
 
-        if status == 403:
-            return
         if status == 401:
             confirmed = True
         elif vault_tools.TOOLS[tool].balance_url is None or not self._recheck_due(ask.key_id):

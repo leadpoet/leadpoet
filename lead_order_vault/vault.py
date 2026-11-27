@@ -96,7 +96,6 @@ OPENROUTER_CURRENT_KEY_URL = "https://openrouter.ai/api/v1/key"
 OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/keys/{key_hash}"
 
 
-
 class VaultError(Exception):
     def __init__(self, code: str, status: int = 400) -> None:
         super().__init__(code)

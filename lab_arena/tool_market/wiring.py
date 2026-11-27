@@ -9,13 +9,13 @@ vault (``lead_order_vault/deployment.json``, ``LEAD_ORDER_VAULT_CALLER_TOKEN``).
 from __future__ import annotations
 
 import os
-from typing import Mapping, Optional
+from typing import Mapping
 
 from lab_arena import chain as chain_module
 from lab_arena.lead_orders.gamma import GammaBalanceReader
 from lab_arena.lead_orders.vault_client import VaultClient, VaultTransport
 from lab_arena.store import PostgrestTransport
-from lab_arena.tool_market.config import ToolMarketConfigError, load_config
+from lab_arena.tool_market.config import ToolMarketConfig, ToolMarketConfigError
 from lab_arena.tool_market.market import ToolMarket
 from lab_arena.tool_market.store import ToolMarketStore
 from lead_order_vault import trust as vault_trust
@@ -28,11 +28,10 @@ def _required(name: str, env: Mapping[str, str]) -> str:
     return value
 
 
-def build_from_environment(environ: Optional[Mapping[str, str]] = None):
-    """Return ``(config, market)`` for live mode (``gateway_support`` checks the mode)."""
+def build_from_environment(config: ToolMarketConfig):
+    """Return ``(config, market)`` for live mode (``gateway_support`` loads and checks ``config``)."""
 
-    env = os.environ if environ is None else environ
-    config = load_config(env)
+    env = os.environ
     store = ToolMarketStore(PostgrestTransport(
         _required("LAB_ARENA_SUPABASE_URL", env), service_key=_required("LAB_ARENA_SERVICE_KEY", env),
     ))

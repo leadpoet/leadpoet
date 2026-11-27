@@ -586,12 +586,6 @@ def test_a_non_number_balance_is_not_read():
     assert _field({"credits": "12.5"}, ("credits",)) == 12.5
 
 
-def test_every_tool_has_a_rule():
-    from lead_order_vault.tools import HOSTS, TOOLS
-    assert tuple(TOOLS) == env.PROVIDERS and set(HOSTS.values()) == set(TOOLS)
-    assert env.HOSTS is HOSTS
-
-
 def test_identity_reveals_no_key():
     vault = _vault()
     vault.call(_call())

@@ -59,9 +59,19 @@ class Param:
     high: int = 1
     choices: Tuple[str, ...] = ()
 
+    def _text(self, value: Any) -> bool:
+        # JSON allows a lone surrogate, which no request can encode.
+        if not isinstance(value, str) or not 1 <= len(value) <= self.max_length:
+            return False
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
+        return True
+
     def read(self, value: Any) -> Any:
         if self.kind == "str":
-            if not isinstance(value, str) or not 1 <= len(value) <= self.max_length:
+            if not self._text(value):
                 raise CatalogError("param_invalid")
             return value
         if self.kind == "int":
@@ -79,9 +89,8 @@ class Param:
         if self.kind == "str_list":
             if not isinstance(value, list) or not self.low <= len(value) <= self.high:
                 raise CatalogError("param_invalid")
-            for item in value:
-                if not isinstance(item, str) or not 1 <= len(item) <= self.max_length:
-                    raise CatalogError("param_invalid")
+            if not all(self._text(item) for item in value):
+                raise CatalogError("param_invalid")
             return list(value)
         raise AssertionError(self.kind)
 

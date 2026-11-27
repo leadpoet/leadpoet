@@ -125,9 +125,9 @@ Health events come from vault checks and from calls.
   423 (paused, read as 401) and Hunter's 429 (out of searches).
 - A buyer shapes the request, so that answer alone does not always take a
   key out of the book. A 401 (a bad key or a paused account) marks it
-  `failed`. A 402 marks it `failed` only when the vendor's free check sees no
-  balance; a tool with no check, or a key checked in the last minute, only
-  skips the key. A 403 only skips it.
+  `failed`. A 402 takes it out only when the vendor's free check finds no
+  balance (`invalid`) or none to read (`failed`); a tool with no check, or a
+  key checked in the last minute, only skips the key. A 403 only skips it.
 - A key goes to the back of its book, still in it, after a 429 in the
   last minute, or in the last hour a 402 that did not fail it, a 403 or
   unknown usage, each for 3 different buyers. A buyer can shape each of those,
@@ -260,8 +260,6 @@ deployment, exactly as lead orders do.
   Prospeo match that is not a free re-enrichment, an email from Findymail
   or Hunter, any HarvestAPI 2xx. Prospeo's rule is read from its docs, not
   from a bill; check it against a miner's statement before scaling.
-- **ZeroBounce cannot tell a dead key from an empty account.** Both mark
-  the key `no_credit` until its miner asks for a check.
 - **One hotkey per miner is assumed.** The own-key rule, the daily caps
   and the 30-day registration limit are per hotkey. A miner with several
   hotkeys can buy from themselves; with the 10% margin that loses money

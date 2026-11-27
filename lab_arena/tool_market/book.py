@@ -63,7 +63,7 @@ def rank(asks: Iterable[Ask]) -> List[Ask]:
 def key_failure(status: int) -> Optional[str]:
     """A vendor answer that says the key itself is unusable, not the request."""
 
-    return {401: "unauthorized", 402: "no_credit", 403: "forbidden"}.get(int(status))
+    return {401: "unauthorized", 402: "no_credit"}.get(int(status))
 
 
 __all__ = [

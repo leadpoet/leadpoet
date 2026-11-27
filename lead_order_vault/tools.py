@@ -117,4 +117,4 @@ TOOLS: Mapping[str, Tool] = {
 HOSTS: Mapping[str, str] = {tool.host: name for name, tool in TOOLS.items()}
 assert len(HOSTS) == len(TOOLS)
 
-__all__ = ["HOSTS", "OPENROUTER_ROUTES", "TOOLS", "Tool", "shape"]
+__all__ = ["HOSTS", "TOOLS", "Tool"]

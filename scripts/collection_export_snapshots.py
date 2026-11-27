@@ -67,7 +67,7 @@ def _reason(exc):
 
 def _pack(raw, prompt, source, objects, directory, scenario, members, previous):
     """A missing or unsafe attempt must not hide its independently verified siblings."""
-    ready = {rid for rid, row in members.items() if row["state"] == "settled"}
+    ready = {rid for rid, row in members.items() if row["state"] in {"settled", "partial_billing_pending"}}
     held = {}
     result = {"members": members, "held": held, "export_version": 2}
     if not ready:
@@ -225,6 +225,8 @@ def observe(private_root, directory, db, objects, previous=None, *, max_groups=3
                     if j["status"] not in TERMINAL
                     else ("billing_pending" if auth["unresolved"] else "settled")
                 )
+                if experiment and state == "billing_pending" and j["status"] == "failed":
+                    state = "partial_billing_pending"
                 by_case[j["scenario_id"]][rid] = {
                     "state": state,
                     "job_status": j["status"],

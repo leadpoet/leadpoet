@@ -338,6 +338,25 @@ class ToolMarket:
         return {"tools": tools}
 
     # Calls ------------------------------------------------------------------
+    def lead_search_validation(self, token: str, request: Mapping[str, Any]) -> dict:
+        """Adapt Lead Search's raw-v2 ZeroBounce contract at the buyer boundary."""
+        ceiling = self._config.lead_search_verify_max_ask
+        if ceiling is None:
+            raise ToolMarketError(404, "verification_route_disabled")
+        if set(request) - {"payload", "forceToolRefresh"} or not isinstance(request.get("payload"), dict) or (
+            type(request.get("forceToolRefresh", False)) is not bool
+        ):
+            raise ToolMarketError(400, "request_invalid")
+        # This endpoint serves platform customer data. Every call requires private supply.
+        result = self.call(token, {"tool": "zerobounce", "operation": "validate",
+                                     "params": request["payload"], "private": True, "max_ask_microusd": ceiling})
+        status, body = result["status"], result["body"]
+        op = catalog.operation("zerobounce", "validate")
+        answered = 200 <= op.status(status, body) < 300 and op.units(status, body) is not None
+        return {"call_id": result["call_id"], "status": "completed" if answered else "failed",
+                "toolResponse": {"raw": body} if answered else {},
+                "billing": {"cost_usd": result["charge_microusd"] / 1_000_000}}
+
     def call(self, token: str, body: Mapping[str, Any]) -> Dict[str, Any]:
         if not isinstance(body, Mapping) or set(body) - {"params", "max_ask_microusd", "private"} \
                 != {"tool", "operation"}:

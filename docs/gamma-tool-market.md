@@ -147,7 +147,7 @@ same vendors. Each one bills per request or reports its own cost.
 
 ## Using the existing Lead Search client
 
-For an approved ZeroBounce pilot, pass the existing site client a tab token as
+Set `LEADPOET_TOOL_MARKET_VERIFY_MAX_ASK_MICROUSD` to the maximum supplier ask for this lookup; leaving it unset disables the compatibility endpoint. For example, an incumbent cost of 6,490 micro-USD requires an ask of at most 5,899 to beat it after the fee. For an approved ZeroBounce pilot, pass the existing site client a tab token as
 `credentials.apiKey` and the gateway origin plus `/tool-market` as
 `credentials.hostUrl` **for that operation only**. Its existing
 `POST /api/v2/integrations/zerobounce_validate/execute` sends
@@ -254,6 +254,8 @@ no longer change, so paging never skips one. Each call's own answer already
 carries its charge.
 
 ## Money
+
+The database binds buyer credit to one Gamma service, genesis, subnet and subnet registration block. Repointing that ledger requires explicit reconciliation.
 
 All amounts are integer micro-USD.
 

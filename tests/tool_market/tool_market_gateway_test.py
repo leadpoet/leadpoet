@@ -14,12 +14,13 @@ from gateway.api import tool_market as routes
 from lab_arena.chain import wallet_signature_verifier
 from lab_arena.store import ArenaStoreError
 from lab_arena.tool_market.config import ToolMarketConfig
-from lab_arena.tool_market.market import ToolMarketError
+from lab_arena.tool_market.market import ToolMarket, ToolMarketError
 
 ALICE = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
 
 
 class FakeMarket:
+    lead_search_validation = ToolMarket.lead_search_validation
     def __init__(self):
         self.used = set()
         self.seen = []
@@ -163,6 +164,7 @@ def test_usage_is_signed_and_pages_by_a_strict_watermark(client):
 
 def test_lead_search_raw_v2_verification_preserves_vendor_verdict_and_actual_charge(client):
     market = enable()
+    market._config = ToolMarketConfig(lead_search_verify_max_ask=5899)
     calls = []
     def verify(token, body):
         calls.append((token, body))
@@ -174,7 +176,7 @@ def test_lead_search_raw_v2_verification_preserves_vendor_verdict_and_actual_cha
     assert response.status_code == 200
     assert response.json() == {"status": "completed", "toolResponse": {"raw": {"status": "invalid"}},
                                "billing": {"cost_usd": 0.0051}, "call_id": "call1"}
-    assert calls == [("tab", {"tool": "zerobounce", "operation": "validate", "private": True,
+    assert calls == [("tab", {"tool": "zerobounce", "operation": "validate", "private": True, "max_ask_microusd": 5899,
                                "params": {"email": "fixture@example.test"}})]
     assert client.post(url, json={"payload": {}, "forceToolRefresh": "yes"}).status_code == 400
     assert len(calls) == 1

@@ -15,10 +15,11 @@ from urllib.parse import urlsplit
 from lab_arena.lead_orders.auth import normalize_host
 from lab_arena.lead_orders.config import is_valid_hotkey
 from lab_arena.lead_orders.config import GAMMA_SERVICE_ENV as LEAD_ORDERS_GAMMA_SERVICE_ENV
-from lab_arena.tool_market.catalog import TOOLS
+from lab_arena.tool_market.catalog import MAX_ASK, TOOLS
 
 MODE_ENV = "LEADPOET_TOOL_MARKET_MODE"
 TOOLS_OFF_ENV = "LEADPOET_TOOL_MARKET_TOOLS_OFF"
+VERIFY_MAX_ASK_ENV = "LEADPOET_TOOL_MARKET_VERIFY_MAX_ASK_MICROUSD"
 APPROVED_SUPPLIERS_ENV = "LEADPOET_TOOL_MARKET_APPROVED_SUPPLIERS"
 BUYERS_ENV = "LEADPOET_TOOL_MARKET_BUYER_HOTKEYS"
 PRIVATE_SUPPLIERS_ENV = "LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS"
@@ -56,6 +57,7 @@ class ToolMarketConfig:
     terms_sha256: str = ""
     public_base_url: str = ""
 
+    lead_search_verify_max_ask: Optional[int] = None
     approved_suppliers: FrozenSet[Tuple[str, str]] = frozenset()
 
     def may_supply(self, tool: str, hotkey: str) -> bool:
@@ -91,7 +93,12 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
         if tool not in TOOLS or not is_valid_hotkey(hotkey):
             raise ToolMarketConfigError("%s requires tool:hotkey pairs" % APPROVED_SUPPLIERS_ENV)
         approved.add((tool, hotkey))
+    verify_limit = env.get(VERIFY_MAX_ASK_ENV, "").strip()
+    if verify_limit and not (verify_limit.isascii() and verify_limit.isdigit() and len(verify_limit) <= 6
+                             and 0 < int(verify_limit) <= MAX_ASK[TOOLS["zerobounce"]]):
+        raise ToolMarketConfigError("%s must be a positive per-call ask within the catalog limit" % VERIFY_MAX_ASK_ENV)
     config = ToolMarketConfig(
+        lead_search_verify_max_ask=int(verify_limit) if verify_limit else None,
         mode=mode, tools=tools, approved_suppliers=frozenset(approved), buyer_hotkeys=buyers, private_suppliers=private,
         gamma_service=env.get(GAMMA_SERVICE_ENV, "").strip(),
         terms_version=env.get(TERMS_VERSION_ENV, "").strip(),

@@ -24,7 +24,7 @@ def test_private_platform_lookup_from_funded_tab_to_miner_statement(store, monke
     cfg = ToolMarketConfig(mode="live", tools=frozenset({"zerobounce"}), gamma_service=miner.ss58_address,
                            public_base_url="https://gw.example", terms_version=version, terms_sha256=digest,
                            approved_suppliers=frozenset({("zerobounce", miner.ss58_address)}),
-                           private_suppliers=frozenset({miner.ss58_address}))
+                           lead_search_verify_max_ask=5000, private_suppliers=frozenset({miner.ss58_address}))
     secret = "fixture-zb-key"
     statuses = iter(["valid", "unknown"])
     def provider(method, host, target, headers, body, timeout, limit):
@@ -75,6 +75,10 @@ def test_private_platform_lookup_from_funded_tab_to_miner_statement(store, monke
                 result = response.json()
                 assert result["status"] == "completed" and result["toolResponse"]["raw"]["status"] == verdict
                 assert result["billing"]["cost_usd"] == cost and secret not in response.text
+            signed(miner, "/tool-market/asks", dict(key_id=listing["key_id"], ask_microusd=5001))
+            refused = http.post("/tool-market/api/v2/integrations/zerobounce_validate/execute",
+                                headers=headers, json={"payload": {"email": "buyer@example.test"}})
+            assert refused.status_code == 503 and refused.json()["error"] == "no_supply"
             keys = signed(miner, "/tool-market/statement")["keys"]
             assert keys[0]["calls"] == 2 and keys[0]["owed_microusd"] == 5000
     finally:

@@ -164,8 +164,8 @@ async def call(request: Request) -> Response:
 @router.post("/tool-market/api/v2/integrations/zerobounce_validate/execute")
 async def lead_search_validation(request: Request) -> Response:
     token = _bearer(request)
-    return await _handle(request, lambda market, who, body: support.lead_search_validation(
-        market, token, _json(body)), signed=False, limiter=_call_threads)
+    return await _handle(request, lambda market, who, body: market.lead_search_validation(
+        token, _json(body)), signed=False, limiter=_call_threads)
 
 
 @router.get("/tool-market/tab")

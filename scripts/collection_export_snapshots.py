@@ -183,8 +183,10 @@ def observe(private_root, directory, db, objects, previous=None, *, max_groups=1
             old = json.loads(contents)["offers"]
         prompt = json.loads(read_file(private_root / "prompt.json"))
         paid = private_root / "paid"
-        manifests = [paid / "batch.json", *sorted((paid / "offers").glob("dv-*.json")),
-                     *sorted((paid / "offers").glob("pool-*.json"))]
+        legacy = paid / "batch.json"
+        manifests = ([legacy] if legacy.is_file() else []) + sorted(
+            path for path in (paid / "offers").glob("*.json") if path.name.startswith(("dv-", "pool-"))
+        )
         inputs = {}
         work = []
         offers = {}
@@ -192,7 +194,7 @@ def observe(private_root, directory, db, objects, previous=None, *, max_groups=1
             raw = json.loads(read_file(path))
             experiment = load_experiment(raw, prompt) if raw.get("payment_rule") == POOL_PAYMENT_RULE else None
             batch = experiment.batch_id if experiment else load_batch(raw, prompt).batch_id
-            if path != manifests[0] and path.stem != batch:
+            if path != legacy and path.stem != batch:
                 raise ValueError("paid manifest name differs from its contents")
             if batch in inputs:
                 continue

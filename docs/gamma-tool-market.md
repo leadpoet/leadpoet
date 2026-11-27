@@ -70,8 +70,9 @@ calculation](gamma-tool-market-economics.md).
    asking more serves the call.
 
 Both buyers and miners sign the configured terms (`POST /tool-market/terms`,
-text in `docs/tool-market-terms.md`) before they trade, and again whenever
-their version changes.
+text in `docs/tool-market-terms.md`) before they trade. A new version
+applies to tabs a buyer opens after accepting it, and to a miner's keys
+once the miner accepts it; a tab already open keeps its terms.
 
 ## For buyers
 

@@ -396,14 +396,11 @@ BEGIN
 END;
 $open_tab770$;
 
--- Whose tab a token opens, whether it is open and whether its buyer signed
--- the current terms: the call path's first read. A tab lives 30 days, so a
--- terms change must reach tabs opened before it.
-CREATE FUNCTION public.tool_market_tab_state_v1(p_token_hash TEXT,p_terms_sha256 TEXT)
+-- Whose tab a token opens and whether it is open: the call path's first
+-- read. A tab keeps the terms it was opened under (terms section 9).
+CREATE FUNCTION public.tool_market_tab_state_v1(p_token_hash TEXT)
 RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $tab_state770$
- SELECT jsonb_build_object('hotkey',t.hotkey,'open',public.tool_market__tab_open_v1(t),
-  'terms',EXISTS(SELECT 1 FROM public.tool_market_terms x WHERE x.role='buyer' AND x.hotkey=t.hotkey
-   AND x.terms_sha256=p_terms_sha256))
+ SELECT jsonb_build_object('hotkey',t.hotkey,'open',public.tool_market__tab_open_v1(t))
  FROM public.tool_market_tabs t WHERE t.token_hash=p_token_hash;
 $tab_state770$;
 

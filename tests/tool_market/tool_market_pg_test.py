@@ -563,13 +563,19 @@ def test_a_tab_stops_buying_when_its_buyer_leaves_the_allowlist(world):
     assert (gone.value.status, gone.value.code) == (403, "buyer_not_allowed") and world.vendor.sent == []
 
 
-def test_a_month_long_tab_stops_buying_when_the_terms_change(world):
-    world.miner_key("terms-key", 10_000)
-    _, token = world.buyer()
-    world.market._config = dataclasses.replace(world.market._config, terms_sha256="ab" * 32)
-    with pytest.raises(ToolMarketError) as stale:
+def test_new_terms_reach_tabs_opened_after_the_buyer_accepts_them(world):
+    miner, _ = world.miner_key("terms-key", 10_000)
+    buyer, token = world.buyer()
+    world.terms = "ab" * 32
+    world.market._config = dataclasses.replace(world.market._config, terms_sha256=world.terms)
+    with pytest.raises(ToolMarketError):  # its miner has not accepted them yet
         world.market.call(token, PROFILE)
-    assert (stale.value.status, stale.value.code) == (403, "terms_required") and world.vendor.sent == []
+    world.accept(miner, "miner")
+    world.market.call(token, PROFILE)  # terms section 9: an open tab keeps the terms it was opened under
+    assert len(world.vendor.sent) == 1
+    with pytest.raises(ToolMarketError) as new:
+        world.market.open_tab(world.who(buyer), {"budget_microusd": 100_000, "seconds": 600})
+    assert (new.value.status, new.value.code) == (403, "terms_required")
 
 
 def test_a_miner_checks_one_key_at_a_time(world):

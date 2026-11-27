@@ -240,6 +240,15 @@ def _found_email(container: str) -> Callable[[Any], Optional[int]]:
     return read
 
 
+def _exa_search_body(values: Dict[str, Any]) -> Dict[str, Any]:
+    category = values.get("category")
+    if category in ("company", "people") and ("startPublishedDate" in values or "endPublishedDate" in values):
+        raise CatalogError("param_invalid")
+    if category == "people" and "excludeDomains" in values:
+        raise CatalogError("param_invalid")
+    return values
+
+
 def _prospeo_body(values: Dict[str, Any]) -> Dict[str, Any]:
     person = dict(values)
     flag = person.pop("only_verified_email", None)
@@ -294,14 +303,14 @@ _OPERATIONS: Sequence[Operation] = (
     # Exa: each answer carries ``costDollars.total``, which Exa calls an estimate.
     Operation("exa", "search", "POST", _EXA + "/search", UNIT_VENDOR_USD, 50_000,
               {"query": Param("str", required=True, max_length=2000), "numResults": Param("int", high=25),
-               "type": Param("enum", choices=("auto", "neural", "keyword", "fast")),
-               "category": Param("enum", choices=("company", "people", "news", "research paper", "pdf",
+               "type": Param("enum", choices=("auto", "fast")),
+               "category": Param("enum", choices=("company", "people", "news", "publication", "research paper", "pdf",
                                                   "github", "tweet", "personal site", "linkedin profile",
                                                   "financial report")),
                "includeDomains": Param("str_list", max_length=200, high=100),
                "excludeDomains": Param("str_list", max_length=200, high=100),
                "startPublishedDate": Param("str", max_length=40), "endPublishedDate": Param("str", max_length=40)},
-              cost=_usd_field("costDollars", "total"), does="Search the web for pages, companies or people."),
+              cost=_usd_field("costDollars", "total"), wrap=_exa_search_body, does="Search the web for pages, companies or people."),
     Operation("exa", "contents", "POST", _EXA + "/contents", UNIT_VENDOR_USD, 50_000,
               {"urls": Param("str_list", required=True, max_length=500, high=10), "text": Param("bool"),
                "highlights": Param("bool")},

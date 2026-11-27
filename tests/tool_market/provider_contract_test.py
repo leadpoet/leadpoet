@@ -31,3 +31,21 @@ def test_unrecognized_zero_bounce_verdict_does_not_create_a_charge():
 ])
 def test_charge_needs_a_typed_usage_signal(tool, name, document):
     assert operation(tool, name).units(200, document) is None
+
+
+@pytest.mark.parametrize("extra", [
+    {"type": "neural"}, {"type": "keyword"},
+    {"category": "people", "excludeDomains": ["example.com"]},
+    {"category": "company", "startPublishedDate": "2026-01-01"},
+    {"category": "people", "endPublishedDate": "2026-01-01"},
+])
+def test_exa_rejects_provider_unsupported_searches_before_a_key_is_used(extra):
+    from lab_arena.tool_market.catalog import CatalogError
+    with pytest.raises(CatalogError):
+        operation("exa", "search").build({"query": "payroll", **extra})
+
+
+def test_exa_supports_publication_search():
+    import json
+    params = {"query": "fraud detection", "category": "publication", "type": "auto"}
+    assert json.loads(operation("exa", "search").build(params)[2]) == params

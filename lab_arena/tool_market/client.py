@@ -53,6 +53,10 @@ class Client:
         parts = urlsplit(url)
         if not (parts.scheme == "https" or (parts.scheme == "http" and parts.hostname in _LOCAL_HOSTS)):
             raise ValueError("the gateway URL must be https")
+        if not parts.hostname or parts.username is not None or parts.password is not None or (
+            parts.path not in ("", "/") or parts.query or parts.fragment
+        ):
+            raise ValueError("the gateway URL must be an origin without credentials, query or path")
         self.url = url.rstrip("/")
         self.api_key = api_key
         self.keypair = keypair
@@ -132,12 +136,15 @@ def mcp_answer(client: Client, message: Dict[str, Any]) -> Optional[Dict[str, An
         if name == "find_tool":
             answer = client.tools()
         elif name == "call_tool":
+            if not isinstance(arguments, dict) or type(arguments.get("private", False)) is not bool:
+                return {"jsonrpc": "2.0", "id": message["id"],
+                        "error": {"code": -32602, "message": "call_tool requires a boolean private option"}}
             answer = client.call(str(arguments.get("tool", "")), str(arguments.get("operation", "")),
                                  arguments.get("params") or {}, arguments.get("max_ask_microusd"),
                                  arguments.get("private") is True)
         else:
             return {"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32602, "message": "unknown tool"}}
-        result = {"content": [{"type": "text", "text": json.dumps(answer)}], "isError": "error" in answer}
+        result = {"content": [{"type": "text", "text": json.dumps(answer)}], "isError": "error" in answer or (isinstance(answer.get("status"), int) and answer["status"] >= 400)}
     else:
         return {"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32601, "message": "method not found"}}
     return {"jsonrpc": "2.0", "id": message["id"], "result": result}
@@ -193,6 +200,7 @@ def main(argv: Optional[list] = None) -> int:
     call.add_argument("tool")
     call.add_argument("operation")
     call.add_argument("params", nargs="*")
+    call.add_argument("--max-ask-microusd", type=int, help="maximum miner ask per unit before the fee")
     call.add_argument("--private", action="store_true", help="only suppliers that keep the request private")
     commands.add_parser("mcp", help="run the MCP server on stdio")
     args = parser.parse_args(argv)
@@ -232,7 +240,7 @@ def main(argv: Optional[list] = None) -> int:
                 params[name.removesuffix(":")] = json.loads(text) if name.endswith(":") else text
             except ValueError:
                 parser.error("%s is not JSON" % name)
-        answer = client.call(args.tool, args.operation, params, private=args.private)
+        answer = client.call(args.tool, args.operation, params, max_ask_microusd=args.max_ask_microusd, private=args.private)
     else:
         serve_mcp(client)
         return 0

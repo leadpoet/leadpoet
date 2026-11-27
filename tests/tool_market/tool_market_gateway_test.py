@@ -159,3 +159,26 @@ def test_usage_is_signed_and_pages_by_a_strict_watermark(client):
     client.get("/tool-market/usage?after=-1", headers=signed("/tool-market/usage", b"", method="GET"))
     assert market.seen[-1] == ("usage", ALICE, None, 100)  # not digits: the market refuses it
     assert client.get("/tool-market/usage").status_code == 401
+
+
+def test_lead_search_raw_v2_verification_preserves_vendor_verdict_and_actual_charge(client):
+    market = enable()
+    calls = []
+    def verify(token, body):
+        calls.append((token, body))
+        return {"call_id": "call1", "status": 200, "body": {"status": "invalid"}, "charge_microusd": 5100}
+    market.call = verify
+    url = "/tool-market/api/v2/integrations/zerobounce_validate/execute"
+    response = client.post(url, headers={"Authorization": "Bearer tab"}, json={
+        "payload": {"email": "fixture@example.test"}, "forceToolRefresh": True})
+    assert response.status_code == 200
+    assert response.json() == {"status": "completed", "toolResponse": {"raw": {"status": "invalid"}},
+                               "billing": {"cost_usd": 0.0051}, "call_id": "call1"}
+    assert calls == [("tab", {"tool": "zerobounce", "operation": "validate", "private": True,
+                               "params": {"email": "fixture@example.test"}})]
+    assert client.post(url, json={"payload": {}, "forceToolRefresh": "yes"}).status_code == 400
+    assert len(calls) == 1
+    market.call = lambda *_: {"call_id": "call2", "status": 200, "body": {}, "charge_microusd": 0}
+    assert client.post(url, json={"payload": {}}).json()["status"] == "failed"
+    market.call = lambda *_: {"call_id": "call3", "status": 500, "body": {}, "charge_microusd": 0}
+    assert client.post(url, json={"payload": {}}).json()["status"] == "failed"

@@ -4,10 +4,10 @@ The Subnet 71 tool market sells metered access to go-to-market (GTM) data tools.
 Miners supply the vendor keys and set a price per unit. Agents and buyers
 pay in Gamma and call one API. Gamma is Subnet 71's on-chain spending: what a
 buyer's hotkey spent to the market's Gamma service on netuid 71
-(`GammaSpent`). Each call goes to the cheapest healthy key.
+(`GammaSpent`). Each call selects an eligible key from the price-ranked book, subject to health, privacy, price and budget limits. The attested vault and the vendor execute the request. Miners supply the account capacity.
 
 It is off by default. Every route answers 404 until
-`LEADPOET_TOOL_MARKET_MODE=live`. Once live, every catalog tool trades.
+`LEADPOET_TOOL_MARKET_MODE=live`. In live mode a tool needs an approved supplier before it can serve calls.
 `LEADPOET_TOOL_MARKET_TOOLS_OFF` turns single tools off, for example
 `exa,hunter`.
 
@@ -17,7 +17,7 @@ It is off by default. Every route answers 404 until
    machine (`python -m lead_order_vault.cli seal`). They then send the
    envelope to `POST /tool-market/keys`, signed with their hotkey.
    - Leadpoet stores only the envelope. Only the vault can open it.
-   - The body carries the miner's signed attestation (below).
+   - The operator first approves the provider agreement for this tool and supplier. The body also carries the miner's signed attestation (below).
    - The vault checks the key with the vendor's free balance call, if the
      vendor has one. A key with no credit is refused.
    - The same vendor key can be listed only once at a time.
@@ -123,6 +123,30 @@ same vendors. Each one bills per request or reports its own cost.
 | [HarvestAPI](https://docs.harvestapi.io/) | per call | `linkedin_profile`, `linkedin_company` | no |
 | [Exa](https://docs.exa.ai/reference/search) | vendor USD (`costDollars.total`) | `search`, `contents` | no |
 
+## Using the existing Lead Search client
+
+For an approved ZeroBounce pilot, pass the existing site client a tab token as
+`credentials.apiKey` and the gateway origin plus `/tool-market` as
+`credentials.hostUrl` **for that operation only**. Its existing
+`POST /api/v2/integrations/zerobounce_validate/execute` sends
+`{"payload":{"email":"person@example.org"}}`. The adapter uses the same
+market reservation and settlement as a native call, requires private supply,
+and returns the raw vendor verdict under `toolResponse.raw` with the buyer's
+actual charge in `billing.cost_usd`. Every accepted request is a fresh lookup.
+A vendor error or malformed verdict is a failed lookup. Retain the client
+timeout and the original privacy policy. An ambiguous timeout needs
+reconciliation before sending another paid request.
+
+This adapter covers only ZeroBounce verification. Lead Search also uses
+CrustData, Harvest jobs/search/posts/reactions, email discovery, bulk tools
+and multi-step plays. Even an identically named profile operation can use
+different fields, enrichment options and prices. Test other operations against
+the platform's existing parser, expected fields, error and billing contracts
+before routing them. The platform keeps the lead-search orchestration,
+ranking, verification and customer interface.
+
+[Platform client and BYOK accounting](https://github.com/leadpoet/leadpoet-site/blob/932f97a1b38cc6999dec5dac7161facd094fbc52/server/deepline.ts)
+
 ## Miner attestation
 
 A miner lists a key only by signing, with their hotkey, this exact
@@ -145,7 +169,7 @@ versioned: a new version is asked for at the next listing.
 
 A key is in its tool's book only while all of these hold:
 
-- it is listed and not revoked;
+- the operator approved this supplier for this tool, and the key is listed and not revoked;
 - its miner accepted the current terms;
 - its latest ask is a price, not a withdrawal;
 - its latest health event is `valid` or `unchecked`;
@@ -215,8 +239,7 @@ All amounts are integer micro-USD.
   Units are capped at the operation's maximum.
 - **What the buyer pays:** `charge = ceil(owed × 1.10)`.
 - **Example:** a call asked at $0.01 charges the buyer $0.011, and the
-  miner is owed $0.01. The 10% is the subnet's margin; Leadpoet is one
-  buyer among others.
+  miner is owed $0.01. The spread is 10% of the miner ask (about 9.09% of the buyer charge before operating costs). It is a ledger difference. Gamma spend does not transfer cash to Leadpoet.
 - **Unknown usage:** sometimes the usage is unknown, such as a 5xx answer,
   a timeout, or a 2xx with no cost in it. Then the buyer pays nothing and
   the miner is owed nothing. The miner bears that risk, at most the key's
@@ -253,6 +276,7 @@ All tool-market data is in `scripts/770-tool-market.sql`.
 | Variable | Meaning |
 | --- | --- |
 | `LEADPOET_TOOL_MARKET_MODE` | `off` (default) or `live` |
+| `LEADPOET_TOOL_MARKET_APPROVED_SUPPLIERS` | comma-separated `tool:miner_hotkey` pairs reviewed for third-party resale. Empty by default. Remove the pair and reload gateway configuration to stop new routing. Private supply also requires separate privacy approval. |
 | `LEADPOET_TOOL_MARKET_TOOLS_OFF` | comma-separated tools turned off; empty by default, so all trade |
 | `LEADPOET_TOOL_MARKET_BUYER_HOTKEYS` | optional allowlist of buyer hotkeys, for a staff rollout |
 | `LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS` | hotkeys of miners with a private-supply agreement; serve private calls |
@@ -279,15 +303,14 @@ deployment, exactly as lead orders do.
 - **The vendor's answer sets the usage.** Leadpoet counts a credit when the
   answer shows one was spent: a ZeroBounce result other than `unknown`, a
   Prospeo match that is not a free re-enrichment, an email from Findymail
-  or Hunter, any HarvestAPI 2xx. Prospeo's rule is read from its docs, not
+  or Hunter, a successful HarvestAPI profile or company result. Prospeo's rule is read from its docs, not
   from a bill; check it against a miner's statement before scaling.
 - **One hotkey per miner is assumed.** The own-key rule, the daily caps
   and the 30-day registration limit are per hotkey. A miner with several
   hotkeys can buy from themselves; with the 10% margin that loses money
   until payouts are wired, so payouts must value what a buyer burns and
   what a miner earns at the same per-epoch price.
-- **Day 1 has no operator hold.** Ops can turn a whole tool off
-  (`LEADPOET_TOOL_MARKET_TOOLS_OFF`) but cannot hold one key or miner.
+- **Supplier approval is per provider and miner.** Reload the list to stop new calls for that pair. Existing in-flight calls can still settle.
 - **A running vault is trusted until it restarts.** The gateway checks the
   vault's keys against the KMS on each connect, and only an approved build
   gets those keys. Removing an approval on Base does not stop a vault

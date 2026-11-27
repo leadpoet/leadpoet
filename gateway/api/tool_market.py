@@ -115,9 +115,12 @@ async def _handle(request: Request, work: Callable[[Any, Any, bytes], Any], *, s
     if not config.enabled or market is None:
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     try:
-        body = await request.body()
-        if len(body) > MAX_BODY_BYTES:
-            raise support.ToolMarketError(413, "request_too_large")
+        buf = bytearray()
+        async for chunk in request.stream():
+            if len(buf) + len(chunk) > MAX_BODY_BYTES:
+                raise support.ToolMarketError(413, "request_too_large")
+            buf.extend(chunk)
+        body = bytes(buf)
         identity = None
         if signed:
             headers = request.headers
@@ -156,6 +159,13 @@ async def call(request: Request) -> Response:
     token = _bearer(request)
     return await _handle(request, lambda m, who, body: m.call(token, _json(body)), signed=False,
                          limiter=_call_threads)
+
+
+@router.post("/tool-market/api/v2/integrations/zerobounce_validate/execute")
+async def lead_search_validation(request: Request) -> Response:
+    token = _bearer(request)
+    return await _handle(request, lambda market, who, body: support.lead_search_validation(
+        market, token, _json(body)), signed=False, limiter=_call_threads)
 
 
 @router.get("/tool-market/tab")

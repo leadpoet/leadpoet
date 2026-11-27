@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import FrozenSet, Mapping, Optional
+from typing import FrozenSet, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
 
 from lab_arena.lead_orders.auth import normalize_host
@@ -19,6 +19,7 @@ from lab_arena.tool_market.catalog import TOOLS
 
 MODE_ENV = "LEADPOET_TOOL_MARKET_MODE"
 TOOLS_OFF_ENV = "LEADPOET_TOOL_MARKET_TOOLS_OFF"
+APPROVED_SUPPLIERS_ENV = "LEADPOET_TOOL_MARKET_APPROVED_SUPPLIERS"
 BUYERS_ENV = "LEADPOET_TOOL_MARKET_BUYER_HOTKEYS"
 PRIVATE_SUPPLIERS_ENV = "LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS"
 GAMMA_SERVICE_ENV = "LEADPOET_TOOL_MARKET_GAMMA_SERVICE"
@@ -55,6 +56,11 @@ class ToolMarketConfig:
     terms_sha256: str = ""
     public_base_url: str = ""
 
+    approved_suppliers: FrozenSet[Tuple[str, str]] = frozenset()
+
+    def may_supply(self, tool: str, hotkey: str) -> bool:
+        return tool in self.tools and (tool, hotkey) in self.approved_suppliers
+
     @property
     def enabled(self) -> bool:
         return self.mode == MODE_LIVE
@@ -78,8 +84,15 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
     tools = frozenset(TOOLS) - off
     buyers = frozenset(h.strip() for h in env.get(BUYERS_ENV, "").split(",") if h.strip())
     private = frozenset(h.strip() for h in env.get(PRIVATE_SUPPLIERS_ENV, "").split(",") if h.strip())
+    # Approval records the operator's review of this supplier's provider agreement.
+    approved = set()
+    for item in filter(None, (s.strip() for s in env.get(APPROVED_SUPPLIERS_ENV, "").split(","))):
+        tool, _, hotkey = item.partition(":")
+        if tool not in TOOLS or not is_valid_hotkey(hotkey):
+            raise ToolMarketConfigError("%s requires tool:hotkey pairs" % APPROVED_SUPPLIERS_ENV)
+        approved.add((tool, hotkey))
     config = ToolMarketConfig(
-        mode=mode, tools=tools, buyer_hotkeys=buyers, private_suppliers=private,
+        mode=mode, tools=tools, approved_suppliers=frozenset(approved), buyer_hotkeys=buyers, private_suppliers=private,
         gamma_service=env.get(GAMMA_SERVICE_ENV, "").strip(),
         terms_version=env.get(TERMS_VERSION_ENV, "").strip(),
         terms_sha256=env.get(TERMS_SHA256_ENV, "").strip().lower(),

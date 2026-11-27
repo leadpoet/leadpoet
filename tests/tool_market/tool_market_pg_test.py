@@ -486,6 +486,7 @@ def test_a_key_stops_trading_at_its_daily_cap(world):
     with pytest.raises(ToolMarketError) as capped:
         world.market.call(token, PROFILE)  # 40,000 earned + 10,000 more would pass 45,000
     assert capped.value.code == "no_supply"
+    assert world.market.order_book("harvestapi")["asks"] == []  # 5,000 left fits no call
 
 
 def test_unknown_usage_counts_toward_a_keys_daily_cap_a_quarter_per_buyer(world):

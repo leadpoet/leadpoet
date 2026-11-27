@@ -306,11 +306,14 @@ class ToolMarket:
 
     # Public book ------------------------------------------------------------
     def order_book(self, tool: Any) -> Dict[str, Any]:
-        """Asks for one tool, cheapest first, with what a buyer pays per unit."""
+        """Asks for one tool, cheapest first, with what a buyer pays per unit.
+        A key with no room left today for any call is not listed."""
 
         if tool not in self._config.tools:
             raise ToolMarketError(404, "tool_unavailable")
-        asks = book.rank(book.Ask.from_row(row) for row in self._supply(tool))
+        ops = [op for op in catalog.OPERATIONS.values() if op.tool == tool]
+        asks = [a for a in book.rank(book.Ask.from_row(row) for row in self._supply(tool))
+                if min(book.owed_microusd(op, op.max_units, a.ask_microusd) for op in ops) <= a.remaining_microusd]
         return {"tool": tool, "unit": catalog.TOOLS[tool],
                 "operations": sorted(name for (t, name) in catalog.OPERATIONS if t == tool),
                 "request_privacy": catalog.REQUEST_PRIVACY[tool],

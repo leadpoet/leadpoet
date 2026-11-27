@@ -32,7 +32,9 @@ from gateway.observability.otel_bootstrap import (
     ARENA_TASK_SCOPE,
     ARENA_TASK_STAGES,
     ARENA_LIFECYCLE_STAGES,
+    DEFERRAL_REASON_STAGES,
     LIFECYCLE_TASK_SPAN_ATTRIBUTE_TYPES,
+    REASONED_TASK_SPAN_ATTRIBUTE_TYPES,
     PROVIDER_SPAN_ATTRIBUTE_ALLOWLIST,
     RUN_IDENTITY_ATTRIBUTE_ALLOWLIST,
     REVIEW_SPAN_ATTRIBUTE_ALLOWLIST,
@@ -302,6 +304,75 @@ def test_stage_span_carries_only_the_approved_attributes():
     assert span.attributes["arena.outcome"] == "ok"
     assert span.attributes["arena.error_type"] == "-"
     assert span.attributes["arena.count"] == 3
+
+
+def test_deferring_driver_stages_name_the_wait_that_holds_the_round():
+    """A publication or benchmark wait must say which wait it is."""
+    exp = InMemorySpanExporter()
+    telemetry.install_recorder(configure_arena_otel(None, span_exporter=exp))
+    try:
+        with telemetry.stage("advance_publish") as observed:
+            observed.reason = telemetry.defer_reason(
+                {"status": "retry", "round_status": "scored",
+                 "reason": "judge_incomplete"}
+            )
+        with telemetry.stage("advance_commit_benchmark") as observed:
+            observed.reason = telemetry.defer_reason(
+                {"status": "retry", "reason": "daily_icp_set_not_ready"}
+            )
+        publish_span, benchmark_span = exp.get_finished_spans()
+        assert set(publish_span.attributes) == set(
+            REASONED_TASK_SPAN_ATTRIBUTE_TYPES
+        )
+        assert publish_span.attributes["arena.stage_reason"] == "judge_incomplete"
+        assert publish_span.attributes["arena.outcome"] == "ok"
+        assert (benchmark_span.attributes["arena.stage_reason"]
+                == "daily_icp_set_not_ready")
+    finally:
+        telemetry.install_recorder(None)
+
+
+def test_a_stage_that_did_its_work_keeps_the_unchanged_envelope():
+    """No reason means the original five attributes, exactly as before."""
+    exp = InMemorySpanExporter()
+    telemetry.install_recorder(configure_arena_otel(None, span_exporter=exp))
+    try:
+        with telemetry.stage("advance_publish") as observed:
+            observed.reason = telemetry.defer_reason(
+                {"status": "published", "round_status": "published"}
+            )
+        (span,) = exp.get_finished_spans()
+        assert set(span.attributes) == TASK_SPAN_ATTRIBUTE_ALLOWLIST
+    finally:
+        telemetry.install_recorder(None)
+
+
+@pytest.mark.parametrize("outcome", [
+    {"status": "retry", "reason": "postgres: relation \"rounds\" does not exist"},
+    {"status": "retry", "reason": "arena-2026-11-23"},
+    {"status": "retry", "reason": 7},
+    {"status": "retry"},
+    None,
+    "retry",
+])
+def test_only_a_source_literal_can_become_a_stage_reason(outcome):
+    assert telemetry.defer_reason(outcome) is None
+
+
+def test_a_reason_cannot_escape_on_a_stage_that_does_not_defer_by_returning():
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record("driver_tick", "ok", reason="judge_incomplete")
+    (span,) = exp.get_finished_spans()
+    assert set(span.attributes) == TASK_SPAN_ATTRIBUTE_ALLOWLIST
+    assert "advance_publish" in DEFERRAL_REASON_STAGES
+
+
+def test_an_unbounded_stage_reason_drops_the_span_whole():
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record("advance_publish", "ok", reason="Round arena-2026-11-23 held")
+    assert exp.get_finished_spans() == ()
 
 
 def test_billing_lookup_stage_exports_only_bounded_context_on_failure():

@@ -737,6 +737,23 @@ LIFECYCLE_TASK_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
     "arena.source_sha": (str,),
 }
 
+# Two round-driver stages defer by RETURNING, not by raising: publication and
+# the benchmark commit both answer {"status": "retry", "reason": <literal>}
+# and the stage span records outcome "ok". A round can therefore re-enter
+# either one every tick for a whole day and the span cannot say which of the
+# named waits is holding it — the 2026-11-22/23 publication stall was blind
+# for three days for exactly this reason. These two stages may name the
+# literal the driver returned; the vocabulary is a source-code constant, never
+# a row value, and the regex keeps it that way. Other stages are unchanged.
+DEFERRAL_REASON_STAGES = frozenset(
+    {"advance_publish", "advance_commit_benchmark"}
+)
+_ARENA_STAGE_REASON_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+REASONED_TASK_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
+    **TASK_SPAN_ATTRIBUTE_TYPES,
+    "arena.stage_reason": (str,),
+}
+
 # The Arena sidecar's HTTP envelope: the gateway's four, plus the refusal code
 # the sidecar itself produced. The gateway's own envelope is UNCHANGED — this
 # fifth required attribute exists only on the sidecar, where a 4xx with no
@@ -1350,6 +1367,15 @@ def _validating_exporter(
             source_sha = attributes["arena.source_sha"]
             if source_sha != "unknown" and not re.fullmatch(r"[0-9a-f]{40}", source_sha):
                 return "source_sha"
+        elif stage in DEFERRAL_REASON_STAGES and "arena.stage_reason" in attributes:
+            if not _attributes_conform(
+                attributes, REASONED_TASK_SPAN_ATTRIBUTE_TYPES
+            ):
+                return "attributes"
+            if not _ARENA_STAGE_REASON_RE.fullmatch(
+                attributes["arena.stage_reason"]
+            ):
+                return "stage_reason"
         elif stage == "reconcile_deepline_billing_lookup" and _attributes_conform(
             attributes, BILLING_TASK_SPAN_ATTRIBUTE_TYPES
         ):
@@ -1998,6 +2024,7 @@ class ArenaTelemetry:
         source_sha: Optional[str] = None,
         store_error: Optional[Mapping[str, Any]] = None,
         billing_lookup: Optional[Mapping[str, Any]] = None,
+        reason: Optional[str] = None,
     ) -> None:
         try:
             self._record(
@@ -2010,6 +2037,7 @@ class ArenaTelemetry:
                 source_sha=source_sha,
                 store_error=store_error,
                 billing_lookup=billing_lookup,
+                reason=reason,
             )
         except BaseException as exc:
             # Telemetry is observational only — the pipeline must not notice.
@@ -2027,6 +2055,7 @@ class ArenaTelemetry:
         source_sha: Optional[str],
         store_error: Optional[Mapping[str, Any]],
         billing_lookup: Optional[Mapping[str, Any]],
+        reason: Optional[str] = None,
     ) -> None:
         from opentelemetry.trace import Status, StatusCode
 
@@ -2038,6 +2067,8 @@ class ArenaTelemetry:
         span.set_attribute("duration_ms", float(duration_ms))
         if source_sha is not None:
             span.set_attribute("arena.source_sha", str(source_sha))
+        if reason is not None and stage in DEFERRAL_REASON_STAGES:
+            span.set_attribute("arena.stage_reason", str(reason))
         if stage == "reconcile_deepline_billing_lookup" and isinstance(billing_lookup, Mapping):
             round_id = billing_lookup.get("round_id")
             lane = billing_lookup.get("lane")

@@ -542,7 +542,7 @@ def make_handler(vault: Vault):
 
             def action() -> Mapping:
                 length = self.headers.get("content-length", "")
-                if not length.isdigit() or int(length) > MAX_REQUEST_BODY:
+                if not (length.isascii() and length.isdigit()) or int(length) > MAX_REQUEST_BODY:
                     raise VaultError("request_too_large", 413)
                 try:
                     if route is None:

@@ -238,8 +238,10 @@ deployment, exactly as lead orders do.
   skip a hotkey that is not registered on the subnet and keep its amount
   owed, rather than fail the whole payout; give every positive share at
   least one weight unit, or record as paid only what the weights deliver;
-  price each epoch from one snapshot at its closing block; and publish each
-  epoch's settlements so validators can check them.
+  price each epoch from one snapshot at its closing block, taken once the
+  10-minute answer window after that block has passed (a settlement carries
+  the epoch its call started in); and publish each epoch's settlements so
+  validators can check them.
 - **The vendor's answer sets the usage.** Leadpoet counts a credit when the
   answer shows one was spent: a ZeroBounce result other than `unknown`, a
   Prospeo match that is not a free re-enrichment, an email from Findymail
@@ -274,6 +276,10 @@ deployment, exactly as lead orders do.
   the vault would close this.
 - **A balance reads every tab the buyer ever opened.** Fine at launch;
   keep a running total before buyers open thousands of tabs.
+- **Anyone can fill the vault's connections.** It serves at most 128 at
+  once, and one that sends nothing holds its slot for 10 s, so a stranger
+  can keep every call at `503 no_supply` (nothing is charged). Limit the
+  vault port to the gateway's egress, leaving only `/v1/identity` public.
 - **The book is read on every call.** It computes each key's last 24 h
   and last hour from the call ledger. That is fine at launch volumes;
   cache the public catalog and books before heavy anonymous traffic.

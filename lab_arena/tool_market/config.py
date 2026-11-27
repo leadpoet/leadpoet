@@ -29,10 +29,6 @@ PUBLIC_BASE_URL_ENV = "LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL"
 MODE_OFF = "off"
 MODE_LIVE = "live"
 
-MAX_TAB_SECONDS = 24 * 3600
-MAX_TAB_MICROUSD = 1_000_000_000  # $1,000
-# Low at launch: what one key may earn in 24 h. Raising it is a code change.
-MAX_KEY_DAILY_CAP_MICROUSD = 20_000_000  # $20
 
 # Each published terms version (docs/tool-market-terms.md) and the SHA-256 of
 # that file's exact bytes. Live mode trades only on one of these.
@@ -107,9 +103,6 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
 
 
 __all__ = [
-    "MAX_KEY_DAILY_CAP_MICROUSD",
-    "MAX_TAB_MICROUSD",
-    "MAX_TAB_SECONDS",
     "ToolMarketConfig",
     "ToolMarketConfigError",
     "load_config",

@@ -272,6 +272,8 @@ deployment, exactly as lead orders do.
   whether a key is live. The miner sealed the key, so it holds it already;
   the check adds only Leadpoet's address. A read-only 30-day check before
   the vault would close this.
+- **A balance reads every tab the buyer ever opened.** Fine at launch;
+  keep a running total before buyers open thousands of tabs.
 - **The book is read on every call.** It computes each key's last 24 h
   and last hour from the call ledger. That is fine at launch volumes;
   cache the public catalog and books before heavy anonymous traffic.

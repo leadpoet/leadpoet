@@ -146,4 +146,4 @@ class ToolMarketStore:
                              p_charge=int(charge_microusd), p_epoch=int(epoch))["status"])
 
 
-__all__ = ["FUNCTION_SIGNATURES", "ToolMarketStore", "register_rpc_signatures"]
+__all__ = ["ToolMarketStore"]

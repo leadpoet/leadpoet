@@ -70,12 +70,12 @@ CREATE TABLE public.tool_market_keys (
   key_id UUID PRIMARY KEY,
   tool TEXT NOT NULL CHECK(tool ~ '^[a-z_]{1,40}$'),
   miner_hotkey TEXT NOT NULL CHECK(miner_hotkey ~ '^[1-9A-HJ-NP-Za-km-z]{46,48}$'),
-  envelope TEXT NOT NULL CHECK(envelope LIKE 'lov1.%' AND length(envelope)<=8192),
+  envelope TEXT NOT NULL CHECK(envelope LIKE 'lov1.%' AND length(envelope)<=4096),
   key_fingerprint TEXT NOT NULL CHECK(key_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
   daily_cap_microusd BIGINT NOT NULL CHECK(daily_cap_microusd>0),
   host TEXT NOT NULL CHECK(length(host) BETWEEN 1 AND 253),
   signed_at BIGINT NOT NULL,
-  signed_body TEXT NOT NULL CHECK(length(signed_body) BETWEEN 2 AND 65536),
+  signed_body TEXT NOT NULL CHECK(length(signed_body) BETWEEN 2 AND 8192),
   signature TEXT NOT NULL CHECK(length(signature) BETWEEN 128 AND 130),
   registered_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
@@ -105,7 +105,7 @@ CREATE INDEX tool_market_key_events_key ON public.tool_market_key_events(key_id,
 CREATE TABLE public.tool_market_asks (
   ask_sequence BIGSERIAL PRIMARY KEY,
   key_id UUID NOT NULL REFERENCES public.tool_market_keys(key_id),
-  ask_microusd BIGINT CHECK(ask_microusd IS NULL OR ask_microusd BETWEEN 1 AND 10000000),
+  ask_microusd BIGINT CHECK(ask_microusd IS NULL OR ask_microusd BETWEEN 1 AND 1000000),
   posted_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX tool_market_asks_key ON public.tool_market_asks(key_id,ask_sequence DESC);
@@ -502,6 +502,9 @@ BEGIN
  END IF;
  -- Key rows never change, so this read needs no key lock.
  SELECT * INTO k FROM public.tool_market_keys WHERE key_id=p_key_id AND tool=p_tool;
+ IF k.key_id IS NULL THEN
+  RETURN jsonb_build_object('status','ask_changed');
+ END IF;
  IF k.miner_hotkey=tab.hotkey THEN  -- a miner's own tab never buys from their own key
   RETURN jsonb_build_object('status','own_key');
  END IF;
@@ -514,10 +517,11 @@ BEGIN
  PERFORM public.tool_market__lock_v1('key',p_key_id::TEXT);
  SELECT ask_microusd INTO current_ask FROM public.tool_market_asks WHERE key_id=p_key_id
   ORDER BY ask_sequence DESC LIMIT 1;
- IF k.key_id IS NULL OR NOT public.tool_market__key_active_v1(p_key_id) OR current_ask IS DISTINCT FROM p_ask THEN
+ IF NOT public.tool_market__key_active_v1(p_key_id) OR current_ask IS DISTINCT FROM p_ask THEN
   RETURN jsonb_build_object('status','ask_changed');
  END IF;
  SELECT * INTO g FROM public.tool_market__key_ledger_v1(p_key_id,tab.hotkey);
+ -- The quarter matches post_ask, which makes a cap hold 4 of the key's largest calls.
  IF g.day+p_owed_cap>k.daily_cap_microusd OR g.buyer_unknown+p_owed_cap>k.daily_cap_microusd/4 THEN
   RETURN jsonb_build_object('status','key_cap');
  END IF;

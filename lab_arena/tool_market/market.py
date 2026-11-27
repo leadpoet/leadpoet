@@ -29,12 +29,7 @@ from lab_arena.lead_orders.keys import json_document
 from lab_arena.lead_orders.vault_client import VaultTransportError, VaultUnavailable
 from lab_arena.tool_market import book, catalog
 from lab_arena.chain import ArenaChainError
-from lab_arena.tool_market.config import (
-    MAX_KEY_DAILY_CAP_MICROUSD,
-    MAX_TAB_MICROUSD,
-    MAX_TAB_SECONDS,
-    ToolMarketConfig,
-)
+from lab_arena.tool_market.config import ToolMarketConfig
 from lab_arena.tool_market.store import ToolMarketStore
 from lead_order_vault import envelope as vault_envelope
 from lead_order_vault import tools as vault_tools
@@ -55,6 +50,12 @@ MAX_USAGE_PAGE = 500
 CALL_TIMEOUT_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MIN_TAB_SECONDS = 60
+MAX_TAB_SECONDS = 24 * 3600
+MAX_TAB_MICROUSD = 1_000_000_000  # $1,000
+# Low at launch: what one key may earn in 24 h. Raising it is a code change.
+MAX_KEY_DAILY_CAP_MICROUSD = 20_000_000  # $20
+# Deeper vendor answers are unknown usage (the gateway could not render them).
+MAX_ANSWER_DEPTH = 64
 # The open subnet's name, as miners and buyers sign it.
 NETWORK_NAME = "Subnet 71"
 # What a miner signs, inside the register body, for every key they list.
@@ -78,9 +79,6 @@ class ToolMarketError(Exception):
 
 def token_hash(token: str) -> str:
     return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-MAX_ANSWER_DEPTH = 64
 
 
 def _document(body: bytes) -> Any:

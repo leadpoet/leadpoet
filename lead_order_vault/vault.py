@@ -53,7 +53,7 @@ import uuid
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Dict, List, Mapping, Optional, Tuple
-from urllib.parse import quote, unquote_to_bytes, urlsplit
+from urllib.parse import unquote_to_bytes, urlsplit
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -276,7 +276,7 @@ class Vault:
                 if tool.balance_url is None:
                     # No free check: opened and named only. Its calls prove it.
                     return dict(result, status="unchecked")
-                balance = _field(self._probe(tool, tool.balance_url, runtime, provider + "_api_key_invalid"),
+                balance = _field(self._probe(tool, tool.balance_url, runtime, provider + "_api_key"),
                                  tool.balance_field)
                 if balance is not None:
                     if balance < 0:  # ZeroBounce's answer for a key it does not know
@@ -308,8 +308,6 @@ class Vault:
         target = parts.path + ("?" + parts.query if parts.query else "")
         # The receipt hashes the target before the key is placed in it.
         outbound, keyed_target = TOOLS[provider].place(secret, headers, target)
-        # Every spelling of the key the provider could send back.
-        forms = tuple({secret, quote(secret, safe="")})
         key_sequence, at = self._count(key_fingerprint)
         # Per key only: a global count would show each miner everyone's volume.
         receipt = {"schema": RECEIPT_SCHEMA, "boot_id": self.boot_id,
@@ -328,14 +326,14 @@ class Vault:
             receipt.update(outcome="transport_error", response_status=error.observed_status, response_sha256=None)
             observed = _kept_headers(error.observed_headers)
             return {"transport_error": str(error), "observed_status": error.observed_status,
-                    "observed_headers": [] if any(header_echoes(form, observed) for form in forms) else observed,
+                    "observed_headers": [] if header_echoes(secret, observed) else observed,
                     "receipt": self._signed(receipt)}
         response_headers = _kept_headers(response.headers)
-        if any(echoes(form, response.body) or header_echoes(form, response_headers) for form in forms):
+        if echoes(secret, response.body) or header_echoes(secret, response_headers):  # also URL-encoded
             receipt.update(outcome="key_echo_withheld", response_status=response.status, response_sha256=None)
             ids = [[name, value] for name, value in response_headers
                    if name in REQUEST_ID_HEADERS
-                   and not any(echoes(form, value.encode("utf-8", errors="surrogatepass")) for form in forms)]
+                   and not echoes(secret, value.encode("utf-8", errors="surrogatepass"))]
             return _refusal(502, "vault_response_withheld", self._signed(receipt), ids)
         receipt.update(outcome="response", response_status=response.status,
                        response_sha256=hashlib.sha256(response.body).hexdigest())
@@ -368,7 +366,9 @@ class Vault:
         signature = self._receipts_key.sign(canonical(document), ec.ECDSA(hashes.SHA256()))
         return {"document": document, "signature": signature.hex(), "public_key": self.receipts_public_key}
 
-    def _probe(self, tool: Tool, url: str, secret: str, invalid_code: str) -> Mapping:
+    def _probe(self, tool: Tool, url: str, secret: str, key_name: str) -> Mapping:
+        """GET ``url`` with ``secret``; a refusal is ``<key_name>_invalid`` or ``_no_credit``."""
+
         parts = urlsplit(url)
         headers, target = tool.place(secret, {"accept": "application/json", "user-agent": "leadpoet-lead-order-vault/1"},
                                      parts.path + ("?" + parts.query if parts.query else ""))
@@ -377,9 +377,9 @@ class Vault:
         except UpstreamError:
             raise VaultError("check_unavailable", 503) from None
         if response.status in tool.invalid_statuses:
-            raise _Invalid(invalid_code)
+            raise _Invalid(key_name + "_invalid")
         if response.status == 402:
-            raise _Invalid(invalid_code.replace("_invalid", "_no_credit"))
+            raise _Invalid(key_name + "_no_credit")
         if response.status != 200:
             raise VaultError("check_unavailable", 503)
         try:
@@ -390,7 +390,7 @@ class Vault:
 
     def _check_openrouter(self, runtime: str, management: str) -> None:
         openrouter = TOOLS["openrouter"]
-        current = self._probe(openrouter, OPENROUTER_CURRENT_KEY_URL, runtime, "openrouter_api_key_invalid").get("data")
+        current = self._probe(openrouter, OPENROUTER_CURRENT_KEY_URL, runtime, "openrouter_api_key").get("data")
         if not isinstance(current, Mapping) or current.get("disabled") is True or current.get("is_management_key") is not False:
             raise _Invalid("openrouter_api_key_invalid")
         remaining = current.get("limit_remaining")
@@ -398,7 +398,7 @@ class Vault:
             raise _Invalid("openrouter_api_key_no_credit")
         runtime_hash = hashlib.sha256(runtime.encode("utf-8")).hexdigest()
         managed = self._probe(openrouter, OPENROUTER_KEY_URL.format(key_hash=runtime_hash), management,
-                              "openrouter_management_key_invalid").get("data")
+                              "openrouter_management_key").get("data")
         if not isinstance(managed, Mapping) or managed.get("hash") != runtime_hash or managed.get("disabled") is True:
             raise _Invalid("openrouter_management_key_invalid")
 

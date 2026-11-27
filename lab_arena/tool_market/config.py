@@ -23,7 +23,6 @@ BUYERS_ENV = "LEADPOET_TOOL_MARKET_BUYER_HOTKEYS"
 PRIVATE_SUPPLIERS_ENV = "LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS"
 GAMMA_SERVICE_ENV = "LEADPOET_TOOL_MARKET_GAMMA_SERVICE"
 TERMS_VERSION_ENV = "LEADPOET_TOOL_MARKET_TERMS_VERSION"
-TERMS_SHA256_ENV = "LEADPOET_TOOL_MARKET_TERMS_SHA256"
 PUBLIC_BASE_URL_ENV = "LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL"
 
 MODE_OFF = "off"
@@ -78,11 +77,11 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
     tools = frozenset(TOOLS) - off
     buyers = frozenset(h.strip() for h in env.get(BUYERS_ENV, "").split(",") if h.strip())
     private = frozenset(h.strip() for h in env.get(PRIVATE_SUPPLIERS_ENV, "").split(",") if h.strip())
+    terms_version = env.get(TERMS_VERSION_ENV, "").strip()
     config = ToolMarketConfig(
         mode=mode, tools=tools, buyer_hotkeys=buyers, private_suppliers=private,
         gamma_service=env.get(GAMMA_SERVICE_ENV, "").strip(),
-        terms_version=env.get(TERMS_VERSION_ENV, "").strip(),
-        terms_sha256=env.get(TERMS_SHA256_ENV, "").strip().lower(),
+        terms_version=terms_version, terms_sha256=PUBLISHED_TERMS.get(terms_version, ""),
         public_base_url=env.get(PUBLIC_BASE_URL_ENV, "").strip().rstrip("/"),
     )
     if not off <= set(TOOLS):
@@ -95,8 +94,8 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
     # One Gamma deposit must not fund two products.
     if config.gamma_service == env.get(LEAD_ORDERS_GAMMA_SERVICE_ENV, "").strip():
         raise ToolMarketConfigError("%s must differ from %s" % (GAMMA_SERVICE_ENV, LEAD_ORDERS_GAMMA_SERVICE_ENV))
-    if PUBLISHED_TERMS.get(config.terms_version) != config.terms_sha256:
-        raise ToolMarketConfigError("%s and %s must name published terms" % (TERMS_VERSION_ENV, TERMS_SHA256_ENV))
+    if config.terms_version not in PUBLISHED_TERMS:
+        raise ToolMarketConfigError("%s must name published terms" % TERMS_VERSION_ENV)
     if not config.public_base_url.startswith("https://"):
         raise ToolMarketConfigError("%s must be an https URL" % PUBLIC_BASE_URL_ENV)
     return config

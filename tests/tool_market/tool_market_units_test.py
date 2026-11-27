@@ -144,15 +144,15 @@ def test_config_is_off_by_default_and_strict_when_live():
     assert not load_config({}).enabled
     live = {"LEADPOET_TOOL_MARKET_MODE": "live", "LEADPOET_TOOL_MARKET_GAMMA_SERVICE": ALICE,
             "LEADPOET_TOOL_MARKET_TERMS_VERSION": "tool-market-terms-v1",
-            "LEADPOET_TOOL_MARKET_TERMS_SHA256": PUBLISHED_TERMS["tool-market-terms-v1"],
             "LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL": "https://gw.example/"}
     config = load_config(live)
+    assert config.terms_sha256 == PUBLISHED_TERMS["tool-market-terms-v1"]
     # Live means every catalog tool trades; one switch turns single tools off.
     assert config.enabled and config.tools == set(catalog.TOOLS) and config.public_host == "gw.example"
     assert load_config(dict(live, LEADPOET_TOOL_MARKET_TOOLS_OFF="exa, hunter")).tools \
         == set(catalog.TOOLS) - {"exa", "hunter"}
     for bad in ({"LEADPOET_TOOL_MARKET_TOOLS_OFF": "deepline"},
-                {"LEADPOET_LEAD_ORDERS_GAMMA_SERVICE": ALICE}, {"LEADPOET_TOOL_MARKET_TERMS_SHA256": "a" * 64},
+                {"LEADPOET_LEAD_ORDERS_GAMMA_SERVICE": ALICE}, {"LEADPOET_TOOL_MARKET_TERMS_VERSION": "tool-market-terms-v0"},
                 {"LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL": "http://gw.example"},
                 {"LEADPOET_TOOL_MARKET_GAMMA_SERVICE": "71"}, {"LEADPOET_TOOL_MARKET_BUYER_HOTKEYS": "nope"},
                 {"LEADPOET_TOOL_MARKET_MODE": "staff"}):

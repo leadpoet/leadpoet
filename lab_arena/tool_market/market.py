@@ -202,9 +202,9 @@ class ToolMarket:
                                           budget_microusd=budget, seconds=seconds,
                                           terms_sha256=self._config.terms_sha256)
         except ArenaStoreError:
-            # It may commit yet (or have committed): the token lets the buyer
-            # find the tab (GET /tool-market/tab) and close it, so no tab only
-            # a lost token could close holds the budget until it expires.
+            # It may have committed, or commit within the store's 30 s statement
+            # timeout: the token lets the buyer find the tab and close it, so no
+            # tab only a lost token could close holds the budget until it expires.
             raise ToolMarketError(503, "store_unavailable", token=token) from None
         if result["status"] == "terms_required":
             raise ToolMarketError(403, "terms_required")

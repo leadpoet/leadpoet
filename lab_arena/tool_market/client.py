@@ -251,6 +251,9 @@ def main(argv: Optional[list] = None) -> int:
         answer = client.request("POST", "/tool-market/tabs", {
             "budget_microusd": round(args.budget * 1_000_000), "seconds": round(args.days * 86400)}, signed=True)
         if "token" in answer:
+            if "error" in answer:  # the store did not confirm: an open in flight ends within 30 s
+                print("# This key may still open. Keep it; after a minute, key-status shows it, "
+                      "and key-close frees its budget.", file=sys.stderr)
             print("export SUBNET71_API_KEY=" + answer["token"], file=sys.stderr)
     elif args.command == "key-status":
         answer = client.request("GET", "/tool-market/tab")

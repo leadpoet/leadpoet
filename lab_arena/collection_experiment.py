@@ -419,7 +419,7 @@ def read_inputs(spec, directory, sources, *, objects=None, database=None, prompt
         source = read(case["source_sha256"])
         from lab_arena.collection_pool_source import (
             SCHEMA as POOL_STUDENT,
-            funded_source,
+            verify_funded_source,
         )
 
         if source.get("schema") == POOL_STUDENT:
@@ -435,12 +435,7 @@ def read_inputs(spec, directory, sources, *, objects=None, database=None, prompt
                 from scripts.run_locked_collection import evidence_stores
 
                 database, objects = evidence_stores()
-            origin = source["origin"]
-            original = funded_source(
-                database, objects, origin["batch_id"], origin["job_id"], prompt
-            )
-            if original != source:
-                raise ValueError("funded checkpoint differs from its original paid run")
+            verify_funded_source(database, objects, source, prompt)
             if any(a["role"] != "continuation" for a in spec.raw["arms"]):
                 raise ValueError("use a fresh native case for a fresh expert arm")
         else:
@@ -756,6 +751,8 @@ def run_experiment(
                     capture_version=CAPTURE_V2,
                     judge_policy=asdict(spec.policy),
                 )
+                if arm["role"] == "continuation" and job["scenario_id"].startswith("P8-"):
+                    manifest["uses_checkpoint_evidence"] = True
                 journal.finish("completed")
                 evidence = native_payment_evidence(objects, job, manifest)
                 usage = adapter.usage()

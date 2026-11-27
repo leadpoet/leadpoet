@@ -132,6 +132,22 @@ def _pair(row, packet, student, *, native=None):
         or msgs[at]["role"] != "assistant"
     ):
         raise ValueError("correction target has no matching prefix")
+    if funded_mistake and (
+        msgs[:at] != student["checkpoint"]["messages"]
+        or row["teacher"] == student["student_model"]
+        or checks["student_action_fatal"] is not student["rejected_fatal"]
+    ):
+        raise ValueError("expert branch differs from its verified source")
+    grounding_error = funded_mistake and student.get("failure", {}).get(
+        "unrepaired_grounding"
+    )
+    if (
+        grounding_error
+        and (native.get("first_failed_decision") or {}).get("turn")
+        == link["branch_turn"]
+    ):
+        # The expert may later recover without its original action being fit to teach.
+        return None
     if msgs[at] == link["rejected"]:
         return None
     # The archive retains private world state and grade details. Models may train
@@ -142,6 +158,7 @@ def _pair(row, packet, student, *, native=None):
         "rejected": link["rejected"],
         "chosen": msgs[at],
         "step_checks": checks,
+        **({"failure_kind": "unrepaired_grounding"} if grounding_error else {}),
         "branch_turn": link["branch_turn"],
         "checkpoint_sha256": link["checkpoint_sha256"],
         "student_model": link["student_model"],
@@ -158,17 +175,14 @@ def _pair(row, packet, student, *, native=None):
 
 
 def _verify_student(spec, database, objects, prompt, student, proof):
-    from lab_arena.collection_pool_source import SCHEMA as FUNDED_STUDENT, funded_source
+    from lab_arena.collection_pool_source import SCHEMA as FUNDED_STUDENT, verify_funded_source
     from lab_arena.collection_experiment import verify_provenance
 
     if student.get("schema") == FUNDED_STUDENT:
         if (spec.raw.get("payment_rule") != POOL_PAYMENT_RULE or prompt is None
                 or "provenance_sha256" in spec.raw or proof is not None):
             raise ValueError("unexpected internal student source")
-        origin = student["origin"]
-        original = funded_source(database, objects, origin["batch_id"], origin["job_id"], prompt)
-        if original != student:
-            raise ValueError("correction source differs from the original signed funded work")
+        verify_funded_source(database, objects, student, prompt)
     else:
         if proof is None or "provenance_sha256" not in spec.raw:
             raise ValueError("missing producer attestation")

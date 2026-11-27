@@ -13,7 +13,9 @@ from lab_arena.collection_workflow import read_artifact
 SCHEMA = "collection.funded-student.v1"
 
 
-def funded_source(database, objects, batch_id, run_id, prompt):
+def funded_source(
+    database, objects, batch_id, run_id, prompt, *, classify_grounding=False
+):
     """Reconstruct the source from original provider replies, ledger funding and per-turn state."""
     from lab_arena.collection_experiment import load_experiment, pool_verified_result
     from lab_arena.collection_trajectories import verified_grants
@@ -67,19 +69,24 @@ def funded_source(database, objects, batch_id, run_id, prompt):
         objects, batch_id, run_id, "generator", manifest["generator"], 128 << 20
     )
     family = job["scenario_id"].split("-s")[0]
+    labels = {}
     if family == "P8":
         from lab_arena.collection_sales_evidence import _history
 
         packet = read_artifact(
             objects, batch_id, run_id, "judge-input", manifest["packet"], 128 << 20
         )
-        _, failure = _history(objects, job, manifest, row, packet)
+        _, failure = _history(
+            objects, job, manifest, row, packet, classify_grounding=classify_grounding
+        )
         if failure is None:
             raise ValueError("no recoverable observed evidence mistake")
         checkpoint, rejected, turn, reason = (
             failure[k] for k in ("checkpoint", "rejected", "turn", "reason")
         )
         fatal = reason == "incomplete_or_incorrect_final_decision"
+        if "unrepaired_grounding" in failure:
+            labels["unrepaired_grounding"] = failure["unrepaired_grounding"]
     else:
         checkpoint, rejected, turn, reason = _locked_mistake(
             objects, job, manifest, row, family
@@ -97,9 +104,23 @@ def funded_source(database, objects, batch_id, run_id, prompt):
         "checkpoint_sha256": judge.digest(checkpoint),
         "rejected": rejected,
         "rejected_fatal": fatal,
-        "failure": {"reason": reason, "turn": turn},
+        "failure": {"reason": reason, "turn": turn, **labels},
         "split": row["split"],
     }
+
+
+def verify_funded_source(database, objects, student, prompt):
+    origin = student["origin"]
+    original = funded_source(
+        database,
+        objects,
+        origin["batch_id"],
+        origin["job_id"],
+        prompt,
+        classify_grounding="unrepaired_grounding" in student["failure"],
+    )
+    if original != student:
+        raise ValueError("funded checkpoint differs from its original paid run")
 
 
 def _locked_mistake(objects, job, manifest, row, family):

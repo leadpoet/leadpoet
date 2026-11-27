@@ -106,7 +106,7 @@ def test_pool_identity_repeats_and_safe_renewal(tmp_path):
 
 
 @pytest.fixture
-def pool_fixture(tmp_path, monkeypatch):
+def pool_fixture(tmp_path, monkeypatch, request):
     from bittensor_wallet import Keypair
     import lab_arena.collection_broker as cb
 
@@ -225,11 +225,13 @@ def pool_fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(cb, "CollectionBroker", broker)
     env.db = Db()
     env.intake = Intake()
+    from lab_arena.collection_workflow import SALES_EVIDENCE_POET_REV
+    research = getattr(request, "param", None) == "P8"
     with workflow_sources(
-        agent, poet, corrections=True, builder_revision=OUTREACH_POET_REV
+        agent, poet, corrections=True, builder_revision=SALES_EVIDENCE_POET_REV if research else OUTREACH_POET_REV
     ) as src:
         env.sources = src
-        for family in ("P9", "P10"):
+        for family in (("P8",) if research else ("P9", "P10")):
             split = src[1].training_partition(family)
             write_new(env.inputs / (judge.digest(split) + ".json"), split)
         yield env
@@ -482,3 +484,220 @@ def test_native_provider_usage_divergence_is_rejected(pool_fixture):
             dict(original, usage={"completion_tokens": 99999}),
             message,
         )
+
+
+@pytest.mark.parametrize("pool_fixture", ["P8"], indirect=True)
+@pytest.mark.parametrize(
+    "later",
+    [
+        "unchanged",
+        "fully_repaired",
+        "different_error",
+        "malformed",
+        "manual",
+        "expert_repaired_late",
+    ],
+)
+def test_standing_grounding_followup_requires_persistent_error(
+    pool_fixture, tmp_path, later, monkeypatch
+):
+    from functools import partial
+    from tests.lab_arena.collection_sales_evidence_test import script
+    from scripts.run_locked_collection import stage_failed_pool_continuation
+    from lab_arena.collection_workflow import read_artifact
+    from lab_arena.collection_experiment_export import _pair
+
+    env = pool_fixture
+    raw = pool_raw("P8", repeats=1)
+    raw["arms"].append(dict(raw["arms"][0], id="stronger", model=EXPERT))
+    raw.update(correction_model=EXPERT, max_slots=2, budget_microusd=200000)
+    raw["routes"][EXPERT] = "coreweave/fp8"
+    _, _, correct = script(env.sources[1], seed=81000)
+    original_memo = json.loads(correct[-2][1]["content"])
+
+    def inaccurate(index):
+        memo = deepcopy(original_memo)
+        field = memo["findings"][index]
+        field["value"] = "unsupported status"
+        field["citations"] = []
+        return (
+            "write_file",
+            {"path": "qualification.json", "content": json.dumps(memo)},
+        )
+
+    failed = correct[:-2] + [inaccurate(0)]
+    if later == "malformed":
+        failed[-1] = (
+            "write_file",
+            {"path": "qualification.json", "content": "invalid JSON"},
+        )
+    if later == "fully_repaired":
+        failed += [correct[-2], "Wrong terminal response."]
+    elif later == "different_error":
+        failed += [inaccurate(1), correct[-1]]
+    else:
+        failed += [correct[-1]]
+    offers = tmp_path / "offers"
+    offers.mkdir()
+    callback = partial(
+        stage_failed_pool_continuation,
+        database=env.db,
+        objects=env.objects,
+        directory=offers,
+        inputs=env.inputs,
+        prompt=PROMPT,
+    )
+    spec = simulation(
+        env,
+        raw,
+        [failed, correct],
+        on_pool_failure=None if later == "manual" else callback,
+    )
+    original, evidence = xp.pool_verified_result(env.objects, env.jobs[0], spec)
+    assert evidence["complete_verified"] and not evidence["task_pass"]
+    followups = list(offers.glob("pool-*.json"))
+    if later == "manual":
+        from lab_arena.collection_pool_source import funded_source, verify_funded_source
+        from scripts.prepare_collection_experiment import store_private_json
+
+        # A previously staged manual source may predate the new field labels.
+        previous = funded_source(
+            env.db, env.objects, spec.batch_id, env.jobs[0]["job_id"], PROMPT
+        )
+        assert "unrepaired_grounding" not in previous["failure"]
+        verify_funded_source(env.db, env.objects, previous, PROMPT)
+        reference = "sha256:" + judge.digest(previous)
+        manual = dict(
+            raw,
+            id="manual-continuation",
+            question="Can an expert correct the memo?",
+            max_slots=1,
+            budget_microusd=100000,
+            routes={EXPERT: raw["routes"][EXPERT]},
+            arms=[dict(raw["arms"][1], role="continuation")],
+            cases=[dict(raw["cases"][0], source_sha256=reference)],
+        )
+        del manual["successor_seeds"], manual["correction_model"]
+        frozen = xp.load_experiment(manual, PROMPT)
+        store_private_json(env.inputs / (reference[7:] + ".json"), previous)
+        manual_path = offers / (frozen.batch_id + ".json")
+        store_private_json(manual_path, manual)
+        assert callback(spec, env.jobs[0]) is None and list(
+            offers.glob("pool-*.json")
+        ) == [manual_path]
+        return
+    if later not in {"unchanged", "expert_repaired_late"}:
+        assert not followups
+        return
+    assert len(followups) == 1
+    if later == "unchanged":
+        from scripts.prepare_collection_experiment import main, store_private_json
+        import scripts.run_locked_collection as worker
+
+        parent_path = tmp_path / "source-program.json"
+        prompt_path = tmp_path / "prompt.json"
+        store_private_json(parent_path, raw)
+        store_private_json(prompt_path, PROMPT)
+        monkeypatch.setattr(worker, "evidence_stores", lambda: (env.db, env.objects))
+        with pytest.raises(
+            ValueError, match="continuation from this paid source already exists"
+        ):
+            main(
+                [
+                    "prepare-pool",
+                    "--experiment-id",
+                    "manual-followup",
+                    "--family",
+                    "P8",
+                    "--first-seed",
+                    "81000",
+                    "--scenario-count",
+                    "1",
+                    "--repeat",
+                    "1",
+                    "--model",
+                    EXPERT,
+                    "--cap-microusd",
+                    "100000",
+                    "--champion-repo",
+                    os.environ["COLLECTION_TEST_AGENT_REPO"],
+                    "--poet-repo",
+                    os.environ["COLLECTION_TEST_POET_REPO"],
+                    "--prompt",
+                    str(prompt_path),
+                    "--source-batch",
+                    str(parent_path),
+                    "--source-job",
+                    env.jobs[0]["job_id"],
+                    "--directory",
+                    str(offers),
+                    "--inputs",
+                    str(env.inputs),
+                ]
+            )
+        assert list(offers.glob("pool-*.json")) == followups
+    plan = json.loads(followups[0].read_bytes())
+    src_hash = plan["cases"][0]["source_sha256"]
+    student = json.loads((env.inputs / (src_hash[7:] + ".json")).read_bytes())
+    assert not student["rejected_fatal"]
+    assert student["failure"]["unrepaired_grounding"] == {
+        original_memo["findings"][0]["field"]: ["claim", "citation"]
+    }
+    # All evidence was opened by the student before the mistake. The expert may fix
+    # the evidence-supported memo directly and must not have to buy another search.
+    expert_script = correct[-2:]
+    if later == "expert_repaired_late":
+        # Submitting an equivalent wrong memo under a different tool-call ID must never be a positive action.
+        expert_script = [inaccurate(0)] + expert_script
+    resumed = simulation(env, plan, [expert_script])
+    job = env.jobs[-1]
+    m, e = xp.pool_verified_result(env.objects, job, resumed)
+    assert (
+        e["complete_verified"]
+        and e["task_pass"]
+        and e["verified_decision"]
+        and e["calls"] == len(expert_script)
+    )
+    row = read_artifact(
+        env.objects,
+        resumed.batch_id,
+        job["job_id"],
+        "generator",
+        m["generator"],
+        128 << 20,
+    )
+    packet = read_artifact(
+        env.objects,
+        resumed.batch_id,
+        job["job_id"],
+        "judge-input",
+        m["packet"],
+        128 << 20,
+    )
+    pair = _pair(row, packet, student, native=e)
+    if later == "expert_repaired_late":
+        assert (
+            e["first_failed_decision"]["turn"] == student["branch_turn"]
+            and e["observed_repair"]
+        )
+        assert pair is None
+        return
+    from lab_arena.collection_worker import native_payment_evidence
+
+    historical = dict(m)
+    del historical["uses_checkpoint_evidence"]
+    prior = native_payment_evidence(env.objects, job, historical)
+    assert (
+        prior["complete_verified"]
+        and not prior["task_pass"]
+        and not prior["verified_decision"]
+    )
+    assert pair["checkpoint_sha256"] == student["checkpoint_sha256"]
+    assert (
+        pair["context"] == student["checkpoint"]["messages"]
+        and pair["rejected"] != pair["chosen"]
+    )
+    assert (
+        not pair["step_checks"]["student_action_fatal"]
+        and pair["failure_kind"] == "unrepaired_grounding"
+    )

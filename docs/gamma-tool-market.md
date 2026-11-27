@@ -11,26 +11,52 @@ It is off by default. Every route answers 404 until
 `LEADPOET_TOOL_MARKET_TOOLS_OFF` turns single tools off, for example
 `exa,hunter`.
 
-## Miner attestation
+## How it works
 
-A miner lists a key only by signing, with their hotkey, this exact
-statement inside the register request (`ATTESTATION` in
-`lab_arena/tool_market/market.py`; the subnet's name is `NETWORK_NAME`):
+1. **List a key.** A miner seals a vendor key to the vault on their own
+   machine (`python -m lead_order_vault.cli seal`). They then send the
+   envelope to `POST /tool-market/keys`, signed with their hotkey.
+   - Leadpoet stores only the envelope. Only the vault can open it.
+   - The body carries the miner's signed attestation (below).
+   - The vault checks the key with the vendor's free balance call, if the
+     vendor has one. A key with no credit is refused.
+   - The same vendor key can be listed only once at a time.
+2. **Post an ask.** `POST /tool-market/asks` sets what the miner earns per
+   unit. `ask_microusd: null` withdraws the ask.
+   - For a per-call tool, the ask is micro-USD per call.
+   - For a vendor-USD tool, the ask is micro-USD per vendor USD. For
+     example, `900000` sells at 90% of the vendor's own price.
+   - An ask is at most $0.25 per credit, or 100% of the vendor's own price
+     for a vendor-USD tool. Every operation's largest call must owe
+     something at the ask (`400 ask_too_low`), and the key's daily cap must
+     hold 4 of them (`400 ask_too_high_for_cap`).
+3. **Open a tab.** A buyer pays Gamma to the tool market's service. They
+   sign `POST /tool-market/tabs` with a budget and a lifetime, and get back
+   a bearer token. While the tab is open, its whole budget is held against
+   the buyer's balance. Once it closes or expires, only what its calls
+   spent stays held.
+4. **Call.** `POST /tool-market/call` sends `{tool, operation, params}` with
+   the tab token. The market tries keys cheapest first, with equal prices
+   in ask order: it reserves on up to 10 asks and sends to up to 3 keys.
+   Each call reserves its maximum charge against the tab before it is
+   sent, then settles to the real charge. With `max_ask_microusd`, no key
+   asking more serves the call.
 
-> tool-market-attestation-v3: I hold the account this key belongs to, and
-> its terms allow me to supply capacity through Bittensor Subnet 71. I agree
-> that Subnet 71 may use this key to serve other buyers' requests. I alone am
-> responsible for my account's compliance and hold the relationship with the
-> provider, and I will revoke this key if that stops being true. Subnet 71,
-> its validators and its contributors make no claim about any provider's
-> terms and are not liable for any action a provider takes on my account.
+Both buyers and miners sign the configured terms (`POST /tool-market/terms`,
+text in `docs/tool-market-terms.md`) before they trade, and again whenever
+their version changes.
 
-The signed request body, its signature, host and time are stored with the
-key, so anyone can verify the attestation later. The statement is
-versioned: a new version is asked for at the next listing. The market's
-terms (`POST /tool-market/terms`) are asked again whenever their version
-changes, and a key trades only while its miner accepted the current ones.
-This follows Bittensor subnet 28's miner terms.
+## Routes
+
+All under `/tool-market`.
+
+- **Public:** `GET /catalog`, `GET /books/{tool}`.
+- **Tab token** (`Authorization: Bearer`): `POST /call`, `GET /tab`,
+  `POST /tab/close`.
+- **Signed by the hotkey:** `POST /terms`, `GET /balance`, `POST /tabs`,
+  `GET /usage`, and for miners `POST /keys`, `POST /keys/{id}/check`,
+  `POST /keys/{id}/revoke`, `POST /asks` and `GET /statement` (their keys,
+  health and what each earned).
 
 ## Launch set
 
@@ -47,59 +73,23 @@ same vendors. Each one bills per request or reports its own cost.
 | [HarvestAPI](https://docs.harvestapi.io/) | per call | `linkedin_profile`, `linkedin_company` | no |
 | [Exa](https://docs.exa.ai/reference/search) | vendor USD (`costDollars.total`) | `search`, `contents` | no |
 
-## Adding a tool
+## Miner attestation
 
-A tool is data, not a new code path:
+A miner lists a key only by signing, with their hotkey, this exact
+statement inside the register request (`ATTESTATION` in
+`lab_arena/tool_market/market.py`; the subnet's name is `NETWORK_NAME`):
 
-1. One `Operation` per endpoint in `lab_arena/tool_market/catalog.py`:
-   method, URL, unit, maximum units per call, allowed parameters, how to
-   count what the vendor charged, and one line on what it `does`. A vendor whose status codes mean
-   something else, such as an error inside a 200, names a `real_status`
-   reader.
-2. One `Tool` entry in `lead_order_vault/tools.py`: the host, where the key
-   goes (a header, with or without `Bearer`, or a query parameter), which
-   routes it may call, and its free balance check. The vault is a separate
-   attested image, so it keeps this allowlist rather than trusting the
-   gateway's catalog. A vault change needs a new vault release.
+> tool-market-attestation-v3: I hold the account this key belongs to, and
+> its terms allow me to supply capacity through Bittensor Subnet 71. I agree
+> that Subnet 71 may use this key to serve other buyers' requests. I alone am
+> responsible for my account's compliance and hold the relationship with the
+> provider, and I will revoke this key if that stops being true. Subnet 71,
+> its validators and its contributors make no claim about any provider's
+> terms and are not liable for any action a provider takes on my account.
 
-## 2.0 list
-
-These tools are good candidates once the launch set has run:
-
-- **Signals:** PredictLeads (jobs, news, technologies).
-- **Email finding:** LeadMagic, Dropleads, Enrow.
-- **Email checks:** NeverBounce, Reoon, Kickbox, BounceBan.
-- **Search and scraping:** DataForSEO, ScrapeCreators, Serper.
-- **Reseller deals:** FullEnrich and Crustdata.
-
-## How it works
-
-1. **List a key.** A miner seals a vendor key to the vault on their own
-   machine (`python -m lead_order_vault.cli seal`). They then send the
-   envelope to `POST /tool-market/keys`, signed with their hotkey.
-   - Leadpoet stores only the envelope. Only the vault can open it.
-   - The body carries the miner's signed attestation (above).
-   - The vault checks the key with the vendor's free balance call, if the
-     vendor has one. A key with no credit is refused.
-   - The same vendor key can be listed only once at a time.
-2. **Post an ask.** `POST /tool-market/asks` sets what the miner earns per
-   unit. `ask_microusd: null` withdraws the ask.
-   - For a per-call tool, the ask is micro-USD per call.
-   - For a vendor-USD tool, the ask is micro-USD per vendor USD. For
-     example, `900000` sells at 90% of the vendor's own price.
-3. **Open a tab.** A buyer pays Gamma to the tool market's service. They
-   sign `POST /tool-market/tabs` with a budget and a lifetime, and get back
-   a bearer token. While the tab is open, its whole budget is held against
-   the buyer's balance. Once it closes or expires, only what its calls
-   spent stays held.
-4. **Call.** `POST /tool-market/call` sends `{tool, operation, params}` with
-   the tab token. The market tries keys cheapest first, with equal prices
-   in ask order, and tries up to 3 keys. Each call reserves its maximum
-   charge against the tab before it is sent, then settles to the real
-   charge.
-
-Both buyers and miners sign the configured terms (`POST /tool-market/terms`)
-before they trade. The text is `docs/tool-market-terms.md`.
+The signed request body, its signature, host and time are stored with the
+key, so anyone can verify the attestation later. The statement is
+versioned: a new version is asked for at the next listing.
 
 ## Order book and key health
 
@@ -111,10 +101,8 @@ A key is in its tool's book only while all of these hold:
 - its latest health event is `valid` or `unchecked`;
 - what it earned in the last 24 h, with unknown usage and calls in flight
   at the most they could owe, is under its daily cap. A miner picks the
-  cap, at most $20 a day per key at launch, and it must hold 4 of the
-  key's largest calls at its ask (`400 ask_too_high_for_cap`). An ask at
-  which a call's largest size owes nothing is refused (`400 ask_too_low`). A call
-  skips a key without room for it.
+  cap, at most $20 a day per key at launch. A call skips a key without
+  room for it.
 
 Health events come from vault checks and from calls.
 
@@ -145,16 +133,13 @@ miner_not_registered`). A miner's own tab never buys from their own keys.
 For security, a hotkey registers at most one key per tool every 30 days,
 revoked keys included. A revoked key that never took a call does not count.
 
-An ask may be at most $0.25 per credit, or 100% of the vendor's own price
-for a vendor-USD tool. A buyer can send `max_ask_microusd` with a call, and
-no key asking more serves it.
-
 `GET /tool-market/catalog` lists every tool that trades: its operations,
 one line on what each does, their parameters, its price ceiling, and the
 first ask a call tries with what a buyer
 pays for it. An agent can pick a tool by the
 job it needs done. A request with a bad parameter is refused before any
-charge.
+charge. `GET /tool-market/books/{tool}` shows the asks and what a buyer
+pays for each. It shows no miner hotkeys and no key data.
 
 ## Privacy
 
@@ -176,16 +161,13 @@ the request.
 
 ## Usage history
 
-`GET /tool-market/usage?after=<watermark>&limit=<1-500>`, signed by the
+`GET /tool-market/usage?after=<watermark>&limit=<1-500, default 100>`, signed by the
 buyer, lists the buyer's own calls, oldest first: tool, operation, status,
 units, charge and times. It never returns a vendor's answer. Pass the
 returned `watermark` back as `after` for the next page. A call is listed once
 it is 11 minutes old (the 10-minute answer window plus a minute), when it can
 no longer change, so paging never skips one. Each call's own answer already
 carries its charge.
-
-`GET /tool-market/books/{tool}` shows the asks and what a buyer pays for
-each. It shows no miner hotkeys and no key data.
 
 ## Money
 
@@ -297,3 +279,28 @@ deployment, exactly as lead orders do.
   yet; add one when an entity exists.
 - **Lead orders still exist.** They stay as they are, and off. Retiring them
   is a separate decision.
+
+## Adding a tool
+
+A tool is data, not a new code path:
+
+1. One `Operation` per endpoint in `lab_arena/tool_market/catalog.py`:
+   method, URL, unit, maximum units per call, allowed parameters, how to
+   count what the vendor charged, and one line on what it `does`. A vendor whose status codes mean
+   something else, such as an error inside a 200, names a `real_status`
+   reader.
+2. One `Tool` entry in `lead_order_vault/tools.py`: the host, where the key
+   goes (a header, with or without `Bearer`, or a query parameter), which
+   routes it may call, and its free balance check. The vault is a separate
+   attested image, so it keeps this allowlist rather than trusting the
+   gateway's catalog. A vault change needs a new vault release.
+
+## 2.0 list
+
+These tools are good candidates once the launch set has run:
+
+- **Signals:** PredictLeads (jobs, news, technologies).
+- **Email finding:** LeadMagic, Dropleads, Enrow.
+- **Email checks:** NeverBounce, Reoon, Kickbox, BounceBan.
+- **Search and scraping:** DataForSEO, ScrapeCreators, Serper.
+- **Reseller deals:** FullEnrich and Crustdata.

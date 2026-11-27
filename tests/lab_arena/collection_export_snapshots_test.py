@@ -260,3 +260,49 @@ def test_exported_sales_memo_replays_sources_and_keeps_revision_separate(tmp_pat
     assert row["sales_evidence"]["opened_sources"] == checked["opened_sources"]
     assert all(row["sales_evidence"]["field_evidence"]["citation_checks"].values())
     assert not any(key in row for key in ("reference_answer", "initial_state", "documents"))
+
+
+def test_watcher_exports_standing_experiments_without_legacy_offer_approval(lab, monkeypatch):
+    """Pool discovery goes through native experiment release and publicly approved training partition."""
+    from lab_arena import collection_workflow
+    batch = "pool-" + "e" * 64
+    raw = {"id": "safety", "payment_rule": snapshots.POOL_PAYMENT_RULE, "split_sha256": "sha256:" + "b" * 64}
+    private(lab.root / "paid/offers" / (batch + ".json"), raw)
+    spec = SimpleNamespace(raw=raw, batch_id=batch)
+    monkeypatch.setattr(snapshots, "load_experiment", lambda doc, prompt: spec if doc == raw else None)
+    built = []
+    def dataset(experiment, db, objs, output, *, only_jobs, full_trajectories, publish, prompt):
+        assert experiment == spec and full_trajectories and not publish
+        built.append(sorted(only_jobs))
+        result = dict(rows=len(only_jobs), preference_pairs=0,
+                      dataset_sha256="sha256:" + sha256(json.dumps(sorted(only_jobs)).encode()).hexdigest())
+        with ZipFile(output, "x") as archive:
+            archive.writestr("metadata.json", json.dumps(result))
+            for run in only_jobs:
+                archive.writestr(f"trajectories/{run}.jsonl",
+                                 json.dumps({"run_id":run, "scenario_id":"P9-s1","messages":[]}))
+        output.chmod(0o600)
+        return result
+    monkeypatch.setattr(snapshots, "write_dataset", dataset)
+    monkeypatch.setattr(collection_workflow, "read_artifact", lambda *_: {"split": "registered"})
+    lab.jobs[batch] = []
+    lab.add(batch, "good", case="P9-s1")
+    lab.add(batch, "pending", case="P9-s1", unsettled=1)
+    first = lab.tick()
+    assert (first["released"], first["pending"]) == (1, 1) and built == [["good"]]
+    assert batch not in lab.reads
+    lab.original["pending"]["unresolved"] = 0
+    last = lab.tick(first)
+    assert (last["released"], last["pending"]) == (2, 0)
+    assert lab.index()[batch]["P9-s1"]["released"] == ["good", "pending"]
+
+
+def test_new_paid_case_precedes_rebuilding_a_valid_old_archive(lab):
+    lab.add(FIRST, "old", case="P7-s1")
+    old = lab.tick()
+    prior = lab.index()
+    prior[FIRST]["P7-s1"].pop("export_version")
+    snapshots._save(lab.out, {"schema": "collection.private-export-index.v1", "offers": prior})
+    lab.add(FIRST, "new", case="P7-s2")
+    snapshots.observe(lab.root, lab.out, SimpleNamespace(rpc=lab.rpc), None, {**old,"last_group":""}, max_groups=1)
+    assert lab.builds[-1] == ["new"]

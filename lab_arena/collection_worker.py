@@ -9,6 +9,7 @@ import re
 
 from lab_arena import collection_judge as judge
 from lab_arena.collection_intake import MODELS
+from lab_arena.collection_pool import POOL_PAYMENT_RULE
 from lab_arena.collection_sales_evidence import sales_correction_source
 from lab_arena.collection_workflow import (
     COMPARISON_CAPTURE,
@@ -311,6 +312,10 @@ P7_PAYMENT_RULE = "verified_p7_v1"
 
 
 def task_payment_rule(job):
+    if re.fullmatch(r"pool-[0-9a-f]{64}", str(job.get("batch_id"))) and re.fullmatch(
+        r"(P7|P8|P9|P10)-s[1-9][0-9]{0,7}", job["scenario_id"]
+    ):
+        return POOL_PAYMENT_RULE
     match = re.fullmatch(r"(P7|P8)-s[1-9]\d{0,7}", job["scenario_id"])
     if not match or job.get("experiment"):
         return None
@@ -374,6 +379,7 @@ def _paid_reply(objects, job, index, event, message):
         or reply.get("model") != job["model"]
         or event["model"] != job["model"]
         or event["finish_reason"] != choice["finish_reason"]
+        or (batch.startswith("pool-") and event.get("usage") != reply.get("usage"))
         or visible != message
     ):
         raise ValueError("original generator receipt differs from the trajectory")
@@ -381,11 +387,14 @@ def _paid_reply(objects, job, index, event, message):
 
 
 def native_payment_evidence(objects, job, manifest, *, receipts_out=None):
-    """Verify a locked ordinary P7 trajectory using the pinned producer's sealed ledger answer."""
+    """Bind the terminal trajectory and outcome to the assigned task, funding route and original receipts."""
     from lab_arena.collection_journal import WorkflowJournal
 
     run, batch, model = job["job_id"], job["batch_id"], job["model"]
     rule = task_payment_rule(job)
+    family = job["scenario_id"].split("-s")[0]
+    from lab_arena.collection_workflow import NATIVE_PARTITIONS
+
     capture = {
         "capture_version": COMPARISON_CAPTURE,
         "scenario_ids": [job["scenario_id"]],
@@ -422,17 +431,34 @@ def native_payment_evidence(objects, job, manifest, *, receipts_out=None):
         or split
         != {
             **row["split"],
-            "manifest_sha256": (
-                SALES_EVIDENCE_PARTITION_SHA256
-                if rule == SALES_EVIDENCE_RULE
-                else TRAIN_ONLY_PARTITION_SHA256
-            ),
+            "manifest_sha256": NATIVE_PARTITIONS[family],
         }
         or row["split"]["template_id"] != job["scenario_id"].split("-s")[0]
     ):
         raise ValueError("generator, scenario or training partition mismatch")
+    checkpoint = None
+    if rule == POOL_PAYMENT_RULE and row.get("correction"):
+        student = read_artifact(
+            objects, batch, run, "student-source", manifest["student_source"], 128 << 20
+        )
+        link = row["correction"]
+        checkpoint = student["checkpoint"]
+        if (
+            row["experiment"]["role"] != "continuation"
+            or link["student_model"] == model
+            or link["student_model"] != student["student_model"]
+            or link["rejected"] != student["rejected"]
+            or link["source_sha256"] != student["source_sha256"]
+            or link["checkpoint_sha256"] != judge.digest(checkpoint)
+        ):
+            raise ValueError("continuation does not match its archived source")
     WorkflowJournal(objects, batch, run).comparison_index(
-        complete=True, model=model, manifest_events=manifest["events"], generator=row
+        complete=True,
+        model=model,
+        manifest_events=manifest["events"],
+        generator=row,
+        verify_terminal=rule == POOL_PAYMENT_RULE,
+        checkpoint=checkpoint,
     )
     ev = row["evidence"]
     replies = [e for e in ev["events"] if e["kind"] == "reply"]
@@ -440,7 +466,9 @@ def native_payment_evidence(objects, job, manifest, *, receipts_out=None):
         raise ValueError(
             "correction prefix must be tied to its original observed source"
         )
-    prefix = row.get("native_correction", {}).get("prefix_messages", 0)
+    prefix = (row.get("native_correction") or row.get("correction") or {}).get(
+        "prefix_messages", 0
+    )
     messages = [m for m in row["messages"][prefix:] if m["role"] == "assistant"]
     if (
         len(replies) != len(messages)
@@ -479,18 +507,37 @@ def native_payment_evidence(objects, job, manifest, *, receipts_out=None):
         )
     expected = json.loads(packet["reference_answer"])["answer"]
     additional = {}
-    if rule == SALES_EVIDENCE_RULE:
+    if family == "P8":
         from lab_arena.collection_sales_evidence import verify_account_memo
 
         additional = verify_account_memo(objects, job, manifest, row, packet)
         task_pass = additional["verified_decision"]
-    else:
+    elif family == "P7":
         posting = (ev["out"]["state"] or {}).get("posting") or {}
         task_pass = native["credits"] == {
             "sealed": 1,
             "charter": 1,
             "receipt": 1,
         } and expected == posting.get("receipt")
+    else:
+        # These desks grade the committed world and cited event IDs. A model may
+        # summarize its decision in its own words after committing the plan.
+        task_pass = native["score"] == 1 and not native.get("hard_fail")
+
+    final_answer = ev["out"].get("answer")
+    complete_verified = bool(
+        total > 0
+        and ev["finish"] == "answered"
+        and messages
+        and isinstance(final_answer, str)
+        and final_answer.strip()
+        and not messages[-1].get("tool_calls")
+        and final_answer.strip() == (messages[-1].get("content") or "").strip()
+        and all(
+            checks.get(k) is True
+            for k in ("answered", "shape", "privacy", "training_split")
+        )
+    )
     eligible = bool(
         eligible
         and total > 0
@@ -500,9 +547,9 @@ def native_payment_evidence(objects, job, manifest, *, receipts_out=None):
         and isinstance(expected, str)
         and expected
         and task_pass
-        and expected == ev["out"]["answer"].strip()
+        and (family in {"P9", "P10"} or expected == ev["out"]["answer"].strip())
         and messages
-        and expected == messages[-1]["content"].strip()
+        and (family in {"P9", "P10"} or expected == messages[-1]["content"].strip())
         and any(
             (m.get("reasoning") or m.get("reasoning_content") or "").strip()
             for m in messages
@@ -515,13 +562,43 @@ def native_payment_evidence(objects, job, manifest, *, receipts_out=None):
         )
     if receipts_out is not None:
         receipts_out.extend(receipts)
+    # For standing work the economic outcome uses only independently verifiable
+    # completion. Preserve exposed responses even when a model takes no tools,
+    # omits reasoning on a turn, or makes an unsafe synthetic task decision.
+    if rule == POOL_PAYMENT_RULE:
+        task_pass = bool(
+            complete_verified
+            and task_pass
+            and checks["code_grade"]
+            and checks["no_hard_failure"]
+            and (family in {"P9", "P10"} or expected == final_answer.strip())
+        )
+    else:
+        task_pass = eligible
     return {
         **additional,
         "payment_rule": rule,
-        "eligible": eligible and not manifest.get("correction_source"),
+        "complete_verified": complete_verified,
+        "task_pass": task_pass,
+        "eligible": (
+            complete_verified
+            if rule == POOL_PAYMENT_RULE
+            else eligible and not manifest.get("correction_source")
+        ),
         "calls": len(receipts),
         "cost_microusd": total,
         "provider_calls_sha256": judge.digest([sha for _, _, sha in receipts]),
+    }
+
+
+def verification_matches(recorded, evidence):
+    if recorded == evidence:
+        return True
+    # Original fixed-offer manifests predate the separate completion and grade labels.
+    return evidence["payment_rule"] != POOL_PAYMENT_RULE and recorded == {
+        key: value
+        for key, value in evidence.items()
+        if key not in ("complete_verified", "task_pass")
     }
 
 
@@ -559,7 +636,7 @@ def registered_native_result(pending, objects, policy, approved):
         manifest["verification"],
         1024 * 1024,
     )
-    if recorded != evidence:
+    if not verification_matches(recorded, evidence):
         raise ValueError("stored verification differs from the funded work")
     return manifest, evidence
 

@@ -232,6 +232,8 @@ class CollectionBroker:
         if model not in GENERATOR_ROUTES:
             return False
         batch, mode = self.job.get("batch_id"), self.job.get("mode")
+        if mode == "live" and re.fullmatch(r"pool-[0-9a-f]{64}", str(batch)):
+            return route == GENERATOR_ROUTES[model].tag or (model, route) == (REFERENCE_MODEL, REFERENCE_ROUTE)
         if mode == "live" and re.fullmatch(r"dv-[0-9a-f]{64}", str(batch)):
             approved = (self.database.rpc("collection_offer_schedule_v1", {"p_offer": batch}) or {}).get("pilot_evidence", {})
             return (

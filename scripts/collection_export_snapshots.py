@@ -12,6 +12,9 @@ import tempfile
 from zipfile import ZipFile
 
 from lab_arena import collection_intake as intake, collection_judge as judge
+from lab_arena.collection_pool import POOL_PAYMENT_RULE
+from lab_arena.collection_experiment import load_experiment
+from lab_arena.collection_experiment_export import write_dataset
 from lab_arena.collection_workflow import store_artifact
 from scripts.collection_batch import write_exports
 from scripts.collection_review import read_file
@@ -24,10 +27,11 @@ TERMINAL = {"accepted", "failed", "rejected"}
 class OfferRows:
     """Read one consistent job/grant roster across the pack's validation and export."""
 
-    def __init__(self, db, batch):
+    def __init__(self, db, batch, experiment=None):
         self.batch = batch
         self.db = db
-        self.approval = db.rpc("collection_offer_schedule_v1", {"p_offer": batch})
+        self.experiment = experiment
+        self.approval = None if experiment else db.rpc("collection_offer_schedule_v1", {"p_offer": batch})
         self.rows = db.rpc("collection_batch_jobs_v1", {"p_batch": batch})
         self.funding = db.rpc("collection_training_consents_v1", {"p_batch": batch})
 
@@ -60,7 +64,7 @@ def _pack(raw, prompt, source, objects, directory, scenario, members, previous):
     """A missing or unsafe attempt must not hide its independently verified siblings."""
     ready = {rid for rid, row in members.items() if row["state"] == "settled"}
     held = {}
-    result = {"members": members, "held": held}
+    result = {"members": members, "held": held, "export_version": 2}
     if not ready:
         return result
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -68,6 +72,9 @@ def _pack(raw, prompt, source, objects, directory, scenario, members, previous):
         file = Path(td) / "pack.zip"
 
         def build(ids, output):
+            if source.experiment:
+                return write_dataset(source.experiment, source, objects, output, full_trajectories=True,
+                                     only_jobs=ids, publish=False, prompt=prompt)
             return write_exports(raw, prompt, source, objects, output, only_jobs=ids, publish=False)
 
         try:
@@ -111,7 +118,15 @@ def _pack(raw, prompt, source, objects, directory, scenario, members, previous):
         with target.open("rb") as stream:
             archive_hash = hashlib.file_digest(stream, "sha256").hexdigest()
         if previous.get("dataset_sha256") != meta["dataset_sha256"]:
-            store_artifact(objects, source.batch, "export", "split", raw["split_manifest"])
+            if source.experiment:
+                # All chunks from this experiment share its frozen, private partition.
+                # Re-read the immutable input stored with a released job rather than copying held-out IDs into the ZIP.
+                from lab_arena.collection_workflow import read_artifact
+                split = read_artifact(objects, source.batch, min(ready - held.keys() or ready), "split",
+                                      {"sha256": raw["split_sha256"]}, 128 << 20)
+            else:
+                split = raw["split_manifest"]
+            store_artifact(objects, source.batch, "export", "split", split)
             store_artifact(objects, source.batch, "export", "release", meta)
         result.update(
             file=target.name,
@@ -168,23 +183,28 @@ def observe(private_root, directory, db, objects, previous=None, *, max_groups=1
             old = json.loads(contents)["offers"]
         prompt = json.loads(read_file(private_root / "prompt.json"))
         paid = private_root / "paid"
-        manifests = [paid / "batch.json", *sorted((paid / "offers").glob("dv-*.json"))]
+        legacy = paid / "batch.json"
+        manifests = ([legacy] if legacy.is_file() else []) + sorted(
+            path for path in (paid / "offers").glob("*.json") if path.name.startswith(("dv-", "pool-"))
+        )
         inputs = {}
         work = []
         offers = {}
         for path in manifests:
             raw = json.loads(read_file(path))
-            batch = load_batch(raw, prompt).batch_id
-            if path != manifests[0] and path.stem != batch:
+            experiment = load_experiment(raw, prompt) if raw.get("payment_rule") == POOL_PAYMENT_RULE else None
+            batch = experiment.batch_id if experiment else load_batch(raw, prompt).batch_id
+            if path != legacy and path.stem != batch:
                 raise ValueError("paid manifest name differs from its contents")
             if batch in inputs:
                 continue
-            data = OfferRows(db, batch)
-            if not data.approval:
+            data = OfferRows(db, batch, experiment)
+            if not experiment and not data.approval:
                 if data.rows or batch in old:
                     raise ValueError("missing historical export approval")
                 continue  # A measured offer may be installed before staging.
-            verify_live_panel(raw, load_batch(raw, prompt), data.approval["pilot_evidence"])
+            if not experiment:
+                verify_live_panel(raw, load_batch(raw, prompt), data.approval["pilot_evidence"])
             inputs[batch] = (raw, data)
             grants = {r["job_id"]: r for r in data.funding}
             if len(grants) != len(data.funding):
@@ -211,7 +231,8 @@ def observe(private_root, directory, db, objects, previous=None, *, max_groups=1
                 raise ValueError("previously registered work disappeared")
             for case, members in sorted(by_case.items()):
                 prior_group = prior.get(case, {})
-                same = members == prior_group.get("members")
+                same_members = members == prior_group.get("members")
+                same = same_members and prior_group.get("export_version") == 2
                 exists = (
                     not prior_group.get("file") or (directory / batch / prior_group["file"]).is_file()
                 )
@@ -224,7 +245,10 @@ def observe(private_root, directory, db, objects, previous=None, *, max_groups=1
                     groups[case] = {**(prior_group if kept else {}), "members": members, "queued": True}
                 old_partial = any(m["job_status"] == "failed" for m in members.values())
                 if groups[case].get("queued"):
-                    work.append((0, batch, case))
+                    # A verified archive is already available during a format upgrade.
+                    # New funded work comes first; the regular retry pass backfills old packs.
+                    upgrade_only = same_members and exists and prior_group.get("file") and not same
+                    work.append((1 if upgrade_only else 0, batch, case))
                 elif prior_group.get("held") or old_partial:
                     work.append((1, batch, case))
         if not set(old) <= set(offers):

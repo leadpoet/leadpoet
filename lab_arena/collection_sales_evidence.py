@@ -168,7 +168,7 @@ def _history(objects, job, manifest, row, packet):
                             and d.get("body") == state["documents"][key]["body"]
                         ):
                             seen.add(key)
-            inherited_prefix = bool(row.get("native_correction"))
+            inherited_prefix = bool(row.get("native_correction") or row.get("correction"))
             continue
         if e["kind"] in ("before", "finish"):
             if inherited_prefix and before is None:
@@ -319,7 +319,7 @@ def _history(objects, job, manifest, row, packet):
 
 def sales_correction_source(objects, job):
     """Reread an immutable, originally owner-funded model mistake. Never turn an example into a failure."""
-    from lab_arena.collection_worker import native_payment_evidence
+    from lab_arena.collection_worker import native_payment_evidence, verification_matches
     from lab_arena.collection_workflow import SALES_EVIDENCE_RULE, read_artifact
 
     if (
@@ -339,9 +339,8 @@ def sales_correction_source(objects, job):
     ):
         raise ValueError("expected an original owner sales assignment")
     checked = native_payment_evidence(objects, job, m)
-    if checked != read_artifact(
-        objects, b, r, "native-verification", m["verification"], 4 * 1024 * 1024
-    ):
+    recorded = read_artifact(objects, b, r, "native-verification", m["verification"], 4 * 1024 * 1024)
+    if not verification_matches(recorded, checked):
         raise ValueError("original owner verification differs")
     if not checked["first_failed_decision"]:
         raise ValueError("no observed failed decision to correct")

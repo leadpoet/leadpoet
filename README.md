@@ -18,17 +18,17 @@ Subnet 71 is a Bittensor subnet where miners fund experiments to improve open sa
 
 ## Locked collection
 
-Miners fund our public sales agent with a dedicated OpenRouter key. We run the task, record its reasoning and tool calls, and verify the result. Each eligible paid assignment earns a fixed quote based on 1.25× the measured cost of that model and task. Validators convert those quotes to weights. If emissions fall short, all quotes scale proportionally. Final payments also depend on network validator votes and the token price. Champion rewards have ended.
+Miners register their OpenRouter key and a total spending limit. Leadpoet runs the sales agent on sandbox experiments and records its decisions, available reasoning and tool evidence. The same key can fund multiple experiments until its budget is used or the miner revokes it.
 
-Use `leadpoet collection-terms` to see the available work and its prices. Offers can cover a partner-credit workflow or a research task where the agent checks sources and cites evidence for a sales decision. The first seven jobs had combined quotes of $0.03418 and received about $0.02812 in emissions at the quoted exchange rate.
+For a verified, completed run, the miner’s reward target is **1.25× the actual settled generator cost**, whether the agent succeeds or fails the task. Validators convert dollar targets to subnet weights. Available emissions, validator votes and token prices affect the final alpha payment.
 
-After installing the miner CLI and registering your SN71 hotkey, use the command below to review the default offer and set your rolling 24-hour spending cap. To choose another listed offer, add `--accept-offer OFFER_ID`.
+Use your registered SN71 wallet to enroll. This example authorizes **$5 total**:
 
 ```bash
-leadpoet collection-register --mode live --wallet-name miner --daily-cap-usd 0.30
+leadpoet collection-register --wallet-name miner --spend-limit-usd 5
 ```
 
-Pilot enrollments require a new signature to join paid collection. You can check charges and stop new spending at any time. [Enrollment and spending controls](docs/locked-collection.md#enrollment)
+The CLI shows the terms before signing. You can check charges and stop funding at any time. [Miner guide](docs/locked-collection.md#enrollment)
 
 ## Install and register
 

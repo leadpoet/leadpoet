@@ -12,6 +12,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
+from lab_arena.collection_pool import POOL_SCOPE, POOL_PAYMENT_RULE, POOL_TERMS, POOL_TERMS_HASH
 from lab_arena import contracts, store
 from lab_arena.credentials import OPENROUTER_FUNDING_FIELDS
 
@@ -187,6 +188,9 @@ def require_correction_grant(mode, digest):
 
 
 def terms(mode, task_scope=TASK_SCOPE):
+    if mode == "live" and task_scope == POOL_SCOPE:
+        return {"mode": mode, "task_scope": task_scope, "terms": POOL_TERMS, "terms_sha256": POOL_TERMS_HASH,
+                "network": "finney", "netuid": 71, "cap_type": "lifetime", "reward_multiplier": "1.25"}
     if task_scope not in (TASK_SCOPE, CORRECTION_SCOPE) or mode not in ("pilot", "live"):
         raise IntakeError("collection_scope_unavailable", 422)
     if task_scope == CORRECTION_SCOPE:
@@ -298,6 +302,14 @@ def signed_daily_slots(body):
     return slots
 
 
+def standing_limit(body):
+    if (set(body) != {"credentials_sha256", "terms_sha256", "task_scope", "spend_limit_microusd", "priority"}
+            or body["task_scope"] != POOL_SCOPE or body["terms_sha256"] != POOL_TERMS_HASH
+            or type(body["priority"]) is not int or body["priority"] not in (0, 1)):
+        raise IntakeError("collection_consent_invalid")
+    return _micros(body["spend_limit_microusd"], 1)
+
+
 def _micros(value, minimum):
     if type(value) is not int or not minimum <= value <= MAX_MICROUSD:
         raise IntakeError("collection_money_invalid")
@@ -359,7 +371,13 @@ class CollectionIntake:
     def register(self, signed, owner, credentials, *, published=None):
         """Caller authenticates the scoped signed envelope. Only that envelope is retained."""
         body, hk = signed["body"], signed["hotkey"]
-        signed_daily_slots(body)
+        if body.get("task_scope") == POOL_SCOPE:
+            if self.mode != "live":
+                raise IntakeError("collection_consent_invalid")
+            cap = standing_limit(body)
+        else:
+            signed_daily_slots(body)
+            cap = _micros(body["daily_cap_microusd"], 1)
         if published is None:
             published = terms(self.mode, body["task_scope"])
             if self.mode == "live" and body["task_scope"] == TASK_SCOPE and "offer_id" in body:
@@ -383,7 +401,6 @@ class CollectionIntake:
                     raise IntakeError("collection_compensated_corrections_unavailable", 503)
             elif "fixed_quotes" in published and not published["fixed_quotes"]:
                 raise IntakeError("collection_comparison_prices_unavailable", 503)
-        cap = _micros(body["daily_cap_microusd"], 1)
         registration = str(uuid.UUID(hex=signed["request_id"]))
         prefix = "collection:" + registration
         encrypted = self.credential_manager.validate_openrouter_funding(
@@ -506,6 +523,17 @@ class CollectionIntake:
         _micros(fixed_quote, 0 if self.mode == "pilot" else 1)
         if self.mode == "pilot" and fixed_quote:
             raise IntakeError("pilot_quote_must_be_zero")
+        return self._claim_slots(experiment, harness_commit, terms_hash, fixed_quote, expected_model)
+
+    def claim_pool(self, experiment, harness_commit, *, expected_model="*"):
+        if (self.mode != "live" or experiment.raw["mode"] != "live"
+                or experiment.raw.get("terms_sha256") != POOL_TERMS_HASH
+                or experiment.raw.get("payment_rule") != POOL_PAYMENT_RULE
+                or not re.fullmatch(r"pool-[0-9a-f]{64}", experiment.batch_id)):
+            raise IntakeError("collection_consent_invalid")
+        return self._claim_slots(experiment, harness_commit, POOL_TERMS_HASH, 0, expected_model)
+
+    def _claim_slots(self, experiment, harness_commit, terms_hash, fixed_quote, expected_model):
         if not re.fullmatch("[0-9a-f]{40}", harness_commit):
             raise IntakeError("collection_harness_unpinned")
         token = store.new_lease_token()
@@ -570,9 +598,16 @@ def _validate_quality(summary):
         "payment_rule",
     }:
         raise IntakeError("collection_quality_invalid")
-    if "payment_rule" in summary and (summary.get("payment_rule") not in PAID_TASK_FAMILIES or
-           set(summary) != {"payment_rule", "training_status"} or summary["training_status"] != "needs_review"):
-        raise IntakeError("collection_quality_invalid")
+    if "payment_rule" in summary:
+        rule = summary["payment_rule"]
+        if rule == POOL_PAYMENT_RULE:
+            allowed_statuses = {"accepted", "code_rejected"}
+        elif rule in PAID_TASK_FAMILIES:
+            allowed_statuses = {"needs_review"}
+        else:
+            raise IntakeError("collection_quality_invalid")
+        if set(summary) != {"payment_rule", "training_status"} or summary["training_status"] not in allowed_statuses:
+            raise IntakeError("collection_quality_invalid")
     if "training_status" in summary and summary["training_status"] not in {
         "code_rejected",
         "claim_rejected",

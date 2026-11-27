@@ -26,6 +26,78 @@ def sign(value, key_path):
     }
 
 
+def store_private_json(path, value):
+    """Publish a complete immutable input even if two operator workers resume together."""
+    encoded = judge._json(value).encode()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent) as tmp:
+        tmp.write(encoded)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        try:
+            os.link(tmp.name, path)
+        except FileExistsError:
+            if json.loads(read_file(path)) != value:
+                raise ValueError("a different frozen experiment already exists at this path")
+
+
+def prepare_pool(args):
+    from lab_arena.collection_broker import REFERENCE_MODEL, REFERENCE_ROUTE
+    from lab_arena.collection_experiment import MAX_EXPERIMENT_SLOTS
+    from lab_arena.collection_generation import CAPTURE_V2
+    from lab_arena.collection_pool import POOL_TERMS_HASH, POOL_PAYMENT_RULE
+    from lab_arena.collection_workflow import workflow_sources, experiment_revisions
+
+    if (not 300 <= args.first_seed <= 10**8 - args.scenario_count
+            or not 1 <= args.scenario_count <= MAX_EXPERIMENT_SLOTS
+            or len(set(args.model)) != len(args.model)):
+        raise ValueError("invalid training seeds or model roster")
+    cases = [{"scenario_id":f"{args.family}-s{i}"} for i in range(args.first_seed,args.first_seed+args.scenario_count)]
+    agent,builder=experiment_revisions(c["scenario_id"] for c in cases)
+    with workflow_sources(args.champion_repo,args.poet_repo,corrections=True,builder_revision=builder) as sources:
+        split=sources[1].training_partition(args.family)
+    routes = {m: REFERENCE_ROUTE if m == REFERENCE_MODEL else GENERATOR_ROUTES[m].tag for m in args.model}
+    raw={"schema":SCHEMA,"id":args.experiment_id,"mode":"live","payment_rule":POOL_PAYMENT_RULE,
+        "question":"How often does each model complete this sales task correctly across repeated fresh runs?",
+        "pass_mark":"Full native grade and verified task-specific evidence.",
+        "max_slots":len(cases)*args.repeat*len(args.model),"budget_microusd":args.cap_microusd*len(cases)*args.repeat*len(args.model),
+        "capture_version":CAPTURE_V2,"terms_sha256":POOL_TERMS_HASH,"split_sha256":_hash(split),"routes":routes,"cases":cases,
+        "arms":[{"id":f"expert-{n}","role":"expert","model":m,"repeats":args.repeat,"max_steps":args.max_steps,
+                 "max_tokens":args.max_generated_tokens,"max_run_tokens":args.max_run_tokens,"reasoning_effort":"low",
+                 "capture_reasoning":True,"budget_microusd":args.cap_microusd} for n,m in enumerate(args.model,1)]}
+    if args.auto_correct_model:
+        raw["correction_model"] = args.auto_correct_model
+    if bool(args.source_batch) != bool(args.source_job):
+        raise ValueError("supply both the original funded batch and job")
+    if args.source_batch:
+        from scripts.run_lab_arena_service import load_scoped_environment
+        from scripts.run_locked_collection import evidence_stores
+        from lab_arena.collection_pool_source import funded_source
+        from lab_arena.collection_intake import register_signatures
+        if args.renew or len(cases)!=1:
+            raise ValueError("a correction needs one fixed source case")
+        if args.environment_file:
+            load_scoped_environment(args.environment_file)
+        register_signatures()
+        prompt=json.loads(read_file(args.prompt));source_spec=load_experiment(json.loads(read_file(args.source_batch)),prompt)
+        db,objects=evidence_stores()
+        source=funded_source(db,objects,source_spec.batch_id,args.source_job,prompt)
+        if source["scenario_id"]!=cases[0]["scenario_id"] or source["student_model"] in args.model:
+            raise ValueError("expert and scenario must match the observed student failure")
+        source_hash=_hash(source)
+        cases[0]["source_sha256"]=source_hash
+        for a in raw["arms"]:a["role"]="continuation"
+        raw["question"]="Can the expert recover from the recorded model error at its exact predecision checkpoint?"
+        store_private_json(args.inputs/(source_hash[7:]+".json"),source)
+    if args.renew:
+        raw["successor_seeds"]=True
+    spec=load_experiment(raw,json.loads(read_file(args.prompt)))
+    store_private_json(args.inputs/(spec.raw["split_sha256"][7:]+".json"),split)
+    store_private_json(args.directory/(spec.batch_id+".json"),raw)
+    print(json.dumps({"batch":spec.batch_id,"slots":len(spec.slots),"builder":builder,"harness":agent}))
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
@@ -82,6 +154,24 @@ def main(argv=None):
             type=int,
             help="Predeclare the minimum genuine sample before this pilot can price one paid class",
         )
+    pool = sub.add_parser("prepare-pool", help="Stage an operator-owned standing experiment on fresh training cases")
+    pool.add_argument("--family", choices=("P7", "P8", "P9", "P10"), required=True)
+    pool.add_argument("--first-seed", type=int, required=True)
+    pool.add_argument("--scenario-count", type=int, default=8)
+    pool.add_argument("--model", action="append", choices=tuple(GENERATOR_ROUTES), required=True)
+    pool.add_argument("--auto-correct-model", choices=tuple(GENERATOR_ROUTES), help="Stage a same-state correction on this expert after an observed failure by another arm")
+    pool.add_argument("--source-batch",type=Path,help="Original standing manifest for a real failed student")
+    pool.add_argument("--source-job",help="Verified completed student job ID; changes the arm into a continuation")
+    pool.add_argument("--environment-file",type=Path)
+    pool.add_argument("--repeat", type=int, default=4)
+    pool.add_argument("--cap-microusd", type=int, required=True)
+    pool.add_argument("--max-steps", type=int, default=32)
+    pool.add_argument("--max-generated-tokens", type=int, default=4096)
+    pool.add_argument("--max-run-tokens", type=int, default=65536)
+    pool.add_argument("--experiment-id", required=True)
+    pool.add_argument("--renew", action="store_true", help="Advance completed packs to new deterministic training seeds")
+    for field in ("directory", "inputs", "prompt", "champion-repo", "poet-repo"):
+        pool.add_argument("--" + field, type=Path, required=True)
     feedback = sub.add_parser(
         "sign-feedback",
         help="Sign actual paired held-out results on the Poet evaluator's machine",
@@ -89,6 +179,8 @@ def main(argv=None):
     for name in ("results", "private-key", "output"):
         feedback.add_argument("--" + name, type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.action == "prepare-pool":
+        return prepare_pool(args)
     if args.action == "sign-feedback":
         result = json.loads(read_file(args.results))
         if (

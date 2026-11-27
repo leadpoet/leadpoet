@@ -52,9 +52,22 @@ SALES_EVIDENCE_PARTITION_SHA256 = (
 )
 SALES_EVIDENCE_RULE = "verified_sales_evidence_v1"
 
+OUTREACH_POET_REV = "212f54aa31414fd040ac7fb10669b7f040ff709f"
+NATIVE_PARTITIONS = {
+    "P7": TRAIN_ONLY_PARTITION_SHA256,
+    "P8": SALES_EVIDENCE_PARTITION_SHA256,
+    "P9": "b293b74db664d75f7949a93948cffd4fbe7e4c975d4d3153423b55c828368dbc",
+    "P10": "7ac4a314b29800e83c4b485fea33e166b9d2150f77dbfa7b2741436a4367381f",
+}
+
+
 
 def experiment_revisions(scenarios=()):
     scenarios = tuple(scenarios)
+    if any(s.startswith(("P9-s", "P10-s")) for s in scenarios):
+        if len({s.split("-s")[0] for s in scenarios}) != 1:
+            raise ValueError("outreach controls require a single frozen training partition")
+        return CORRECTION_CHAMPION_REV, OUTREACH_POET_REV
     if any(s.startswith("P8-s") for s in scenarios):
         if not all(s.startswith("P8-s") for s in scenarios):
             raise ValueError(
@@ -74,6 +87,8 @@ def comparison_revisions(settings):
         return CHAMPION_REV, POET_REV
     if settings["capture_version"] not in (LEGACY_CAPTURE, COMPARISON_CAPTURE):
         raise ValueError("unknown comparison capture version")
+    if any(s.startswith(("P9-s", "P10-s")) for s in settings.get("scenario_ids", ())):
+        return experiment_revisions(settings["scenario_ids"])
     if settings.get("payment_rule") == SALES_EVIDENCE_RULE or any(
         s.startswith("P8-s") for s in settings.get("scenario_ids", ())
     ):
@@ -119,7 +134,7 @@ def workflow_sources(
     if builder_revision is None:
         builder_revision = CORRECTION_POET_REV if corrections else POET_REV
     allowed = (
-        {CORRECTION_POET_REV, TRAIN_ONLY_POET_REV, SALES_EVIDENCE_POET_REV}
+        {CORRECTION_POET_REV, TRAIN_ONLY_POET_REV, SALES_EVIDENCE_POET_REV, OUTREACH_POET_REV}
         if corrections
         else {POET_REV}
     )
@@ -171,7 +186,7 @@ def workflow_sources(
 
 def build_scenario(builders, scenario_id):
     match = re.fullmatch(
-        r"(C\d{2}|K\d{2}|B[1-8]|E[1-7]|P[1-8])-s([1-9]\d{0,7})", scenario_id
+        r"(C\d{2}|K\d{2}|B[1-8]|E[1-7]|P[1-9]|P10)-s([1-9]\d{0,7})", scenario_id
     )
     if not match:
         raise ValueError("unknown workflow scenario id")
@@ -347,7 +362,12 @@ def play_workflow(
     ):
         raise ValueError("a correction needs the pinned checkpoint harness")
     shape = None
-    if source is not None:
+    if source is not None and source.get("schema") == "collection.funded-student.v1":
+        if (not job["batch_id"].startswith("pool-") or job["mode"] != "live" or continuation is None
+                or source["scenario_id"]!=job["scenario_id"] or source["student_model"]==job["model"]):
+            raise ValueError("incorrect funded checkpoint assignment")
+        task = build_scenario(builders,job["scenario_id"])
+    elif source is not None:
         validate_student_source(harness, builders, source)
         if source["scenario_id"] != job["scenario_id"]:
             raise ValueError("source and assigned scenario differ")

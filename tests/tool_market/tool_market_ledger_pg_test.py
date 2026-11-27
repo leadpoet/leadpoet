@@ -18,7 +18,7 @@ def reserve(world, token, key):
     status = world.store.reserve_call(
         call_id=call_id, token_hash=market.token_hash(token), tool="harvestapi",
         operation="linkedin_profile", key_id=key, ask_microusd=10_000,
-        reserve_microusd=11_000, owed_cap_microusd=10_000)
+        owed_cap_microusd=10_000)
     return call_id, status
 
 

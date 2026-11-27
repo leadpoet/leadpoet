@@ -518,7 +518,7 @@ def test_a_buyers_calls_in_flight_count_toward_their_quarter(world, admin):
     def reserve():
         return world.store.reserve_call(call_id=str(uuid.uuid4()), token_hash=tab, tool="harvestapi",
                                         operation="linkedin_profile", key_id=cheap["key_id"], ask_microusd=10_000,
-                                        reserve_microusd=11_000, owed_cap_microusd=10_000)
+                                        owed_cap_microusd=10_000)
 
     assert [reserve(), reserve()] == ["reserved", "key_cap"]  # the first is still in flight
     # A restart cut the first off: it never settles, and still counts.
@@ -608,7 +608,7 @@ def test_calls_in_flight_count_toward_the_unknown_usage_limit(world):
     def reserve():
         return world.store.reserve_call(call_id=str(uuid.uuid4()), token_hash=tab, tool="harvestapi",
                                         operation="linkedin_profile", key_id=key_id, ask_microusd=10,
-                                        reserve_microusd=11, owed_cap_microusd=10)
+                                        owed_cap_microusd=10)
 
     assert [reserve() for _ in range(20)] == ["reserved"] * 20  # none has settled yet
     assert reserve() == "uncertain_limit"
@@ -635,7 +635,7 @@ def test_a_month_long_api_key_still_counts_toward_the_unknown_usage_limit(world,
     def reserve():
         return world.store.reserve_call(call_id=str(uuid.uuid4()), token_hash=tab, tool="harvestapi",
                                         operation="linkedin_profile", key_id=key_id, ask_microusd=10,
-                                        reserve_microusd=11, owed_cap_microusd=10)
+                                        owed_cap_microusd=10)
 
     assert [reserve() for _ in range(20)] == ["reserved"] * 20
     assert reserve() == "uncertain_limit"
@@ -651,13 +651,13 @@ def test_a_settlement_cannot_charge_more_than_its_reserve_or_settle_twice(world)
     other = str(uuid.uuid4())
     assert world.store.reserve_call(call_id=other, token_hash=market_module.token_hash(token), tool="harvestapi",
                                     operation="linkedin_profile", key_id=reserve["key_id"], ask_microusd=10_000,
-                                    reserve_microusd=11_000, owed_cap_microusd=10_000) == "reserved"
+                                    owed_cap_microusd=10_000) == "reserved"
     with pytest.raises(ArenaStoreError):
         world.store.settle_call(call_id=other, status="settled", http_status=200, units=1, owed_microusd=10_000,
                                 charge_microusd=11_001, epoch=7)
     assert world.store.reserve_call(call_id=str(uuid.uuid4()), token_hash=market_module.token_hash(token),
                                     tool="harvestapi", operation="linkedin_profile", key_id=reserve["key_id"],
-                                    ask_microusd=9_999, reserve_microusd=11_000, owed_cap_microusd=10_000) \
+                                    ask_microusd=9_999, owed_cap_microusd=10_000) \
         == "ask_changed"
 
 

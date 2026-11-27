@@ -78,11 +78,10 @@ class Client:
             document = json.loads(raw or b"{}")
         except ValueError:
             document = None
-        if not isinstance(document, dict):
-            document = None
-        if 200 <= status < 300 and document is not None:
+        ok = isinstance(document, dict)
+        if ok and 200 <= status < 300:
             return document
-        return {"error": "http_%d" % status, **(document or {}), "status": status}
+        return {"error": "http_%d" % status, **(document if ok else {}), "status": status}
 
     def tools(self) -> Dict[str, Any]:
         return self.request("GET", "/tool-market/catalog")

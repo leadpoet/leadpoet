@@ -435,8 +435,7 @@ class ToolMarket:
             call_id = self._new_id()
             status = self._store.reserve_call(
                 call_id=call_id, token_hash=tab, tool=tool, operation=op.name, key_id=ask.key_id,
-                ask_microusd=ask.ask_microusd, reserve_microusd=book.charge_microusd(owed_cap),
-                owed_cap_microusd=owed_cap)
+                ask_microusd=ask.ask_microusd, owed_cap_microusd=owed_cap)
             if status == "tab_closed":
                 raise ToolMarketError(401, "tab_closed")
             if status == "tab_budget":

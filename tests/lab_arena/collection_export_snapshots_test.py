@@ -364,3 +364,31 @@ def test_funded_tick_does_not_hide_backend_timeouts(lab, monkeypatch):
     monkeypatch.setattr(snapshots, "_pack", unavailable)
     with pytest.raises(TimeoutError, match="object storage timeout"):
         snapshots.observe(lab.root, lab.out, SimpleNamespace(rpc=lab.rpc), None)
+
+
+def test_unreleased_bill_change_keeps_funded_siblings_visible_during_queue(lab):
+    lab.add(FIRST, "done")
+    lab.add(FIRST, "waiting", status="failed", unsettled=1)
+    initial = lab.tick()
+    original = lab.index()[FIRST]["P7-s1"]
+    archive = lab.out / FIRST / original["file"]
+    data = archive.read_bytes()
+
+    # A different group wins this tick, while the previously unpublished attempt settles.
+    lab.add(FIRST, "new", case="P7-s0")
+    lab.original["waiting"]["unresolved"] = 0
+    db = SimpleNamespace(rpc=lab.rpc)
+    queued = snapshots.observe(lab.root, lab.out, db, None, {**initial, "last_group": ""}, max_groups=1)
+    group = lab.index()[FIRST]["P7-s1"]
+    assert group["queued"] and group["released"] == ["done"] and group["file"] == original["file"]
+    assert archive.read_bytes() == data
+    published = lab.tick(queued)
+    assert lab.index()[FIRST]["P7-s1"]["released"] == ["done", "waiting"]
+
+    # A funding change to an already published member must invalidate the current link.
+    lab.add(FIRST, "other", case="P7-s00")
+    lab.original["waiting"]["unresolved"] = 1
+    snapshots.observe(lab.root, lab.out, db, None, {**published, "last_group": "", "pass": 0}, max_groups=1)
+    changed = lab.index()[FIRST]["P7-s1"]
+    assert changed["queued"] and not changed.get("file") and not changed.get("released")
+    assert archive.read_bytes() == data

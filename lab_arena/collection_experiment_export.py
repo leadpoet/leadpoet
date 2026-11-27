@@ -275,7 +275,15 @@ def write_dataset(
                     or job["harness_commit"] != source_revisions(spec.raw)[0]
                 ):
                     raise ValueError("job differs from frozen experiment")
-                if trained and (job["status"] not in {"accepted", "rejected", "failed"} or job["unresolved"]):
+                # A terminal interruption can release a verified prefix while its last
+                # reservation is unknown. It cannot qualify for a reward or a positive pair.
+                partial_bill = bool(
+                    pooled and full_trajectories and job["status"] == "failed" and job["unresolved"]
+                )
+                if trained and (
+                    job["status"] not in {"accepted", "rejected", "failed"}
+                    or (job["unresolved"] and not partial_bill)
+                ):
                     pending.append({"run_id": rid, "slot": i,
                                     "reason": "billing_pending" if job["unresolved"] else "execution_pending"})
                     continue
@@ -320,6 +328,15 @@ def write_dataset(
                         else:
                             projected.update(verification_method=POOL_PAYMENT_RULE, verified_complete=False,
                                              verified_task_pass=None, payment_eligible=False, earned_target_microusd=0)
+                    if pooled and projected["partial"]:
+                        projected["no_loss_turns"] = list(projected["label_turns"])
+                    if partial_bill:
+                        projected.update(
+                            billing_status="pending",
+                            unresolved_miner_calls=job["unresolved"],
+                            settled_miner_cost_microusd=job["miner_cost_microusd"],
+                            miner_cost_microusd=None,
+                        )
                     return projected
 
                 event_hashes = []
@@ -367,6 +384,12 @@ def write_dataset(
                         if full_trajectories:
                             observed_event = json.loads(event)
                             if observed_event["kind"] == "reply":
+                                if pooled and job["status"] == "failed":
+                                    from lab_arena.collection_generation import visible_reply
+                                    from lab_arena.collection_worker import _paid_reply
+
+                                    message = visible_reply(observed_event["message"])
+                                    _paid_reply(objects, job, len(replies) + 1, observed_event, message)
                                 replies.append({k: observed_event.get(k) for k in ("kind", "receipt", "model", "usage")})
                         if not trained:
                             z.writestr(f"{rid}/events/{idx:05d}.json", event)
@@ -675,6 +698,12 @@ def write_dataset(
                     else None
                 ),
             }
+            if pooled and full_trajectories and stats["unknown_miner_bills"]:
+                metadata.update(
+                    settled_miner_cost_microusd=stats["miner_cost_microusd"],
+                    miner_cost_microusd=None,
+                    cost_per_kept_row_microusd=None,
+                )
             if not pooled:
                 metadata["price_observations"] = [
                     {

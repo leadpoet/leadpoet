@@ -22,7 +22,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from lab_arena.lead_orders.auth import BuyerIdentity
 from lab_arena.lead_orders.config import is_valid_hotkey
@@ -454,20 +454,25 @@ class ToolMarket:
                                         seconds=CALL_TAB_SECONDS, terms_sha256=None)
 
         with self._slot(hotkey, MAX_CALLS_IN_FLIGHT_PER_BUYER, "too_many_calls_in_flight"):
+            asks = None
             opened = open_for(most)
             if opened["status"] == "insufficient_balance":
-                # Hold only what the cheapest key that could serve needs, so
-                # concurrent calls share a small balance, not one taking it all.
-                need = min((book.charge_microusd(book.owed_microusd(op, op.max_units, ask.ask_microusd))
-                            for ask in self._asks(tool, op, max_ask, private)), default=None)
-                if need is None:
+                # Hold what the keys this call may try can need, no more, so
+                # concurrent calls share a small balance and a call still
+                # fails over to a pricier key it can afford.
+                asks = list(self._asks(tool, op, max_ask, private, hotkey))[:MAX_ASKS_PER_CALL]
+                if not asks:
                     raise ToolMarketError(503, "no_supply")
-                if need <= int(self.balance(hotkey).get("balance_microusd") or 0):
-                    opened = open_for(need)
+                needs = [book.charge_microusd(owed_cap) for _, owed_cap in asks]
+                have = int(opened["balance"].get("balance_microusd") or 0)
+                if min(needs) > have:  # only then credit Gamma spent since the last reading
+                    have = int(self.balance(hotkey).get("balance_microusd") or 0)
+                if min(needs) <= have:
+                    opened = open_for(min(max(needs), have))
             if opened["status"] != "opened":
                 raise ToolMarketError(402, "insufficient_balance")
             try:
-                return self._buy(tool, op, max_ask, private, tab, hotkey, url, headers, payload)
+                return self._buy(tool, op, max_ask, private, tab, hotkey, url, headers, payload, asks)
             except ToolMarketError as error:
                 if error.code == "tab_budget":  # the tab is this call's share of the balance
                     raise ToolMarketError(402, "insufficient_balance") from None
@@ -495,8 +500,12 @@ class ToolMarket:
                     self._in_flight[name] = left
 
     def _buy(self, tool: str, op: catalog.Operation, max_ask: int, private: bool, tab: str, hotkey: str,
-             url: str, headers: Mapping[str, str], payload: bytes) -> Dict[str, Any]:
-        """Reserve and send on the cheapest keys that fit, up to the per-call limits."""
+             url: str, headers: Mapping[str, str], payload: bytes,
+             asks: Optional[List[Tuple[book.Ask, int]]] = None) -> Dict[str, Any]:
+        """Reserve and send on the cheapest keys that fit, up to the per-call limits.
+
+        ``asks``: the book as the caller already read it; each reserve re-checks
+        its key under the key's lock, so a moment-old book cannot over-reserve."""
 
         # Read before any vendor request, so a chain outage cannot strand a paid answer.
         try:
@@ -505,10 +514,9 @@ class ToolMarket:
             raise ToolMarketError(503, "chain_unavailable") from None
         tried = attempts = 0
         short = False
-        for ask in self._asks(tool, op, max_ask, private):
+        for ask, owed_cap in self._asks(tool, op, max_ask, private, hotkey) if asks is None else asks:
             if tried >= MAX_KEYS_PER_CALL or attempts >= MAX_ASKS_PER_CALL:
                 break
-            owed_cap = book.owed_microusd(op, op.max_units, ask.ask_microusd)
             attempts += 1
             call_id = self._new_id()
             status = self._store.reserve_call(
@@ -578,13 +586,15 @@ class ToolMarket:
         if not self._config.may_supply(tool, hotkey):
             raise ToolMarketError(403, "supplier_not_approved")
 
-    def _asks(self, tool: str, op: catalog.Operation, max_ask: int, private: bool):
-        """The book's asks, best first, that a reserve for this call could take."""
+    def _asks(self, tool: str, op: catalog.Operation, max_ask: int, private: bool, buyer: str):
+        """The book's asks, best first, that a reserve for this call could take
+        (never the buyer's own keys), each with the most the call could owe on it."""
 
         for ask in book.rank(book.Ask.from_row(row) for row in self._supply(tool)):
+            owed_cap = book.owed_microusd(op, op.max_units, ask.ask_microusd)
             if ask.ask_microusd <= max_ask and (not private or self._private(tool, ask)) \
-                    and book.owed_microusd(op, op.max_units, ask.ask_microusd) <= ask.remaining_microusd:
-                yield ask
+                    and owed_cap <= ask.remaining_microusd and ask.miner_hotkey != buyer:
+                yield ask, owed_cap
 
     def _supply(self, tool: str):
         return [row for row in self._store.book(tool=tool, terms_sha256=self._config.terms_sha256)

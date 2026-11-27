@@ -15,6 +15,7 @@ import uuid
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
+from scalecodec.utils.ss58 import ss58_encode
 
 from lab_arena.broker import ProviderResponse
 from lab_arena.chain import ArenaChainError
@@ -30,7 +31,6 @@ from lead_order_vault import envelope as vault_envelope
 from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
 
 MIGRATIONS = ("179-lab-arena-v1.sql", "770-tool-market.sql")
-B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 USD = 1_000_000
 VAULT_KEY = vault_envelope.compressed(ec.generate_private_key(ec.SECP256K1()).public_key()).hex()
 PROFILE = {"tool": "harvestapi", "operation": "linkedin_profile",
@@ -41,7 +41,9 @@ FIND = {"tool": "hunter", "operation": "email_finder", "params": {"domain": "acm
 
 
 def hotkey() -> str:
-    return "5" + "".join(random.choice(B58) for _ in range(47))
+    """A fresh, checksummed SS58 address, as the Gamma balance requires."""
+
+    return ss58_encode(random.randbytes(32).hex(), 42)
 
 
 HARVEST_PROFILE = {"status": 200, "element": {"id": "profile-id"}}
@@ -913,7 +915,7 @@ def test_a_funded_hotkey_calls_with_its_signature_alone_until_its_balance_runs_o
     """The Gamma standard's acceptance test: no terms step, no API key, 402 at zero."""
 
     world.miner_key("signed-key", 10_000)  # 11,000 a call to the buyer
-    buyer = "5FLSigC9HGRKVhB9FiEo4Y3koPsNmBmLJbpXg2mp1hXcS59Y"  # //Charlie: a checksummed address
+    buyer = hotkey()
     who = world.who(buyer)
     zeros = {"hotkey": buyer, "credited_usd": "0.000000", "used_usd": "0.000000", "remaining_usd": "0.000000"}
     assert world.market.gamma_balance(buyer) == zeros
@@ -959,8 +961,44 @@ def test_balance_reads_past_the_limit_answer_at_once_without_the_chain(world):
         world.market._chain_reads.acquire()
     try:
         with pytest.raises(ToolMarketError) as busy:
-            world.market.gamma_balance("5FLSigC9HGRKVhB9FiEo4Y3koPsNmBmLJbpXg2mp1hXcS59Y")
+            world.market.gamma_balance(hotkey())
         assert (busy.value.status, busy.value.code) == (503, "gamma_unavailable") and reads == []
+    finally:
+        for _ in range(market_module.CHAIN_READS):
+            world.market._chain_reads.release()
+
+
+def test_a_signed_call_the_stored_balance_covers_reads_no_chain(world):
+    world.miner_key("stored-key", 10_000)  # 11,000 a call, under the 275,000 a profile call may cost
+    buyer = hotkey()
+    world.gamma.units[buyer] = 30_000 * 1000
+    world.market.gamma_balance(buyer)  # the one reading
+    reads, read = [], world.gamma.read
+    world.gamma.read = lambda hk, head=None: reads.append(hk) or read(hk, head)
+    assert world.market.call("", PROFILE, world.who(buyer))["charge_microusd"] == 11_000
+    assert reads == []
+
+
+def test_a_signed_call_fails_over_to_a_pricier_key_and_skips_the_buyers_own(world):
+    miner, _ = world.miner_key("own-cheap", 8_000)
+    world.miner_key("limited-cheap", 9_000)
+    world.miner_key("pricier", 10_000)
+    world.vendor.script["limited-cheap"] = [ok({}, status=429)]
+    world.gamma.units[miner] = 50_000 * 1000  # under the 275,000 a profile call may cost
+    result = world.market.call("", PROFILE, world.who(miner))
+    assert result["charge_microusd"] == 11_000
+    assert [sent[0] for sent in world.vendor.sent] == ["limited-cheap", "pricier"]
+
+
+def test_a_flood_of_balance_reads_does_not_block_a_funded_signed_call(world):
+    world.miner_key("funded-key", 10_000)
+    buyer = hotkey()
+    world.gamma.units[buyer] = 100_000 * 1000
+    world.market.gamma_balance(buyer)
+    for _ in range(market_module.CHAIN_READS):
+        world.market._chain_reads.acquire()
+    try:
+        assert world.market.call("", PROFILE, world.who(buyer))["charge_microusd"] == 11_000
     finally:
         for _ in range(market_module.CHAIN_READS):
             world.market._chain_reads.release()

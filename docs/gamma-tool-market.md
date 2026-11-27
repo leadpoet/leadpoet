@@ -398,19 +398,18 @@ deployment, exactly as lead orders do.
   whether a key is live. The miner sealed the key, so it holds it already;
   the check adds only Leadpoet's address. A read-only 30-day check before
   the vault would close this.
-- **Four things grow with history.** A balance reads every tab the buyer
-  ever opened (a btauth/1 call is a tab of its own), every signed request
-  keeps a nonce row for good, each call sums its key's earlier calls, and
-  the book computes each key's last 24 h and last hour from the call
-  ledger on every call. Fine at launch volumes; keep running totals,
-  partition the nonces by day, and cache the public catalog and books,
-  before they grow.
+- **Reads that grow.** A balance reads every tab the buyer ever opened (a
+  btauth/1 call is a tab of its own), every signed request keeps a nonce
+  row for good, and the book and each reserve sum each key's last 24 h of
+  calls, which grows with daily volume. Fine at launch volumes; keep
+  running totals, partition the nonces by day, and cache the public
+  catalog and books, before they grow.
 - **A lost API key holds its budget until it expires.** Only its token
   closes it, and the CLI makes 30-day keys by default; a signed "close my
   keys" route would let a buyer free a lost one.
 - **A balance read is public and needs no funds.** Each costs a few chain
-  reads (a reading row only when the total changed). It has its own small
-  limiter and 4 threads; rate-limit it at the edge before opening it widely.
+  reads (a reading row only when the total changed). It runs on 4 threads
+  of its own; rate-limit it at the edge before opening it widely.
 - **One publisher hotkey.** The services document lists only the current
   service hotkey, and credit counts only spend there. A swap needs both
   listed, and credit read at both, before it happens.

@@ -202,13 +202,10 @@ class ToolMarket:
                                           budget_microusd=budget, seconds=seconds,
                                           terms_sha256=self._config.terms_sha256)
         except ArenaStoreError:
-            # Its answer may be lost after it committed: an open tab only its
-            # token can close would hold the budget until it expires.
-            found = self._store.tab(token_hash(token))
-            if not found:
-                raise
-            result = {"status": "opened", "tab_id": found["tab_id"], "budget_microusd": found["budget_microusd"],
-                      "expires_at": found["expires_at"]}
+            # It may commit yet (or have committed): the token lets the buyer
+            # find the tab (GET /tool-market/tab) and close it, so no tab only
+            # a lost token could close holds the budget until it expires.
+            raise ToolMarketError(503, "store_unavailable", token=token) from None
         if result["status"] == "terms_required":
             raise ToolMarketError(403, "terms_required")
         if result["status"] == "insufficient_balance":

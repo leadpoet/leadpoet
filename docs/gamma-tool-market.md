@@ -409,7 +409,9 @@ deployment, exactly as lead orders do.
   written); if the store is still down, the call is `503 store_unavailable`
   with its `call_id`, which may have been charged. `/usage` shows the
   outcome once the call is 11 minutes old; a retry before then can pay
-  twice. A tab whose opening answer is lost is read back the same way.
+  twice. A tab that fails to open the same way answers with its `token`,
+  which `GET /tool-market/tab` checks and `POST /tool-market/tab/close`
+  closes.
 - **A lost API key holds its budget until it expires.** Only its token
   closes it, and the CLI makes 30-day keys by default; a signed "close my
   keys" route would let a buyer free a lost one.

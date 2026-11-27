@@ -1,6 +1,7 @@
 """Read collection counters, finalized validator weights and closed-epoch miner emissions."""
 
 import argparse
+from collections import Counter
 from datetime import datetime, timezone
 import json
 import os
@@ -20,12 +21,51 @@ VALIDATORS = {
 }
 
 
+def pending_reveals(rpc, store, signing_key, cutover, snapshot, current, hotkeys, matches):
+    """A new encrypted commitment can coexist with the preceding epoch's revealed weights."""
+    from leadpoet_canonical.arena_weights import derive_arena_weights, verify_accepted_weight_state_signature
+    from leadpoet_canonical.chain_source_v2 import (
+        decode_timelocked_weight_commits, ss58_encode_account_id, timelocked_weight_commits_storage_key,
+    )
+
+    epoch = current["epoch"]
+    previous = store.get_weight_state("finney", 71, epoch - 1)
+    if not previous:
+        return matches
+    previous = previous["state_doc"]
+    verify_accepted_weight_state_signature(previous, public_key_der=signing_key.public_key_der,
+                                           expected_public_key_hash=signing_key.public_key_hash)
+    if (previous["epoch"] != epoch - 1 or previous["valid_until_block"] + 1 != current["valid_from_block"]
+            or not current["valid_from_block"] <= snapshot.current_block <= current["valid_until_block"]
+            or any(previous[k] != current[k] for k in ("network", "netuid", "genesis_hash", "burn_hotkey"))):
+        raise ValueError("preceding signed state does not cover the prior epoch")
+    number = previous["valid_until_block"]
+    parent = rpc.call(method="chain_getBlockHash", params=[number], request_id=3)
+    old_registry = collection_distributions.registry_at(rpc, number, parent)
+    expected = derive_arena_weights(previous, old_registry)
+    if (expected["champion_share_ppb"] != 0 or
+            any(i >= len(hotkeys) or hotkeys[i] != old_registry[i] for i in expected["sparse_uids"])):
+        return matches
+    applied = collection_distributions.validator_vectors(
+        rpc, snapshot.block_hash, hotkeys, epoch - 1, expected["weights_hash"], VALIDATORS)
+    key = timelocked_weight_commits_storage_key(netuid=71, subnet_epoch_index=cutover.subnet_epoch_index(epoch))
+    queue = decode_timelocked_weight_commits(rpc.call(method="state_getStorage", params=[key, snapshot.block_hash],
+                                                      request_id=4))
+    committed = Counter(ss58_encode_account_id(bytes.fromhex(entry["hotkey_public_key"])) for entry in queue
+                        if current["valid_from_block"] <= entry["submitted_at"] <= snapshot.current_block)
+    result = dict(matches)
+    for name, status in matches.items():
+        if status == "differs" and applied[name] == "matches" and committed[VALIDATORS[name]] == 1:
+            result[name] = "pending_reveal"
+    return result
+
+
 def validator_snapshot(env, db):
     from lab_arena import chain, signing
     from lab_arena.store import ArenaStore
     from lab_arena.local_weight_signer import HttpsJsonRpcTransport
     from Leadpoet.utils.subnet_epoch import OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
-    from leadpoet_canonical.arena_weights import derive_arena_weights, verify_accepted_weight_state_signature
+    from leadpoet_canonical.arena_weights import COLLECTION_BASIS_SCHEMA, derive_arena_weights, verify_accepted_weight_state_signature
 
     config = chain.ArenaChainConfig(env["LAB_ARENA_CHAIN_ENDPOINT"], 71, "finney", 15)
     reader = chain.ArenaChain(config, chain.connect_substrate(config))
@@ -33,7 +73,8 @@ def validator_snapshot(env, db):
         snap = chain.finalized_epoch_snapshot(reader)
     finally:
         reader.close()
-    epoch = snap.settlement_epoch_id(chain.load_arena_cutover(env))
+    cutover = chain.load_arena_cutover(env)
+    epoch = snap.settlement_epoch_id(cutover)
     store = ArenaStore(db)
     weight_start = store.collection_reward_start_epoch()
     state = store.get_weight_state("finney", 71, epoch)
@@ -51,6 +92,9 @@ def validator_snapshot(env, db):
     expected = derive_arena_weights(doc, hotkeys)
     matches = collection_distributions.validator_vectors(rpc, block, hotkeys, epoch, expected["weights_hash"], VALIDATORS)
     basis = doc["reward_basis"]
+    if (basis["schema_version"] == COLLECTION_BASIS_SCHEMA and weight_start is not None
+            and epoch > weight_start and "differs" in matches.values()):
+        matches = pending_reveals(rpc, store, key, cutover, snap, doc, hotkeys, matches)
     proof = {"basis_schema": basis["schema_version"], "quoted_jobs_match": None, "unweighted_funders": None}
     if "collection_share_ppb" in expected:
         quotes = db.rpc("collection_reward_quotes_v1", {"p_epoch": epoch})
@@ -97,7 +141,10 @@ def worker_snapshot():
         if not isinstance(row, dict):
             continue
         status = row.get("status")
-        if status in ("correction_held", "comparison_held"):
+        if isinstance(row.get("batch"), str) and row["batch"].startswith("pool-"):
+            if status in ("accepted", "rejected", "failed", "idle", "pool_unavailable"):
+                arms["pool"] = status
+        elif status in ("correction_held", "comparison_held"):
             arms[status.removesuffix("_held")] = "held"
         elif status in ("idle", "completed") and isinstance(row.get("batch"), str):
             arms["correction" if row["batch"].startswith("xp-") else "comparison"] = status
@@ -189,7 +236,7 @@ def notices(data):
         if not weights["signed_state"]:
             signals["current signed state pending; inspect validator publication"] = 1
         for validator, state in weights.get("validators", {}).items():
-            if state != "matches":
+            if state not in ("matches", "pending_reveal"):
                 signals[validator + " finalized vector " + state] = 1
         signals["collection allocation is nonzero; verify recipients"] = bool(weights.get("collection_ppb"))
         paid_start = collection.get("first_epoch")
@@ -197,17 +244,20 @@ def notices(data):
         signals["first collection-weight epoch"] = weight_start
         if weight_start is not None and weights["signed_state"] and weights["epoch"] >= weight_start:
             matches = weights.get("validators", {})
-            verified = (weights.get("basis_schema") == "leadpoet.collection.fixed_run_quotes.v1"
-                        and weights.get("quoted_jobs_match") is True and weights.get("unweighted_funders") == 0
-                        and weights.get("champion_ppb") == 0
-                        and all(matches.get(name) == "matches" for name in VALIDATORS))
+            valid_basis = (weights.get("basis_schema") == "leadpoet.collection.fixed_run_quotes.v1"
+                           and weights.get("quoted_jobs_match") is True and weights.get("unweighted_funders") == 0
+                           and weights.get("champion_ppb") == 0)
+            verified = valid_basis and all(matches.get(name) == "matches" for name in VALIDATORS)
             if paid_start is None or weights["epoch"] < paid_start:
                 verified = verified and weights.get("signed_burn_only") is True
                 signals["retired champion weights verified at the designated burn hotkey on all three validators"] = verified
                 signals["inspect burn-only retirement weights"] = not verified
             else:
                 signals["post-cutover collection basis and zero champion component verified on all three validators"] = verified
-                signals["inspect post-cutover reward evidence"] = not verified
+                pending = ("pending_reveal" in matches.values()
+                           and all(matches.get(name) in ("pending_reveal", "matches") for name in VALIDATORS))
+                signals["validator commitments pending reveal"] = pending
+                signals["inspect post-cutover reward evidence"] = not (verified or valid_basis and pending)
     closed = data.get("distribution", {})
     settlement = (data.get("settlement") or {}).get("last_paid") or {}
     settled_here = (settlement.get("result") == "collection_recipients_observed"

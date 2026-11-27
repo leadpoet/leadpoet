@@ -266,3 +266,86 @@ def test_desktop_retries_a_disconnected_submit_and_preserves_credential_errors(m
     with pytest.raises(subprocess.CalledProcessError) as refused:
         watcher.fetch()
     assert watcher.failure_reason(refused.value) == 'operator_access_denied' and len(attempts) == 3
+
+
+def test_current_commit_on_prior_vector_is_pending_without_claiming_payment():
+    weights = {
+        "epoch": 101, "weight_start_epoch": 100, "signed_state": True,
+        "basis_schema": "leadpoet.collection.fixed_run_quotes.v1",
+        "quoted_jobs_match": True, "unweighted_funders": 0, "champion_ppb": 0,
+        "validators": {"primary": "pending_reveal", "rizzo": "matches", "yuma": "pending_reveal"},
+    }
+    data = {"collection": {"first_epoch": 100}, "weights": weights}
+    observed = notices(data)
+    assert observed.get("validator commitments pending reveal")
+    assert not observed.get("inspect post-cutover reward evidence")
+    assert not any("verified on all three validators" in key for key in observed)
+    weights["validators"]["primary"] = "differs"
+    assert notices(data)["primary finalized vector differs"]
+    assert notices(data)["inspect post-cutover reward evidence"]
+    weights["validators"]["primary"] = "pending_reveal"
+    weights["quoted_jobs_match"] = False
+    assert notices(data)["inspect post-cutover reward evidence"]
+
+
+def test_worker_reports_real_standing_claims_and_idle_polls(monkeypatch):
+    def read(command, **kwargs):
+        if command[0] == "journalctl":
+            rows = [{"batch": "pool-"+"a"*64, "job": "ordinary", "status": "accepted"},
+                    {"batch": "pool-"+"b"*64, "status": "idle"}]
+            return "\n".join(json.dumps({"MESSAGE":json.dumps(row)}) for row in rows)
+        return "UnitFileState=enabled\nActiveState=active" if command[2].endswith(".timer") else "Result=success\nActiveState=inactive"
+    monkeypatch.setattr("subprocess.check_output", read)
+    result = worker_snapshot()
+    assert result["recent_arms"] == {"pool":"idle"}
+    assert "no queue readback in 20 minutes" not in notices({"worker":result})
+
+
+def test_pending_reveal_needs_registered_recipient_signed_prior_vector_and_unique_live_commit(monkeypatch):
+    from types import SimpleNamespace
+    import pytest
+    from lab_arena import collection_distributions, signing, weight_state
+    from leadpoet_canonical import arena_weights, chain_source_v2
+    from hashlib import sha256
+    from scripts.collection_participation_watch import VALIDATORS, pending_reveals
+
+    signer = signing.LocalSigner.generate()
+    keys = list(VALIDATORS.values())
+
+    def state(epoch, start, burn):
+        return weight_state.build_accepted_weight_state(
+            signer, network="finney", netuid=71, genesis_hash="1" * 64, epoch=epoch,
+            valid_from_block=start, valid_until_block=start+359, burn_hotkey=burn,
+            reward_basis={"schema_version": arena_weights.COLLECTION_BASIS_SCHEMA, "source_epoch": epoch-1,
+                          "job_count": 0, "job_set_sha256": sha256(b"").hexdigest(), "quotes_microusd": {},
+                          "valuation": None}, slot_eligibility=None, issued_at="2026-11-25T00:00:00Z")
+
+    previous, current = state(100, 1000, keys[0]), state(101, 1360, keys[0])
+    old_hash = arena_weights.derive_arena_weights(previous, keys)["weights_hash"]
+    matches = dict.fromkeys(VALIDATORS, "differs")
+    meta = SimpleNamespace(current_block=1400, block_hash="block")
+    db = SimpleNamespace(get_weight_state=lambda *_: {"state_doc": previous})
+    cut = SimpleNamespace(subnet_epoch_index=lambda _: 100)
+    queue = [{"submitted_at": 1368, "hotkey_public_key": (bytes([i])*32).hex()} for i in range(len(keys))]
+    monkeypatch.setattr(chain_source_v2, "ss58_encode_account_id", lambda value: keys[value[0]])
+    monkeypatch.setattr(chain_source_v2, "decode_timelocked_weight_commits", lambda data: data)
+    rpc = SimpleNamespace(call=lambda method, **kw: queue if method=="state_getStorage" else "parent")
+    monkeypatch.setattr(collection_distributions, "registry_at", lambda *a: keys)
+
+    def vectors(_, block, registry, epoch, expected, validators):
+        assert epoch == 100 and expected == old_hash and block == meta.block_hash
+        return {"primary":"matches", "rizzo":"matches", "yuma":"differs"}
+
+    monkeypatch.setattr(collection_distributions, "validator_vectors", vectors)
+    def sample(registry=None):
+        return pending_reveals(rpc, db, signer, cut, meta, current, registry or keys, matches)
+
+    assert sample() == {"primary":"pending_reveal", "rizzo":"pending_reveal", "yuma":"differs"}
+    queue.append(queue[0])
+    queue[1]["submitted_at"] = 1359
+    assert sample() == matches
+    queue.pop()
+    assert sample(registry=list(reversed(keys))) == matches
+    previous["burn_hotkey"] = keys[2]
+    with pytest.raises(ValueError):
+        sample()

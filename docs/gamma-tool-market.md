@@ -404,10 +404,11 @@ deployment, exactly as lead orders do.
   calls, which grows with daily volume. Fine at launch volumes; keep
   running totals, partition the nonces by day, and cache the public
   catalog and books, before they grow.
-- **A store failure after the vendor answers loses the answer.** The call
-  is `503 store_unavailable` and lapses unpaid, so a retry can use the
-  miner's key again. Reporting a charge the store has not confirmed would be
-  worse; a settlement the gateway can re-read later would close this.
+- **A store outage after the vendor answers loses the answer.** The
+  market settles again once (a settlement already written comes back as
+  written); if the store is still down, the call is `503 store_unavailable`
+  with its `call_id`, which may have been charged. `/usage` shows the
+  outcome; a retry before checking can pay twice.
 - **A lost API key holds its budget until it expires.** Only its token
   closes it, and the CLI makes 30-day keys by default; a signed "close my
   keys" route would let a buyer free a lost one.

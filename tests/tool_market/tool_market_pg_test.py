@@ -1043,3 +1043,30 @@ def test_a_busy_chain_mid_failover_says_retry_not_top_up(world):
     finally:
         for _ in range(market_module.CHAIN_READS):
             world.market._chain_reads.release()
+
+
+def test_a_settlement_whose_answer_is_lost_is_read_back_or_named(world, monkeypatch):
+    from lab_arena.store import ArenaStoreUnavailable
+
+    world.miner_key("lost-key", 10_000)
+    buyer, token = world.buyer()
+    settle, lost = world.store.settle_call, []
+
+    def commit_then_lose(**kwargs):  # the write commits; its answer never arrives
+        result = settle(**kwargs)
+        if kwargs["status"] == "settled" and not lost:
+            lost.append(result)
+            raise ArenaStoreUnavailable("read timeout")
+        return result
+
+    monkeypatch.setattr(world.store, "settle_call", commit_then_lose)
+    assert world.market.call(token, PROFILE)["charge_microusd"] == 11_000  # what the store holds
+
+    def down(**kwargs):
+        raise ArenaStoreUnavailable("connection refused")
+
+    monkeypatch.setattr(world.store, "settle_call", down)
+    with pytest.raises(ToolMarketError) as unknown:
+        world.market.call(token, PROFILE)
+    assert (unknown.value.status, unknown.value.code) == (503, "store_unavailable")
+    assert unknown.value.detail["call_id"]

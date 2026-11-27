@@ -30,7 +30,7 @@ from lab_arena.lead_orders.keys import json_document
 from lab_arena.lead_orders.vault_client import VaultTransportError, VaultUnavailable
 from lab_arena.tool_market import book, catalog, discovery
 from lab_arena.chain import ArenaChainError
-from lab_arena.store import ArenaStoreError
+from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable
 from lab_arena.tool_market.config import ToolMarketConfig
 from lab_arena.tool_market.store import ToolMarketStore
 from lead_order_vault import envelope as vault_envelope
@@ -343,7 +343,7 @@ class ToolMarket:
         if tool not in self._config.tools:
             raise ToolMarketError(404, "tool_unavailable")
         ops = [op for op in catalog.OPERATIONS.values() if op.tool == tool]
-        asks = [a for a in book.rank(book.Ask.from_row(row) for row in self._supply(tool))
+        asks = [a for a in self._supply(tool)
                 if min(book.owed_microusd(op, op.max_units, a.ask_microusd) for op in ops) <= a.remaining_microusd]
         return {"tool": tool, "unit": catalog.TOOLS[tool],
                 "operations": sorted(op.name for op in ops),
@@ -543,8 +543,17 @@ class ToolMarket:
         """One vendor request on one key. ``None`` means try the next key."""
 
         def settle(status: str, http_status: Optional[int], *, units: int = 0, owed: int = 0, charge: int = 0) -> bool:
-            return self._store.settle_call(call_id=call_id, status=status, http_status=http_status, units=units,
-                                           owed_microusd=owed, charge_microusd=charge, epoch=epoch) in ("settled", "exists")
+            args = dict(call_id=call_id, status=status, http_status=http_status, units=units,
+                        owed_microusd=owed, charge_microusd=charge, epoch=epoch)
+            try:
+                return self._store.settle_call(**args) in ("settled", "exists")
+            except ArenaStoreUnavailable:
+                pass  # its answer may be lost after it committed; the same settlement again is "exists"
+            try:
+                return self._store.settle_call(**args) in ("settled", "exists")
+            except ArenaStoreUnavailable:
+                # Charged or not is unknown: usage shows it under this call_id.
+                raise ToolMarketError(503, "store_unavailable", call_id=call_id) from None
 
         try:
             response = self._transport.send(
@@ -589,15 +598,17 @@ class ToolMarket:
         """The book's asks, best first, that a reserve for this call could take
         (never the buyer's own keys), each with the most the call could owe on it."""
 
-        for ask in book.rank(book.Ask.from_row(row) for row in self._supply(tool)):
+        for ask in self._supply(tool):
             owed_cap = book.owed_microusd(op, op.max_units, ask.ask_microusd)
             if ask.ask_microusd <= max_ask and (not private or self._private(tool, ask)) \
                     and owed_cap <= ask.remaining_microusd and ask.miner_hotkey != buyer:
                 yield ask, owed_cap
 
-    def _supply(self, tool: str):
-        return [row for row in self._store.book(tool=tool, terms_sha256=self._config.terms_sha256)
-                if self._config.may_supply(tool, row["miner_hotkey"])]
+    def _supply(self, tool: str) -> List[book.Ask]:
+        """The book's asks from approved suppliers, best first."""
+
+        rows = self._store.book(tool=tool, terms_sha256=self._config.terms_sha256)
+        return book.rank(book.Ask.from_row(row) for row in rows if self._config.may_supply(tool, row["miner_hotkey"]))
 
     def _check(self, tool: str, envelope: str) -> Mapping[str, Any]:
         try:

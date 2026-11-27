@@ -1,6 +1,7 @@
 """Tool-market configuration from the environment. Off unless set otherwise.
 
-When live, every catalog tool trades. ``LEADPOET_TOOL_MARKET_TOOLS_OFF``
+When live, every catalog tool is on, and trades through approved suppliers
+(``LEADPOET_TOOL_MARKET_APPROVED_SUPPLIERS``). ``LEADPOET_TOOL_MARKET_TOOLS_OFF``
 turns single tools off, e.g. ``exa,hunter``; a new catalog tool is on
 unless it is named there.
 """

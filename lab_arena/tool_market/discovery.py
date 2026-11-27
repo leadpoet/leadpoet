@@ -75,7 +75,8 @@ def openapi(config: ToolMarketConfig) -> Dict[str, Any]:
                     "401": dict(error, description="A btauth/1 problem, named by the error code."),
                     "429": dict(error, description="Too many calls in flight or uncertain for this hotkey."),
                     "503": dict(error, description="No key can serve the call now (no_supply), or the chain "
-                                                   "or store is down or busy; retry later.")}}},
+                                                   "or store is down or busy; retry later. One with a call_id may "
+                                                   "have been charged: check usage first.")}}},
             "/tool-market/catalog": {"get": {
                 "summary": "Every tool's operations, parameters and current price per unit (micro-USD).",
                 "responses": {"200": {"description": "The catalog."}}}},

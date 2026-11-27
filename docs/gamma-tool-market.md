@@ -154,10 +154,11 @@ and [signed requests](https://www.bittensor.com/docs/guides/signed-requests) gui
 - `GET /tool-market/openapi.json` is built from the catalog, so each
   operation's parameters in the spec are the ones `/call` checks.
 - Credit is read at a finalized block: `GammaSpent` for the buyer at the
-  service hotkey, with the subnet's `RegisteredSubnetCounter` from the same
-  block. When the counter grows, the subnet was dissolved and registered
-  again, so its totals start from zero and earlier credit is kept. A
-  counter or total that goes backwards is refused (`503 gamma_unavailable`).
+  service hotkey. Credit is bound to one chain, netuid, service hotkey and
+  subnet registration block (`NetworkRegisteredAt`). If the subnet is
+  dissolved and registered again, reads fail closed until ops reconcile, so
+  cleared totals never wipe or double credit. A total that goes backwards is
+  refused (`503 gamma_unavailable`).
 
 To publish it (ops, once per service hotkey):
 
@@ -407,9 +408,9 @@ deployment, exactly as lead orders do.
 - **One publisher hotkey.** The services document lists only the current
   service hotkey, and credit counts only spend there. A swap needs both
   listed, and credit read at both, before it happens.
-- **A dissolution's last block is not read.** The standard takes the final
-  totals as the block before plus that block's `GammaSpent` events; this
-  market reads only finalized totals, so spend in the removing block is lost.
+- **A re-registered subnet stops credit.** The standard counts each
+  registration's totals from zero; this market stops reading instead, and
+  ops reconcile by hand. Rare, and it never over-credits.
 - **Only sr25519 hotkeys sign.** A btauth request with `X-Bittensor-Crypto`
   set is refused.
 - **A signed call accepts the terms by being sent.** It needs no terms

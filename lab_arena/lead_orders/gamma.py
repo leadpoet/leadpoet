@@ -7,10 +7,6 @@ can lack the storage item, and Gamma may not be enabled on netuid 71 yet.
 An absent item reads as ``available=False`` with zero spent: no balance, and
 live orders are refused. Any other read failure raises, so the caller fails
 closed instead of crediting a guess.
-
-Each reading also carries the subnet's ``RegisteredSubnetCounter`` at the
-same block. It grows when the subnet is dissolved and registered again,
-which clears every total, so a caller starts its totals again from zero.
 """
 
 from __future__ import annotations
@@ -22,7 +18,6 @@ from lab_arena.chain import ArenaChain, ArenaChainError, BlockRef
 from lab_arena.lead_orders.config import is_valid_hotkey
 
 MAX_U128 = (1 << 128) - 1
-MAX_I64 = (1 << 63) - 1  # the counter is a u64; a stored BIGINT holds any real one
 
 
 class GammaReadError(ArenaChainError):
@@ -36,7 +31,6 @@ class GammaReading:
     block_hash: str
     spent_units: int
     available: bool
-    subnet_counter: int = 0
 
 
 def parse_service_id(value: str) -> str:
@@ -64,14 +58,14 @@ def _storage_missing(exc: BaseException) -> bool:
     return False
 
 
-def _units(value: Any, high: int = MAX_U128, name: str = "GammaSpent") -> int:
+def _units(value: Any) -> int:
     raw = getattr(value, "value", value)
     if isinstance(raw, dict) and len(raw) == 1:
         raw = next(iter(raw.values()))
     if raw is None:
         return 0  # ValueQuery default for a hotkey that never spent
-    if isinstance(raw, bool) or not isinstance(raw, int) or not 0 <= raw <= high:
-        raise GammaReadError("%s value is out of range" % name)
+    if isinstance(raw, bool) or not isinstance(raw, int) or not 0 <= raw <= MAX_U128:
+        raise GammaReadError("GammaSpent value is not a u128")
     return int(raw)
 
 
@@ -95,22 +89,18 @@ class GammaBalanceReader:
         if not is_valid_hotkey(hotkey):
             raise GammaReadError("hotkey is invalid")
         block = head if head is not None else self._chain.finalized_head()
-        netuid = self._chain.config.netuid
         try:
             value = self._chain.client.query(
                 self._pallet,
                 self._storage,
-                [netuid, self._service, hotkey],
+                [self._chain.config.netuid, self._service, hotkey],
                 block_hash=block.hash,
             )
-            counter = self._chain.client.query(
-                self._pallet, "RegisteredSubnetCounter", [netuid], block_hash=block.hash)
         except Exception as exc:
             if _storage_missing(exc):
                 return GammaReading(hotkey, block.number, block.hash, 0, False)
             raise GammaReadError("GammaSpent read failed") from exc
-        return GammaReading(hotkey, block.number, block.hash, _units(value), True,
-                            _units(counter, MAX_I64, "RegisteredSubnetCounter"))
+        return GammaReading(hotkey, block.number, block.hash, _units(value), True)
 
 
 __all__ = ["GammaBalanceReader", "GammaReadError", "GammaReading", "parse_service_id"]

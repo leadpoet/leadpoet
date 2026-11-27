@@ -159,7 +159,7 @@ class ToolMarket:
             raise ToolMarketError(503, "gamma_unavailable") from None
         result = self._store.record_gamma_reading(
             hotkey=hotkey, block_number=reading.block_number, block_hash=reading.block_hash,
-            spent_units=reading.spent_units, available=reading.available, subnet_counter=reading.subnet_counter)
+            spent_units=reading.spent_units, available=reading.available)
         if result.get("status") in ("counter_backwards", "reading_conflict"):
             raise ToolMarketError(503, "gamma_unavailable")
         return result

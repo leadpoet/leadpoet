@@ -19,7 +19,6 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "tool_market_bind_gamma_source_v1": _SOURCE,
     "tool_market_record_gamma_reading_v1": (
         ("p_hotkey", _T), ("p_block_number", _B), ("p_block_hash", _T), ("p_units", _N), ("p_available", _BOOL),
-        ("p_counter", _B),
     ) + _SOURCE,
     "tool_market_use_nonce_v1": (("p_hotkey", _T), ("p_signature_hash", _T), ("p_signed_at", _B)),
     "tool_market_accept_terms_v1": (
@@ -84,12 +83,12 @@ class ToolMarketStore:
         self._gamma_source = source
 
     def record_gamma_reading(self, *, hotkey: str, block_number: int, block_hash: str, spent_units: int,
-                             available: bool, subnet_counter: int) -> Dict[str, Any]:
+                             available: bool) -> Dict[str, Any]:
         if self._gamma_source is None:
             raise arena_store.ArenaStoreError("Gamma credit source unverified")
         return self._rpc("tool_market_record_gamma_reading_v1", **self._gamma_source, p_hotkey=hotkey,
                          p_block_number=int(block_number), p_block_hash=block_hash, p_units=str(int(spent_units)),
-                         p_available=bool(available), p_counter=int(subnet_counter))
+                         p_available=bool(available))
 
     def use_nonce(self, *, hotkey: str, signature_hash: str, signed_at: int) -> bool:
         return bool(self._rpc("tool_market_use_nonce_v1", p_hotkey=hotkey, p_signature_hash=signature_hash,

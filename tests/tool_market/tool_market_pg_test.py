@@ -348,8 +348,7 @@ def test_the_catalog_lists_each_tool_its_operations_and_best_price(world):
 
 def test_polling_a_balance_adds_a_reading_only_when_the_total_changes(world, admin):
     buyer = hotkey()
-    read = dict(hotkey=buyer, block_number=7, block_hash="0x" + "07" * 32, spent_units=5, available=True,
-                subnet_counter=1)
+    read = dict(hotkey=buyer, block_number=7, block_hash="0x" + "07" * 32, spent_units=5, available=True)
     for block in (7, 7, 8):
         world.store.record_gamma_reading(**dict(read, block_number=block))
     world.store.record_gamma_reading(**dict(read, block_number=9, spent_units=6))
@@ -361,27 +360,17 @@ def test_polling_a_balance_adds_a_reading_only_when_the_total_changes(world, adm
         assert (down["available"], down["balance_microusd"]) == (False, 0)
     for _ in range(2):  # a stranger's hotkey while storage is missing
         world.store.record_gamma_reading(**dict(read, hotkey=hotkey(), available=False))
+    # Storage back with the same total: the credit is back, as a new row.
+    back = world.store.record_gamma_reading(**dict(read, block_number=12, spent_units=6))
+    assert back["available"] is True and back["credit_microusd"] == 0  # 6 units < 1 micro-USD
     admin.execute("SELECT hotkey,count(*) FROM public.tool_market_gamma_readings WHERE hotkey=%s GROUP BY 1",
                   (buyer,))
-    assert admin.fetchall() == [(buyer, 3)]
+    assert admin.fetchall() == [(buyer, 4)]
     admin.execute("SELECT count(*) FROM public.tool_market_gamma_readings WHERE NOT available AND hotkey<>%s",
                   (buyer,))
     assert admin.fetchone()[0] == 0
     admin.execute("SELECT count(*) FROM public.tool_market_gamma_readings WHERE spent_units=0 AND available")
     assert admin.fetchone()[0] == 0
-
-
-def test_a_registered_again_subnet_starts_its_totals_from_zero_and_keeps_earlier_credit(world):
-    buyer = hotkey()
-    read = dict(hotkey=buyer, block_hash="0x" + "07" * 32, available=True)
-    world.store.record_gamma_reading(**dict(read, block_number=7, spent_units=3 * 10**9, subnet_counter=1))
-    # Dissolved and registered again: the chain's total is back to 2 Gamma.
-    again = world.store.record_gamma_reading(**dict(read, block_number=9, spent_units=2 * 10**9, subnet_counter=2))
-    assert again["credit_microusd"] == 5 * USD
-    # Within one registration a smaller total, or an older counter, is a broken read.
-    for broken in (dict(spent_units=10**9, subnet_counter=2), dict(spent_units=4 * 10**9, subnet_counter=1)):
-        assert world.store.record_gamma_reading(**dict(read, block_number=10, **broken)) == {
-            "status": "counter_backwards"}
 
 
 def test_a_buyer_pages_their_own_finished_calls_by_watermark(world, admin):

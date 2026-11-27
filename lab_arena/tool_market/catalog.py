@@ -123,6 +123,8 @@ class Operation:
     # A vendor whose status codes say something else, such as an error in a
     # 200 or "out of credits" as 429: the status its answer means.
     real_status: Optional[Callable[[int, Any], int]] = field(default=None, compare=False)
+    # One line on the job it does, so an agent picks by task, not vendor.
+    does: str = ""
 
     @property
     def unit_scale(self) -> int:
@@ -217,26 +219,30 @@ _OPERATIONS: Sequence[Operation] = (
     # ZeroBounce: one credit per check; an ``unknown`` result is free.
     Operation("zerobounce", "validate", "GET", _ZB + "/v2/validate", UNIT_CALL, 1,
               {"email": Param("str", required=True, max_length=320), "ip_address": Param("str", max_length=45)},
-              cost=_zerobounce_cost, real_status=_zerobounce_status),
+              cost=_zerobounce_cost, real_status=_zerobounce_status,
+              does="Check whether an email address can receive mail."),
     # Prospeo: one credit per match; no match, or a free re-enrichment, is free.
     Operation("prospeo", "enrich_person", "POST", "https://api.prospeo.io/enrich-person", UNIT_CALL, 1,
               dict({name: _NAME for name in _PROSPEO_FIELDS}, only_verified_email=Param("bool")),
               cost=_prospeo_cost, real_status=_prospeo_status,
-              wrap=_prospeo_body),
+              wrap=_prospeo_body, does="Find a person's work email and profile from a name, company or LinkedIn URL."),
     # Findymail: one credit per email found. 423 is a paused account, which no free check sees, so it counts as a bad key.
     Operation("findymail", "find_from_linkedin", "POST", "https://app.findymail.com/api/search/business-profile",
               UNIT_CALL, 1, {"linkedin_url": _URL}, cost=_found_email("contact", "email"),
-              real_status=lambda status, _: 401 if status == 423 else status),
+              real_status=lambda status, _: 401 if status == 423 else status,
+              does="Find a person's work email from their LinkedIn URL."),
     Operation("findymail", "find_from_name", "POST", "https://app.findymail.com/api/search/name", UNIT_CALL, 1,
               {"name": Param("str", required=True, max_length=200), "domain": Param("str", required=True, max_length=253)},
-              cost=_found_email("contact", "email"), real_status=lambda status, _: 401 if status == 423 else status),
+              cost=_found_email("contact", "email"), real_status=lambda status, _: 401 if status == 423 else status,
+              does="Find a person's work email from their name and company domain."),
     # Hunter: one search per email found. Its 403 is a rate limit and its
     # 429 an empty account.
     Operation("hunter", "email_finder", "GET", "https://api.hunter.io/v2/email-finder", UNIT_CALL, 1,
               {"domain": Param("str", max_length=253), "company": _NAME, "linkedin_handle": _NAME,
                "first_name": _NAME, "last_name": _NAME, "full_name": _NAME,
                "max_duration": Param("int", low=3, high=20)},
-              cost=_found_email("data", "email"), real_status=lambda status, _: {403: 429, 429: 402}.get(status, status)),
+              cost=_found_email("data", "email"), real_status=lambda status, _: {403: 429, 429: 402}.get(status, status),
+              does="Find a person's work email from their name and company."),
     # Exa: each answer carries ``costDollars.total``, which Exa calls an estimate.
     Operation("exa", "search", "POST", _EXA + "/search", UNIT_VENDOR_USD, 50_000,
               {"query": Param("str", required=True, max_length=2000), "numResults": Param("int", high=25),
@@ -247,17 +253,17 @@ _OPERATIONS: Sequence[Operation] = (
                "includeDomains": Param("str_list", max_length=200, high=100),
                "excludeDomains": Param("str_list", max_length=200, high=100),
                "startPublishedDate": Param("str", max_length=40), "endPublishedDate": Param("str", max_length=40)},
-              cost=_usd_field("costDollars", "total")),
+              cost=_usd_field("costDollars", "total"), does="Search the web for pages, companies or people."),
     Operation("exa", "contents", "POST", _EXA + "/contents", UNIT_VENDOR_USD, 50_000,
               {"urls": Param("str_list", required=True, max_length=500, high=10), "text": Param("bool"),
                "highlights": Param("bool")},
-              cost=_usd_field("costDollars", "total")),
+              cost=_usd_field("costDollars", "total"), does="Read the text of up to 10 web pages."),
     # HarvestAPI: per-request credits. Its prices are not published per
     # endpoint, so launch keeps the two profile reads only.
     Operation("harvestapi", "linkedin_profile", "GET", _HARVEST + "/linkedin/profile", UNIT_CALL, 1,
-              {"url": _URL}),
+              {"url": _URL}, does="Read a LinkedIn profile: name, headline, current jobs."),
     Operation("harvestapi", "linkedin_company", "GET", _HARVEST + "/linkedin/company", UNIT_CALL, 1,
-              {"url": _URL}),
+              {"url": _URL}, does="Read a LinkedIn company page."),
 )
 
 OPERATIONS: Dict[Tuple[str, str], Operation] = {(op.tool, op.name): op for op in _OPERATIONS}

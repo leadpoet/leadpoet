@@ -254,7 +254,7 @@ class ToolMarket:
                 "request_privacy": listed["request_privacy"],
                 "best_ask_microusd": best and best["ask_microusd"],
                 "buyer_pays_microusd": best and best["buyer_pays_microusd"],
-                "operations": [{"operation": op.name, "max_units": op.max_units,
+                "operations": [{"operation": op.name, "does": op.does, "max_units": op.max_units,
                                 "params": {name: {"kind": p.kind, "required": p.required, **(
                                     {"choices": list(p.choices)} if p.choices else {})}
                                            for name, p in op.params.items()}}

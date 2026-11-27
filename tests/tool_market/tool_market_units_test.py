@@ -161,3 +161,8 @@ def test_the_published_terms_hash_is_the_terms_file():
     text = path.read_bytes()
     assert hashlib.sha256(text).hexdigest() == PUBLISHED_TERMS["tool-market-terms-v1"]
     assert b"(tool-market-terms-v1)" in text
+
+
+def test_every_operation_says_what_it_does():
+    # Agents choose from the catalog by task; an operation without a line is unfindable.
+    assert all(op.does for op in catalog.OPERATIONS.values())

@@ -52,8 +52,8 @@ same vendors. Each one bills per request or reports its own cost.
 A tool is data, not a new code path:
 
 1. One `Operation` per endpoint in `lab_arena/tool_market/catalog.py`:
-   method, URL, unit, maximum units per call, allowed parameters, and how
-   to count what the vendor charged. A vendor whose status codes mean
+   method, URL, unit, maximum units per call, allowed parameters, how to
+   count what the vendor charged, and one line on what it `does`. A vendor whose status codes mean
    something else, such as an error inside a 200, names a `real_status`
    reader.
 2. One `Tool` entry in `lead_order_vault/tools.py`: the host, where the key
@@ -144,9 +144,13 @@ An ask may be at most $0.25 per credit, or 100% of the vendor's own price
 for a vendor-USD tool. A buyer can send `max_ask_microusd` with a call, and
 no key asking more serves it.
 
-`GET /tool-market/catalog` lists every tool that trades: its operations and
-their parameters, its price ceiling, and the cheapest ask with what a buyer
-pays for it. ## Privacy
+`GET /tool-market/catalog` lists every tool that trades: its operations,
+one line on what each does, their parameters, its price ceiling, and the
+cheapest ask with what a buyer pays for it. An agent can pick a tool by the
+job it needs done. A request with a bad parameter is refused before any
+charge.
+
+## Privacy
 
 A miner owns the vendor account behind their key, so whatever that vendor
 shows its account owner, the miner can see. The vault protects the key, not

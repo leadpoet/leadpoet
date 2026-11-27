@@ -9208,7 +9208,15 @@ class ArenaService:
         )
         epoch = None
         try:
-            epoch = int(self._config.chain.current_settlement_epoch())
+            # Informational display: a briefly cached epoch keeps this
+            # public endpoint off the serialized chain client on every
+            # request. Falls back to the uncached read when the chain
+            # adapter does not offer the recent variant.
+            read_epoch = getattr(
+                self._config.chain, "current_settlement_epoch_recent",
+                self._config.chain.current_settlement_epoch,
+            )
+            epoch = int(read_epoch())
         except Exception:
             epoch = None
         eligibility = None

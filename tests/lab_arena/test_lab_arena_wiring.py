@@ -403,3 +403,43 @@ def test_promoter_rejects_ambiguous_credentials(monkeypatch):
     monkeypatch.setenv("LAB_ARENA_GITHUB_TOKEN", "unit-test-placeholder")
     with pytest.raises(ServiceError, match="promotion_credentials_ambiguous"):
         wiring.baseline_promoter_from_environment()
+
+
+def test_recent_settlement_epoch_serves_one_chain_read_within_the_ttl(monkeypatch):
+    """The public current view must not read the chain once per request.
+
+    The substrate client is serialized behind a single lock, so an uncached
+    per-request epoch read is both a latency floor on the Arena's busiest
+    public endpoint and a queue in front of the consensus reads that share
+    that lock. Reward activation keeps the uncached read.
+    """
+
+    from types import SimpleNamespace
+
+    reads = []
+    clock = {"now": 1_000.0}
+    chain = SimpleNamespace(config=SimpleNamespace(metagraph_ttl_seconds=60))
+    adapter = wiring.ChainReadsAdapter(chain)
+    adapter._cutover = object()
+
+    def _epoch(_chain, _cutover):
+        reads.append(1)
+        return 32_000 + len(reads)
+
+    monkeypatch.setattr(wiring.chain_module, "current_settlement_epoch", _epoch)
+    monkeypatch.setattr(wiring.time, "monotonic", lambda: clock["now"])
+
+    assert adapter.current_settlement_epoch_recent() == 32_001
+    for _ in range(11):
+        clock["now"] += 4.0
+        assert adapter.current_settlement_epoch_recent() == 32_001
+    assert len(reads) == 1
+
+    clock["now"] += 20.0
+    assert adapter.current_settlement_epoch_recent() == 32_002
+    assert len(reads) == 2
+
+    # The scheduling path is untouched: every call still reads the chain.
+    assert adapter.current_settlement_epoch() == 32_003
+    assert adapter.current_settlement_epoch() == 32_004
+    assert len(reads) == 4

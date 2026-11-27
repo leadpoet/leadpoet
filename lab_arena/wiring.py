@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shlex
+import threading
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -136,6 +137,8 @@ class ChainReadsAdapter:
     def __init__(self, arena_chain: chain_module.ArenaChain) -> None:
         self._chain = arena_chain
         self._cutover = None
+        self._recent_epoch_lock = threading.Lock()
+        self._recent_epoch: Optional[tuple] = None
 
     def finalized_head(self):
         return self._chain.finalized_head()
@@ -147,6 +150,34 @@ class ChainReadsAdapter:
         if self._cutover is None:
             self._cutover = chain_module.load_arena_cutover()
         return chain_module.current_settlement_epoch(self._chain, self._cutover)
+
+    def current_settlement_epoch_recent(self) -> int:
+        """The settlement epoch for informational reads, cached briefly.
+
+        ``current_settlement_epoch`` reads the finalized head on every call,
+        and the whole substrate client is serialized behind one lock, so a
+        public endpoint that calls it per request both pays the chain
+        round-trip as a latency floor and queues in front of the Arena's own
+        consensus reads whenever the endpoint is slow. The settlement epoch
+        advances once per subnet epoch, far slower than the TTL, so a read
+        that only displays it can serve a recent value.
+
+        The TTL is ``metagraph_ttl_seconds`` — the staleness bound this chain
+        client already accepts for the finalized metagraph that gates
+        validator authorization. Callers that schedule an epoch (reward
+        activation) must keep using ``current_settlement_epoch``.
+        """
+
+        ttl = float(self._chain.config.metagraph_ttl_seconds)
+        now = time.monotonic()
+        with self._recent_epoch_lock:
+            cached = self._recent_epoch
+            if cached is not None and now - cached[1] < ttl:
+                return cached[0]
+        epoch = int(self.current_settlement_epoch())
+        with self._recent_epoch_lock:
+            self._recent_epoch = (epoch, time.monotonic())
+        return epoch
 
     def accepted_weight_epoch_scope(self) -> Mapping[str, Any]:
         """Current finalized epoch bounds used to prevent premature snapshots."""

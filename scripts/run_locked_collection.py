@@ -28,7 +28,7 @@ from lab_arena.collection_intake import (
     GENERATOR_ROUTES, LEGACY_COMPARISON_TERMS_HASH, MODELS, SYNTHETIC_TRAINING_TERMS_HASH,
     PAID_TASK_FAMILIES, PAID_WORKFLOW_TERMS_HASH, VERIFIED_PRICE_SCHEMA, VERIFIED_TASK_PRICE_SCHEMA, CollectionIntake, live_finney_arena,
 )
-from lab_arena.collection_worker import P7_PAYMENT_RULE, SALES_EVIDENCE_RULE, process_job, verify_paid_job
+from lab_arena.collection_worker import P7_PAYMENT_RULE, process_job, verify_paid_job
 from lab_arena.collection_workflow import (
     CHAMPION_REV,
     POET_REV,

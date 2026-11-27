@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import signal
+import time
 
 from lab_arena import collection_distributions, collection_settlement
 from scripts.lab_arena_restart_claim_guard import _read_scoped_environment
@@ -225,6 +227,8 @@ def save(directory, data):
     # An unread source means unknown. Keep its last signals until it can be read again.
     previous_observations = previous.get("last_read", {})
     last_read = {name: data.get(name, previous_observations.get(name)) for name in ("collection", "worker", "weights", "edge", "distribution", "settlement")}
+    if "exports" in data or "exports" in previous_observations:
+        last_read["exports"] = data.get("exports", previous_observations.get("exports"))
     current = notices({name: value for name, value in last_read.items() if value is not None})
     for name in last_read:
         if name not in data:
@@ -254,6 +258,7 @@ def main():
     parser.add_argument("--state-directory", type=Path, required=True)
     args = parser.parse_args()
     os.umask(0o077)
+    started = time.monotonic()
     data = {"read_errors": {}}
     db = None
     try:
@@ -302,9 +307,29 @@ def main():
                 )
     except Exception as exc:
         data["read_errors"]["settlement"] = type(exc).__name__
+    private_root = args.state_directory.parent / "pilot"
+    # Leave time for billing reconciliation in the same three-minute systemd unit.
+    window = min(45, 120 - int(time.monotonic() - started))
+    if db is not None and window > 0 and (private_root / "paid" / "batch.json").is_file():
+        def timed_out(*_):
+            raise TimeoutError("private export tick exceeded its time budget")
+
+        prior_alarm = signal.signal(signal.SIGALRM, timed_out)
+        signal.alarm(window)
+        try:
+            from lab_arena.service import S3ObjectStore
+            from scripts.collection_export_snapshots import observe
+
+            objects = S3ObjectStore(env["LAB_ARENA_BUCKET"], prefix=env.get("LAB_ARENA_OBJECT_PREFIX", ""))
+            data["exports"] = observe(private_root, args.state_directory / "exports", db, objects, prior.get("exports"))
+        except Exception as exc:
+            data["read_errors"]["exports"] = type(exc).__name__
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, prior_alarm)
     save(args.state_directory, data)
-    # A delayed archive proof must not skip the existing systemd billing reconciliation step.
-    return bool(data["read_errors"].keys() - {"settlement"})
+    # Archive or training publication retries must not skip billing reconciliation.
+    return bool(data["read_errors"].keys() - {"settlement", "exports"})
 
 
 if __name__ == "__main__":

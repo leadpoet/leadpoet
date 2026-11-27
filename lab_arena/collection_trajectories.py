@@ -16,7 +16,7 @@ SCHEMA = "collection.trajectories.v1"
 LABEL = re.compile(r"[A-Za-z0-9_ .:-]{1,128}")
 
 
-def verified_grants(database, batch, jobs, *, mode, scope, digest, allow_pending=False):
+def verified_grants(database, batch, jobs, *, mode, scope, digest, allow_pending=False, subset=False):
     """Use the original signed registration of each actual job, including retries."""
     from lab_arena import collection_intake as intake
     from lab_arena.chain import verify_hotkey_signature
@@ -32,6 +32,9 @@ def verified_grants(database, batch, jobs, *, mode, scope, digest, allow_pending
     rows = database.rpc("collection_training_consents_v1", {"p_batch": batch})
     if not isinstance(rows, list):
         raise ValueError("invalid job consent readback")
+    if subset:
+        wanted = {job["job_id"] for job in jobs}
+        rows = [row for row in rows if row["job_id"] in wanted]
     by_id = {row["job_id"]: row for row in rows}
     if (
         len(by_id) != len(rows)

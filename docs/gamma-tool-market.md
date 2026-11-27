@@ -11,6 +11,28 @@ It is off by default. Every route answers 404 until
 `LEADPOET_TOOL_MARKET_TOOLS_OFF` turns single tools off, for example
 `exa,hunter`.
 
+## Adoption decision
+
+This is an exploratory tool API. For a paid launch, suppliers need an agreed
+payment source, settlement asset, conversion rule and verifiable transfer.
+Today the statement shows a USD liability. Operators can reconcile it by
+call ID using [the accrual query](../scripts/tool_market_accruals.sql).
+The buyer's Gamma spend is burned on-chain. It cannot be withdrawn to pay
+that liability, and the spread is not a cash balance for buybacks.
+
+Supply here means a vendor account and its paid quota. The gateway chooses
+the supplier, the attested vault sends the request, and the vendor runs it.
+The experiment lab has its own job, capture, funding and weight paths.
+Supplier compute on miner hosts and earnings redeemable across tools are
+not implemented by this API.
+
+Start by measuring one equivalent platform operation. Compare cost per
+usable answer, miss rate, field coverage, p50/p95 latency and failures
+under the same timeout, cache policy, privacy and volume tier. Obtain
+written approval for the provider/account and reconcile actual vendor debits.
+External agent demand and monthly savings still need buyer traffic and
+billing evidence. See [price comparisons and the break-even calculation](gamma-tool-market-economics.md).
+
 ## How it works
 
 1. **List a key.** A miner seals a vendor key to the vault on their own

@@ -169,6 +169,15 @@ def _save(directory, data):
     return digest
 
 
+def _partial_pointer(objects, key):
+    try:
+        pointer = objects.get_optional_bounded(key, 8192)
+    except ValueError:
+        # The exporter will isolate an oversized or malformed artifact to its row.
+        return "invalid"
+    return hashlib.sha256(pointer).hexdigest() if pointer is not None else None
+
+
 def observe(private_root, directory, db, objects, previous=None, *, max_groups=3, deadline=None):
     """One bounded watcher tick. Backfills and holds use the same public batch exporter."""
     intake.register_signatures()
@@ -227,11 +236,16 @@ def observe(private_root, directory, db, objects, previous=None, *, max_groups=3
                 )
                 if experiment and state == "billing_pending" and j["status"] == "failed":
                     state = "partial_billing_pending"
-                by_case[j["scenario_id"]][rid] = {
+                member = {
                     "state": state,
                     "job_status": j["status"],
                     "evidence_sha256": judge.digest([j, auth]),
                 }
+                if experiment and j["status"] == "failed":
+                    prefix = f"collection/{batch}/{rid}/"
+                    member["interruption"] = _partial_pointer(objects, prefix + "interruption.json")
+                    member["quarantine"] = _partial_pointer(objects, prefix + "saved/quarantine.json")
+                by_case[j["scenario_id"]][rid] = member
             groups = offers[batch] = {}
             prior = old.get(batch, {})
             if not set(prior) <= set(by_case):
@@ -250,15 +264,25 @@ def observe(private_root, directory, db, objects, previous=None, *, max_groups=3
                     # Check all prior released or held members, including billing evidence.
                     before = prior_group.get("members", {})
                     published = set(prior_group.get("released", ())) | set(prior_group.get("held", {}))
+                    # An older index without the failed row's pointer fingerprints
+                    # cannot prove it is still safe. Rebuild before linking that ZIP.
                     kept = exists and all(i in before and members.get(i) == before[i] for i in published)
                     groups[case] = {**(prior_group if kept else {}), "members": members, "queued": True}
-                old_partial = any(m["job_status"] == "failed" for m in members.values())
+                # A verified interruption seals its journal. Recovery and quarantine
+                # pointer changes still queue this case just like a billing change.
+                unsealed = any(
+                    m["job_status"] == "failed" and not m.get("interruption") for m in members.values()
+                )
+                retry_hold = any(
+                    reason != "quarantine" or not members[rid].get("quarantine")
+                    for rid, reason in prior_group.get("held", {}).items()
+                )
                 if groups[case].get("queued"):
                     # A verified archive is already available during a format upgrade.
                     # New funded work comes first; the regular retry pass backfills old packs.
                     upgrade_only = same_members and exists and prior_group.get("file") and not same
                     work.append((1 if upgrade_only else 0, batch, case))
-                elif prior_group.get("held") or old_partial:
+                elif retry_hold or unsealed:
                     work.append((1, batch, case))
         if not set(old) <= set(offers):
             raise ValueError("a historical paid export manifest is missing")

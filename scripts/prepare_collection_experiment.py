@@ -1,5 +1,6 @@
 """Prepare a synthetic experiment from a frozen task or an authenticated student checkpoint."""
 
+from contextlib import contextmanager
 import argparse
 import base64
 import json
@@ -39,6 +40,43 @@ def store_private_json(path, value):
         except FileExistsError:
             if json.loads(read_file(path)) != value:
                 raise ValueError("a different frozen experiment already exists at this path")
+
+
+@contextmanager
+def lock_pool_directory(directory):
+    import fcntl
+
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def matches_continuation(
+    raw, inputs, case_id, source_batch, experts, *, source_job=None
+):
+    if not any(
+        a["role"] == "continuation" and a["model"] in experts for a in raw["arms"]
+    ):
+        return False
+    for case in raw["cases"]:
+        ref = case.get("source_sha256", "")
+        if case["scenario_id"] != case_id or not SHA.fullmatch(ref):
+            continue
+        source = json.loads(read_file(inputs / (ref[7:] + ".json")))
+        if _hash(source) != ref:
+            raise ValueError("existing continuation source digest changed")
+        origin = source.get("origin", {})
+        if (
+            source.get("scenario_id") == case_id
+            and origin.get("batch_id") == source_batch
+            and (source_job is None or origin.get("job_id") == source_job)
+        ):
+            return True
+    return False
 
 
 def prepare_pool(args):
@@ -81,7 +119,7 @@ def prepare_pool(args):
         register_signatures()
         prompt=json.loads(read_file(args.prompt));source_spec=load_experiment(json.loads(read_file(args.source_batch)),prompt)
         db,objects=evidence_stores()
-        source=funded_source(db,objects,source_spec.batch_id,args.source_job,prompt)
+        source=funded_source(db,objects,source_spec.batch_id,args.source_job,prompt,classify_grounding=True)
         if source["scenario_id"]!=cases[0]["scenario_id"] or source["student_model"] in args.model:
             raise ValueError("expert and scenario must match the observed student failure")
         source_hash=_hash(source)
@@ -93,7 +131,26 @@ def prepare_pool(args):
         raw["successor_seeds"]=True
     spec=load_experiment(raw,json.loads(read_file(args.prompt)))
     store_private_json(args.inputs/(spec.raw["split_sha256"][7:]+".json"),split)
-    store_private_json(args.directory/(spec.batch_id+".json"),raw)
+    path = args.directory / (spec.batch_id + ".json")
+    if args.source_batch:
+        # Manual and automatic staging share the same lock. IDs alone do not
+        # identify identical checkpoints in manifests prepared by different paths.
+        with lock_pool_directory(args.directory):
+            for candidate in args.directory.glob("pool-*.json"):
+                if candidate != path and matches_continuation(
+                    json.loads(read_file(candidate)),
+                    args.inputs,
+                    source["scenario_id"],
+                    source_spec.batch_id,
+                    args.model,
+                    source_job=args.source_job,
+                ):
+                    raise ValueError(
+                        f"an expert continuation from this paid source already exists in {candidate.stem}"
+                    )
+            store_private_json(path, raw)
+    else:
+        store_private_json(path, raw)
     print(json.dumps({"batch":spec.batch_id,"slots":len(spec.slots),"builder":builder,"harness":agent}))
     return 0
 

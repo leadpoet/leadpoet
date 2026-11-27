@@ -108,7 +108,7 @@ def _check_memo(memo, reference, state, visible):
     }
 
 
-def _history(objects, job, manifest, row, packet):
+def _history(objects, job, manifest, row, packet, *, classify_grounding=False):
     from lab_arena.collection_workflow import read_artifact
 
     if packet.get("projection_error") and packet.get("full_evidence"):
@@ -132,6 +132,7 @@ def _history(objects, job, manifest, row, packet):
     discovered = set()
     first = None
     first_mistake = None
+    persistent_errors = set()
     repair = None
     queries = []
     opened = []
@@ -191,7 +192,23 @@ def _history(objects, job, manifest, row, packet):
                 )
                 if wrote:
                     memo_seen_at = seen_before_turn
-                    last_check = _check_memo(_memo(raw), reference, state, memo_seen_at)
+                    memo = _memo(raw)
+                    last_check = _check_memo(memo, reference, state, memo_seen_at)
+                    if classify_grounding:
+                        # Track errors in submitted fields of the first wrong memo.
+                        # Missing/malformed memos and subsequently repaired fields are not examples.
+                        errors = {
+                            (field, kind)
+                            for field in _findings(memo)
+                            for kind in ("claim", "citation")
+                            if memo.get("account_id") == state["entity"]
+                            and memo.get("as_of") == state["as_of"]
+                            and last_check[kind + "_checks"].get(field) is False
+                        }
+                        if first is None:
+                            persistent_errors = errors
+                        else:
+                            persistent_errors.intersection_update(errors)
                     if not last_check["passed"] and first is None:
                         first = (before, action)
                         first_mistake = "unsupported_account_memo"
@@ -266,7 +283,12 @@ def _history(objects, job, manifest, row, packet):
         "citation_checks": last_check["citation_checks"],
         "citation_ids": last_check["citation_ids"],
     }
-    if not queries and not row.get("native_correction"):
+    # Only new funded continuations opt into reusing verified, previously opened evidence.
+    # Historical manifests must replay to their original native decisions.
+    inherited_research = (
+        row.get("correction") and manifest.get("uses_checkpoint_evidence") is True
+    )
+    if not queries and not (row.get("native_correction") or inherited_research):
         last_check = empty
     details = {
         "verified_decision": bool(
@@ -314,6 +336,18 @@ def _history(objects, job, manifest, row, packet):
                 "kind": "observed_revision",
             }
         pre = {"checkpoint": cp, "rejected": rejected, **anchor}
+        if (
+            persistent_errors
+            and first_mistake == "unsupported_account_memo"
+            and repair is None
+            and not details["verified_decision"]
+        ):
+            pre["unrepaired_grounding"] = {
+                name: [
+                    k for k in ("claim", "citation") if (name, k) in persistent_errors
+                ]
+                for name in sorted({name for name, _ in persistent_errors})
+            }
     return details, pre
 
 

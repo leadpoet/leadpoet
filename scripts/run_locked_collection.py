@@ -741,11 +741,14 @@ def evidence_stores():
 
 def stage_failed_pool_continuation(spec, job, *, database, objects, directory, inputs, prompt):
     """At most one outstanding continuation per ordinary program and one per scenario."""
-    import fcntl
     from lab_arena.collection_experiment import load_experiment
     from lab_arena.collection_pool_source import funded_source
     from scripts.collection_review import read_file
-    from scripts.prepare_collection_experiment import store_private_json
+    from scripts.prepare_collection_experiment import (
+        lock_pool_directory,
+        matches_continuation,
+        store_private_json,
+    )
 
     corrector = spec.raw["correction_model"]
     scenario = job["scenario_id"]
@@ -755,13 +758,17 @@ def stage_failed_pool_continuation(spec, job, *, database, objects, directory, i
     program = judge.digest({k:v for k,v in spec.raw.items() if k!="cases"})
     # Serialize competing trusted workers' decisions on this existing directory.
     # Source bytes and manifests are hash-addressed; no new queue or mutable job state.
-    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        fcntl.flock(fd,fcntl.LOCK_EX)
+    with lock_pool_directory(directory):
         latest = None
         for path in directory.glob("pool-*.json"):
             raw = json.loads(read_file(path))
             if raw.get("auto_from_program") != program:
+                # A manually staged correction can have a different pack ID and
+                # source projection but still resume this same original paid case.
+                if matches_continuation(
+                    raw, inputs, scenario, spec.batch_id, {corrector}
+                ):
+                    return None
                 continue
             case = raw["cases"][0]["scenario_id"]
             if case == scenario:
@@ -775,9 +782,17 @@ def stage_failed_pool_continuation(spec, job, *, database, objects, directory, i
             previous = database.rpc("collection_batch_jobs_v1",{"p_batch":latest[1]})
             if not any(j["status"] in {"accepted","rejected","failed"} for j in previous):
                 return None
-        source = funded_source(database,objects,spec.batch_id,job["job_id"],prompt)
-        if not source["rejected_fatal"]:
-            # Keep the observed repairable edit in its original trace; it is not an irreversible rejected action.
+        source = funded_source(
+            database,
+            objects,
+            spec.batch_id,
+            job["job_id"],
+            prompt,
+            classify_grounding=True,
+        )
+        if not (
+            source["rejected_fatal"] or source["failure"].get("unrepaired_grounding")
+        ):
             return None
         source_hash = "sha256:" + judge.digest(source)
         expert = next(a for a in spec.raw["arms"] if a["model"]==corrector)
@@ -792,8 +807,6 @@ def stage_failed_pool_continuation(spec, job, *, database, objects, directory, i
         store_private_json(directory/(continuation.batch_id+".json"),raw)
         print(json.dumps({"batch":continuation.batch_id,"source_job":job["job_id"],"status":"correction_staged"}),flush=True)
         return continuation.batch_id
-    finally:
-        os.close(fd)
 
 
 def poll_pool_experiments(prompt, directory, database, run):

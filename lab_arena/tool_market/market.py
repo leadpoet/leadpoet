@@ -359,7 +359,7 @@ class ToolMarket:
             raise ToolMarketError(401, "tab_unknown")
         tab = token_hash(token)
         # Before the chain and the book are read, so a bad token costs one lookup.
-        opened = self._store.tab_state(tab)
+        opened = self._store.tab_state(tab, self._config.terms_sha256)
         if opened is None:
             raise ToolMarketError(401, "tab_unknown")
         if not opened["open"]:
@@ -367,6 +367,8 @@ class ToolMarket:
         hotkey = opened["hotkey"]
         if not self._config.may_buy(hotkey):  # also for a tab opened before the allowlist changed
             raise ToolMarketError(403, "buyer_not_allowed")
+        if not opened["terms"]:  # also for a tab opened before the terms changed
+            raise ToolMarketError(403, "terms_required")
         with self._slot(hotkey, MAX_CALLS_IN_FLIGHT_PER_BUYER, "too_many_calls_in_flight"):
             return self._buy(tool, op, max_ask, private, tab, hotkey, url, headers, payload)
 

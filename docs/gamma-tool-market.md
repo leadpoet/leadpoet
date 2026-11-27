@@ -59,8 +59,8 @@ their version changes.
 
 ## For buyers
 
-`lab_arena/tool_market/client.py` is the whole buyer client, with no
-dependencies beyond `bittensor_wallet` for signing:
+`lab_arena/tool_market/client.py` is the whole buyer client. It runs from
+this repository and needs only `bittensor_wallet` beyond it, for signing:
 
 ```bash
 export SUBNET71_URL=https://<gateway>
@@ -69,7 +69,13 @@ python -m lab_arena.tool_market.client balance
 python -m lab_arena.tool_market.client key --budget 20 --days 30
 export SUBNET71_API_KEY=<token it printed>
 python -m lab_arena.tool_market.client call hunter email_finder domain=acme.com full_name="Ada Lee"
+python -m lab_arena.tool_market.client call exa search query="crm vendors" numResults:=5
 ```
+
+`name=value` sends text and `name:=value` sends JSON. `--private` (or
+`private` in `call_tool`) uses only suppliers that keep the request
+private. The client follows no redirect and talks only https, or http
+to this machine.
 
 For an agent, `python -m lab_arena.tool_market.client mcp` is a stdio MCP
 server with two tools: `find_tool` (the catalog) and `call_tool`. It holds
@@ -304,6 +310,9 @@ deployment, exactly as lead orders do.
   the vault would close this.
 - **A balance reads every tab the buyer ever opened.** Fine at launch;
   keep a running total before buyers open thousands of tabs.
+- **A lost API key holds its budget until it expires.** Only its token
+  closes it, and the CLI makes 30-day keys by default; a signed "close my
+  keys" route would let a buyer free a lost one.
 - **A signed balance read needs no funds.** Each costs a few chain reads,
   and every signed request adds a nonce row (a reading row only when the
   reading changed). Rate-limit the route at the edge before opening it widely.

@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 import json
 
+import pytest
+
 from bittensor_wallet import Keypair
 
 from lab_arena.chain import wallet_signature_verifier
@@ -32,7 +34,7 @@ class Recorder:
 
 def test_a_signed_request_passes_the_gateways_check(monkeypatch):
     sent = Recorder({"status": "opened", "token": "tmt_x"})
-    monkeypatch.setattr(client_module.urllib.request, "urlopen", sent)
+    monkeypatch.setattr(client_module, "_open", sent)
     alice = Keypair.create_from_uri("//Alice")
     client = client_module.Client("https://gw.example:443/", keypair=alice)
     client.request("POST", "/tool-market/tabs", {"budget_microusd": 1, "seconds": 60}, signed=True)
@@ -47,7 +49,7 @@ def test_a_signed_request_passes_the_gateways_check(monkeypatch):
 
 def test_the_mcp_server_lists_two_tools_and_calls_with_the_api_key(monkeypatch):
     sent = Recorder({"status": 200, "charge_microusd": 11})
-    monkeypatch.setattr(client_module.urllib.request, "urlopen", sent)
+    monkeypatch.setattr(client_module, "_open", sent)
     lines = [json.dumps(m) for m in (
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
@@ -72,7 +74,7 @@ def test_a_refused_call_reaches_the_agent_as_an_error(monkeypatch):
         raise client_module.urllib.error.HTTPError(request.full_url, 402, "", {},
                                                    io.BytesIO(b'{"error": "tab_budget"}'))
 
-    monkeypatch.setattr(client_module.urllib.request, "urlopen", refuse)
+    monkeypatch.setattr(client_module, "_open", refuse)
     reply = client_module.mcp_answer(client_module.Client("https://gw.example", api_key="k"), {
         "jsonrpc": "2.0", "id": 9, "method": "tools/call",
         "params": {"name": "call_tool", "arguments": {"tool": "hunter", "operation": "email_finder"}}})
@@ -84,10 +86,26 @@ def test_an_unreachable_gateway_fails_the_call_not_the_mcp_server(monkeypatch):
     def down(request, timeout):
         raise client_module.urllib.error.URLError("connection refused")
 
-    monkeypatch.setattr(client_module.urllib.request, "urlopen", down)
+    monkeypatch.setattr(client_module, "_open", down)
     lines = [json.dumps({"jsonrpc": "2.0", "id": i, "method": "tools/call",
                          "params": {"name": "find_tool", "arguments": {}}}) for i in (1, 2)]
     out = io.StringIO()
     client_module.serve_mcp(client_module.Client("https://gw.example", api_key="k"), lines, out)
     replies = [json.loads(line) for line in out.getvalue().splitlines()]
     assert [(r["id"], r["result"]["isError"]) for r in replies] == [(1, True), (2, True)]
+
+
+def test_the_client_names_its_gateway_and_follows_no_redirect(monkeypatch):
+    for url in ("http://gw.example", "ftp://gw.example", "gw.example"):
+        with pytest.raises(ValueError):
+            client_module.Client(url)
+    client_module.Client("http://localhost:8080")  # this machine only
+
+    def moved(request, timeout):  # what the no-redirect opener raises for a 302
+        raise client_module.urllib.error.HTTPError(request.full_url, 302, "", {},
+                                                   io.BytesIO(b'{"status": "found"}'))
+
+    monkeypatch.setattr(client_module, "_open", moved)
+    answer = client_module.Client("https://gw.example", api_key="k").tools()
+    assert answer == {"error": "http_302", "status": 302}  # an error body's own status cannot clash
+    assert client_module._NoRedirect().redirect_request(None, None, 302, "", {}, "https://evil.example/") is None

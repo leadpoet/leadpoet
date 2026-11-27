@@ -10,9 +10,12 @@ by its budget and expires, so an agent never holds the hotkey.
     export SUBNET71_API_KEY=...
     python -m lab_arena.tool_market.client tools
     python -m lab_arena.tool_market.client call hunter email_finder domain=acme.com full_name="Ada Lee"
+    python -m lab_arena.tool_market.client call exa search query="crm vendors" numResults:=5
     python -m lab_arena.tool_market.client mcp        # stdio MCP server for agents
 
-``SUBNET71_URL`` (or ``--url``) is the gateway's public origin, with no path.
+``SUBNET71_URL`` (or ``--url``) is the gateway's public origin, with no path:
+https, or http only to this machine. ``name=value`` sends text and
+``name:=value`` sends JSON (a number, a boolean or a list).
 """
 
 from __future__ import annotations
@@ -31,10 +34,25 @@ from lab_arena.lead_orders.auth import signed_message
 from lab_arena.tool_market.config import PUBLISHED_TERMS
 
 TIMEOUT_SECONDS = 120
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect is an error: following one would send the API key or a
+    signed request to a host the buyer never named."""
+
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+_open = urllib.request.build_opener(_NoRedirect).open
 
 
 class Client:
     def __init__(self, url: str, api_key: str = "", keypair: Any = None) -> None:
+        parts = urlsplit(url)
+        if not (parts.scheme == "https" or (parts.scheme == "http" and parts.hostname in _LOCAL_HOSTS)):
+            raise ValueError("the gateway URL must be https")
         self.url = url.rstrip("/")
         self.api_key = api_key
         self.keypair = keypair
@@ -55,24 +73,26 @@ class Client:
         request = urllib.request.Request(self.url + path, data=data if body is not None else None,
                                          headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as answer:
+            with _open(request, timeout=TIMEOUT_SECONDS) as answer:
                 return json.loads(answer.read() or b"{}")
         except urllib.error.HTTPError as error:
             try:
                 document = json.loads(error.read() or b"{}")
             except ValueError:
                 document = {}
-            return dict({"error": "http_%d" % error.code}, **(document if isinstance(document, dict) else {}),
-                        status=error.code)
+            return {"error": "http_%d" % error.code, **(document if isinstance(document, dict) else {}),
+                    "status": error.code}
 
     def tools(self) -> Dict[str, Any]:
         return self.request("GET", "/tool-market/catalog")
 
     def call(self, tool: str, operation: str, params: Dict[str, Any],
-             max_ask_microusd: Optional[int] = None) -> Dict[str, Any]:
+             max_ask_microusd: Optional[int] = None, private: bool = False) -> Dict[str, Any]:
         body: Dict[str, Any] = {"tool": tool, "operation": operation, "params": params}
         if max_ask_microusd is not None:
             body["max_ask_microusd"] = max_ask_microusd
+        if private:
+            body["private"] = True
         return self.request("POST", "/tool-market/call", body)
 
 
@@ -88,7 +108,8 @@ MCP_TOOLS = [
      "inputSchema": {"type": "object", "required": ["tool", "operation"], "properties": {
          "tool": {"type": "string"}, "operation": {"type": "string"},
          "params": {"type": "object", "description": "The operation's parameters, as find_tool lists them."},
-         "max_ask_microusd": {"type": "integer", "description": "Optional: skip keys asking more per unit."}}}},
+         "max_ask_microusd": {"type": "integer", "description": "Optional: skip keys asking more per unit."},
+         "private": {"type": "boolean", "description": "Optional: only suppliers that keep the request private."}}}},
 ]
 
 
@@ -112,7 +133,8 @@ def mcp_answer(client: Client, message: Dict[str, Any]) -> Optional[Dict[str, An
             answer = client.tools()
         elif name == "call_tool":
             answer = client.call(str(arguments.get("tool", "")), str(arguments.get("operation", "")),
-                                 arguments.get("params") or {}, arguments.get("max_ask_microusd"))
+                                 arguments.get("params") or {}, arguments.get("max_ask_microusd"),
+                                 arguments.get("private") is True)
         else:
             return {"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32602, "message": "unknown tool"}}
         result = {"content": [{"type": "text", "text": json.dumps(answer)}], "isError": "error" in answer}
@@ -152,13 +174,6 @@ def _keypair(args: argparse.Namespace) -> Any:
     return Wallet(name=args.wallet_name, hotkey=args.hotkey_name).hotkey
 
 
-def _value(text: str) -> Any:
-    try:
-        return json.loads(text)  # numbers, booleans and lists; anything else stays text
-    except ValueError:
-        return text
-
-
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(prog="subnet71", description=__doc__.split("\n")[0])
     parser.add_argument("--url", default=os.environ.get("SUBNET71_URL", ""))
@@ -178,11 +193,15 @@ def main(argv: Optional[list] = None) -> int:
     call.add_argument("tool")
     call.add_argument("operation")
     call.add_argument("params", nargs="*")
+    call.add_argument("--private", action="store_true", help="only suppliers that keep the request private")
     commands.add_parser("mcp", help="run the MCP server on stdio")
     args = parser.parse_args(argv)
     if not args.url:
         parser.error("set SUBNET71_URL or --url")
-    client = Client(args.url, os.environ.get("SUBNET71_API_KEY", ""))
+    try:
+        client = Client(args.url, os.environ.get("SUBNET71_API_KEY", ""))
+    except ValueError as error:
+        parser.error(str(error))
 
     if args.command in ("terms", "balance", "key"):
         client.keypair = _keypair(args)
@@ -204,10 +223,16 @@ def main(argv: Optional[list] = None) -> int:
     elif args.command == "tools":
         answer = client.tools()
     elif args.command == "call":
-        if not all("=" in item for item in args.params):
-            parser.error("parameters are name=value")
-        params = dict(item.split("=", 1) for item in args.params)
-        answer = client.call(args.tool, args.operation, {k: _value(v) for k, v in params.items()})
+        params: Dict[str, Any] = {}
+        for item in args.params:
+            name, sep, text = item.partition("=")
+            if not sep:
+                parser.error("parameters are name=value (text) or name:=value (JSON)")
+            try:
+                params[name.removesuffix(":")] = json.loads(text) if name.endswith(":") else text
+            except ValueError:
+                parser.error("%s is not JSON" % name)
+        answer = client.call(args.tool, args.operation, params, private=args.private)
     else:
         serve_mcp(client)
         return 0

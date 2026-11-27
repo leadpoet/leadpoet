@@ -393,6 +393,11 @@ def _warn_observation_segment_failure(
 MODES = ("off", "shadow", "live")
 HOT_ROUND_TTL_SECONDS = 2.0
 TERMINAL_STATUSES = ("published", "cancelled")
+# A round-advance step that returns one of these did not move the round on: it
+# re-read the same state and asked to be called again. Recording the stage as
+# `idle` keeps a retry loop distinguishable from a transition, so a wedged
+# round is a span outcome rather than a repeat count read off the tick rate.
+NON_ADVANCING_STATUSES = frozenset({"retry", "waiting", "existing"})
 JUDGE_CONTINUATION_EVALUATION_DATE = "2026-10-14"
 JUDGE_CONTINUATION_SHADOW_CREATED_AT = datetime(2026, 10, 13, 16, 30, tzinfo=timezone.utc)
 
@@ -8785,11 +8790,15 @@ class ArenaService:
                     self._invalidate_hot_round()
                     return {**outage, "round_status": self._round(round_id)["status"]}
             if status == "open":
-                with telemetry.stage("advance_commit_benchmark"):
-                    return self.commit_benchmark(round_id)
+                with telemetry.stage("advance_commit_benchmark") as observed:
+                    committed = self.commit_benchmark(round_id)
+                    observed.idle = committed.get("status") in NON_ADVANCING_STATUSES
+                    return committed
             if status == "committed":
-                with telemetry.stage("advance_open_stage"):
-                    return self.open_stage(round_id, 1)
+                with telemetry.stage("advance_open_stage") as observed:
+                    opened = self.open_stage(round_id, 1)
+                    observed.idle = opened.get("status") in NON_ADVANCING_STATUSES
+                    return opened
             if (status in ("stage1_scoring", "stage1_judged")
                 and round_row["configuration_doc"].get("execution_sequence_policy")
                     == contracts.BASELINE_SCORED_FIRST_POLICY
@@ -8797,8 +8806,9 @@ class ArenaService:
                 # The database checks every accepted baseline execution under
                 # the round lock. A pre-migration database returns stale and
                 # continues its existing sequential path.
-                with telemetry.stage("advance_open_stage"):
+                with telemetry.stage("advance_open_stage") as observed:
                     opened = self.open_stage(round_id, 2)
+                    observed.idle = opened.get("status") != "ok"
                 if opened.get("status") == "ok":
                     return opened
             if status in ("stage2", "stage2_closed", "stage2_scoring"):
@@ -8861,8 +8871,10 @@ class ArenaService:
                         return self._store.cancel_round(round_id, CANCEL_REASONS["scoring"])
                     return {"status": "retry", "round_status": status}
             if status == "stage1_scored":
-                with telemetry.stage("advance_open_stage"):
-                    return self.open_stage(round_id, 2)
+                with telemetry.stage("advance_open_stage") as observed:
+                    opened = self.open_stage(round_id, 2)
+                    observed.idle = opened.get("status") in NON_ADVANCING_STATUSES
+                    return opened
             if status == "scored":
                 if _judge_continuation_enabled(round_row):
                     with telemetry.stage("advance_expire_leases"):

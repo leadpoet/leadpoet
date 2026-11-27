@@ -132,3 +132,39 @@ def test_publish_store_error_names_safe_resource_on_nested_advance_spans(observe
         assert attributes["arena.error_type"] == "ArenaStoreError"
         assert {key: attributes[key] for key in expected} == expected
     assert canary not in repr([dict(span.attributes) for span in spans.values()])
+
+
+def test_benchmark_retry_is_idle_so_a_wedged_round_is_not_a_repeat_count(observed_service):
+    """A round that keeps re-entering the same step must not report `ok`.
+
+    `commit_benchmark` returns `retry` while today's submissions are still in
+    code review, and `open_stage` returns a non-`ok` status while the baseline
+    sequence has nothing to open. Both leave the round on its existing status,
+    so without this the only way to see a stuck round is to count how often the
+    step repeats against the tick rate.
+    """
+    service, exporter, row = observed_service
+    row["status"] = "open"
+    service.admit_uploaded_submissions = lambda *_a, **_k: {"status": "ok"}
+    service.commit_benchmark = lambda _: {"status": "retry", "reason": "code_review_pending"}
+
+    assert service.advance_round("round")["status"] == "retry"
+    benchmark = {s.attributes["arena.stage"]: s for s in exporter.get_finished_spans()}
+    assert benchmark["advance_commit_benchmark"].attributes["arena.outcome"] == "idle"
+
+    exporter.clear()
+    row["status"] = "committed"
+    service.open_stage = lambda *_: {"status": "existing"}
+    assert service.advance_round("round")["status"] == "existing"
+    opened = {s.attributes["arena.stage"]: s for s in exporter.get_finished_spans()}
+    assert opened["advance_open_stage"].attributes["arena.outcome"] == "idle"
+
+
+def test_a_real_transition_still_reports_ok(observed_service):
+    service, exporter, row = observed_service
+    row["status"] = "committed"
+    service.open_stage = lambda *_: {"status": "ok", "participants": 3}
+
+    assert service.advance_round("round")["status"] == "ok"
+    spans = {s.attributes["arena.stage"]: s for s in exporter.get_finished_spans()}
+    assert spans["advance_open_stage"].attributes["arena.outcome"] == "ok"

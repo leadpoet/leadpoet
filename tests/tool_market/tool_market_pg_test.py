@@ -188,20 +188,19 @@ def test_a_call_goes_to_the_cheapest_key_and_pays_its_ask_plus_ten_percent(world
     assert closed.value.code == "tab_closed"
 
 
-def test_a_key_that_ran_out_fails_over_and_leaves_the_book_until_checked(world):
-    miner, empty_key = world.miner_key("empty-key", 9_000)
+def test_a_key_that_ran_out_fails_over_and_goes_to_the_back(world):
+    # HarvestAPI has no free check, so a 402 cannot be confirmed: the key
+    # stays listed, behind keys that answered, for the hour.
+    miner, _ = world.miner_key("empty-key", 9_000)
     world.miner_key("full-key", 10_000)
     _, token = world.buyer()
     world.vendor.script["empty-key"] = [ok({"error": "no credits"}, status=402)]
     result = world.market.call(token, PROFILE)
     assert [s[0] for s in world.vendor.sent] == ["empty-key", "full-key"] and result["charge_microusd"] == 11_000
     assert world.market.tab(token)["committed_microusd"] == 11_000  # the failed try costs nothing
-    assert [a["ask_microusd"] for a in world.market.order_book("harvestapi")["asks"]] == [10_000]
-    health = world.market.statement(miner)["keys"][0]["health"]
-    assert health["status"] == "failed" and health["reason"] == "no_credit"
-    # Topped up: the miner asks for a check and the key trades again.
-    assert world.market.check_key(world.who(miner), empty_key) == {"key_id": empty_key, "tradeable": True}
-    assert [a["ask_microusd"] for a in world.market.order_book("harvestapi")["asks"]] == [9_000, 10_000]
+    assert world.market.statement(miner)["keys"][0]["health"]["status"] != "failed"
+    world.market.call(token, PROFILE)
+    assert world.vendor.sent[2][0] == "full-key"
 
 
 def test_unknown_usage_charges_the_buyer_nothing_and_the_miner_bears_it(world):
@@ -265,7 +264,7 @@ def test_the_catalog_lists_each_tool_its_operations_and_best_price(world):
     assert tools["exa"]["best_ask_microusd"] is None  # nobody sells it yet
 
 
-def test_a_buyer_pages_their_own_finished_calls_by_watermark(world):
+def test_a_buyer_pages_their_own_finished_calls_by_watermark(world, database):
     world.miner_key("usage-key", 10_000)
     buyer, token = world.buyer()
     other, other_token = world.buyer()
@@ -273,6 +272,16 @@ def test_a_buyer_pages_their_own_finished_calls_by_watermark(world):
     for _ in range(3):
         world.market.call(token, PROFILE)
     world.market.call(other_token, PROFILE)
+    # A call is listed only once it can no longer change.
+    assert world.market.usage(world.who(buyer), 0, 100)["calls"] == []
+    psycopg2, dsn = database
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    with connection.cursor() as cursor:
+        # Age the calls on this scratch database, past the append-only trigger.
+        cursor.execute("SET session_replication_role=replica")
+        cursor.execute("UPDATE public.tool_market_calls SET opened_at=opened_at-interval '11 minutes'")
+    connection.close()
     first = world.market.usage(world.who(buyer), 0, 2)
     assert [c["charge_microusd"] for c in first["calls"]] == [11_000, 11_000]
     assert set(first["calls"][0]) == {"call_id", "sequence", "tool", "operation", "opened_at", "status",
@@ -280,16 +289,6 @@ def test_a_buyer_pages_their_own_finished_calls_by_watermark(world):
     rest = world.market.usage(world.who(buyer), first["watermark"], 100)
     assert len(rest["calls"]) == 1 and world.market.usage(world.who(buyer), rest["watermark"], 100)["calls"] == []
     assert len(world.market.usage(world.who(other), 0, 100)["calls"]) == 1  # only the signer's own
-    # A call still open holds the page before it, so the watermark cannot pass it.
-    tab = token_hash(token)
-    open_call = str(uuid.uuid4())
-    ask = world.store.book(tool="harvestapi", terms_sha256=world.config.terms_sha256, check_max_age_seconds=3600)[0]
-    assert world.store.reserve_call(call_id=open_call, token_hash=tab, tool="harvestapi", operation=PROFILE["operation"],
-                                    key_id=ask["key_id"], ask_microusd=ask["ask_microusd"], reserve_microusd=11_000,
-                                    owed_cap_microusd=10_000) == "reserved"
-    world.market.call(token, PROFILE)
-    held = world.market.usage(world.who(buyer), rest["watermark"], 100)
-    assert held == {"calls": [], "watermark": rest["watermark"]}
     for after, limit in ((-1, 10), (0, 0), (0, 501), ("1", 10)):
         with pytest.raises(ToolMarketError):
             world.market.usage(world.who(buyer), after, limit)
@@ -486,8 +485,11 @@ def test_a_buyer_cannot_take_working_keys_out_of_the_book(world):
         with pytest.raises(ToolMarketError):
             world.market.call(token, VALIDATE)
     assert world.vault.checks == checks + 1 and len(world.market.order_book("zerobounce")["asks"]) == 1
-    # Exa has no free check: a 401 or 402 fails it.
-    world.vendor.script["exa-a"] = [ok({}, status=402)]
+    # Exa has no free check: a 402 only skips it; a 401 fails it.
+    world.vendor.script["exa-a"] = [ok({}, status=402), ok({}, status=401)]
+    with pytest.raises(ToolMarketError):
+        world.market.call(token, SEARCH)
+    assert len(world.market.order_book("exa")["asks"]) == 1
     with pytest.raises(ToolMarketError):
         world.market.call(token, SEARCH)
     assert world.market.order_book("exa")["asks"] == []
@@ -503,22 +505,6 @@ def test_a_checked_key_fails_on_401_or_on_402_with_no_balance(world):
     with pytest.raises(ToolMarketError):
         world.market.call(token, VALIDATE)
     assert world.market.order_book("zerobounce")["asks"] == []
-
-
-def test_a_key_refused_for_several_buyers_leaves_the_book_until_checked(world):
-    miner, key_id = world.miner_key("exa-blocked", 900_000, tool="exa")
-    world.vendor.script["exa-blocked"] = [ok({}, status=403)]
-    _, one = world.buyer()
-    for _ in range(3):  # one buyer alone cannot bench it
-        with pytest.raises(ToolMarketError):
-            world.market.call(one, SEARCH)
-    assert len(world.market.order_book("exa")["asks"]) == 1
-    _, two = world.buyer()
-    with pytest.raises(ToolMarketError):
-        world.market.call(two, SEARCH)
-    assert world.market.order_book("exa")["asks"] == []
-    world.market.check_key(world.who(miner), key_id)
-    assert len(world.market.order_book("exa")["asks"]) == 1
 
 
 def test_a_miners_tab_never_buys_from_their_own_key(world):

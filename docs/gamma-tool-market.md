@@ -121,18 +121,18 @@ Health events come from vault checks and from calls.
   423 (paused, read as 401) and Hunter's 429 (out of searches).
 - A buyer shapes the request, so that answer alone does not always take a
   key out of the book. A 401 (a bad key or a paused account) marks it
-  `failed`. A 402 marks it `failed` unless the vendor's free check still sees
-  a positive balance; the check runs at most once a minute per key, and
-  without one due a 402 only skips the key. A 403 only skips it.
+  `failed`. A 402 marks it `failed` only when the vendor's free check sees no
+  balance; a tool with no check, or a key checked in the last minute, only
+  skips the key. A 403 only skips it; the miner sees refusals in their
+  statement.
 - A key goes to the back of its book, still in it, after a bare 429 in the
   last minute or 3 answers of unknown usage (5xx, timeouts) in the last hour.
-- A key whose last 3 calls were all refused (403), for at least two buyers,
-  leaves the book until its miner asks for a check.
 - A 429 with no `Retry-After` skips the key for this call only. Hunter's
   403 is its rate limit, so it counts as a 429. A 429 with
   `Retry-After` goes back to the buyer.
 - A key whose vendor has a free check is checked again before use once its
-  last check is older than 6 hours. This needs no cron job.
+  last check is older than 6 hours, at most once a minute per key. This
+  needs no cron job. The once-a-minute spacing is per gateway process.
 - After topping up a failed key, the miner calls
   `POST /tool-market/keys/{id}/check` to put it back in the book.
 
@@ -167,10 +167,12 @@ the request.
 ## Usage history
 
 `GET /tool-market/usage?after=<watermark>&limit=<1-500>`, signed by the
-buyer, lists the buyer's own finished calls, oldest first: tool, operation,
-status, units, charge and times. It never returns a vendor's answer. Pass the
-returned `watermark` back as `after` for the next page. A page stops before
-the buyer's oldest call that may still settle, so paging never skips one.
+buyer, lists the buyer's own calls, oldest first: tool, operation, status,
+units, charge and times. It never returns a vendor's answer. Pass the
+returned `watermark` back as `after` for the next page. A call is listed once
+it is 11 minutes old (the 10-minute answer window plus a minute), when it can
+no longer change, so paging never skips one. Each call's own answer already
+carries its charge.
 
 `GET /tool-market/books/{tool}` shows the asks and what a buyer pays for
 each. It shows no miner hotkeys and no key data.

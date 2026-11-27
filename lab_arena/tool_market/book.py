@@ -14,9 +14,6 @@ from lab_arena.tool_market.catalog import Operation
 
 PPM = 1_000_000
 MARKUP_PPM = 100_000
-# Highest ask: $10 per call, or 10x the vendor's own price.
-MAX_ASK_MICROUSD = 10_000_000
-
 FAILURE_UNAUTHORIZED = "unauthorized"
 FAILURE_NO_CREDIT = "no_credit"
 FAILURE_FORBIDDEN = "forbidden"
@@ -45,9 +42,9 @@ def reserve_microusd(operation: Operation, ask_microusd: int) -> int:
     return charge_microusd(_ceil_div(operation.max_units * int(ask_microusd), operation.unit_scale))
 
 
-def valid_ask(ask_microusd: object, ceiling: int = MAX_ASK_MICROUSD) -> bool:
+def valid_ask(ask_microusd: object, ceiling: int) -> bool:
     return isinstance(ask_microusd, int) and not isinstance(ask_microusd, bool) \
-        and 0 < ask_microusd <= min(ceiling, MAX_ASK_MICROUSD)
+        and 0 < ask_microusd <= ceiling
 
 
 @dataclass(frozen=True)
@@ -96,7 +93,6 @@ def rate_limited(status: int, headers: Mapping[str, str]) -> bool:
 __all__ = [
     "Ask",
     "MARKUP_PPM",
-    "MAX_ASK_MICROUSD",
     "charge_microusd",
     "key_failure",
     "owed_microusd",

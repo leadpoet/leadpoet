@@ -271,12 +271,13 @@ class ToolMarket:
             raise ToolMarketError(400, "private_invalid")
         # The most the buyer will let a key ask per unit; the book can move
         # between reading it and calling.
-        max_ask = body.get("max_ask_microusd", book.MAX_ASK_MICROUSD)
-        if not book.valid_ask(max_ask):
-            raise ToolMarketError(400, "max_ask_invalid")
         tool = body["tool"]
         if tool not in self._config.tools:
             raise ToolMarketError(404, "tool_unavailable")
+        ceiling = catalog.MAX_ASK[catalog.TOOLS[tool]]
+        max_ask = body.get("max_ask_microusd", ceiling)
+        if not book.valid_ask(max_ask, ceiling):
+            raise ToolMarketError(400, "max_ask_invalid")
         try:
             op = catalog.operation(tool, body["operation"])
             url, headers, payload = op.build(body.get("params", {}))
@@ -295,7 +296,8 @@ class ToolMarket:
                 continue
             if ask.needs_check:
                 checks += 1
-                if checks > MAX_KEYS_PER_CALL or not self._recheck(ask.key_id, tool, ask.envelope):
+                if checks > MAX_KEYS_PER_CALL or not self._recheck_due(ask.key_id) \
+                        or not self._recheck(ask.key_id, tool, ask.envelope):
                     continue
             call_id = self._new_id()
             status = self._store.reserve_call(
@@ -388,24 +390,23 @@ class ToolMarket:
         request, so the answer alone does not always take a key out:
 
         - 401 (a bad key or account) always fails it;
-        - 402 (no credit) fails it unless the vendor's free check sees a
-          positive balance; without a check due (one a minute per key), it
-          only skips the key;
-        - 403 only skips it. The book benches a key refused this way for
-          several buyers in a row (``tool_market__key_refused_v1``).
+        - 402 (no credit) fails it only when the vendor's free check, due at
+          most once a minute per key, sees no balance; otherwise, and for a
+          tool with no check, it only skips the key;
+        - 403 only skips it.
         """
 
         if status == 403:
             return
-        if vault_tools.TOOLS[tool].balance_url is None:
+        if status == 401:
             confirmed = True
-        elif not self._recheck_due(ask.key_id):
-            confirmed = status == 401
+        elif vault_tools.TOOLS[tool].balance_url is None or not self._recheck_due(ask.key_id):
+            confirmed = False
         else:
             checked = self._recheck_answer(ask.key_id, tool, ask.envelope)
             if checked is None or checked["status"] == "invalid":
                 return  # unknown, or already recorded as invalid
-            confirmed = status == 401 or checked.get("balance") is None
+            confirmed = checked.get("balance") is None
         if confirmed:
             self._store.record_key_event(key_id=ask.key_id, status="failed", reason=failure)
 
@@ -416,8 +417,8 @@ class ToolMarket:
         return ask.miner_hotkey in self._config.private_suppliers or catalog.REQUEST_PRIVACY[tool] == "private"
 
     def _recheck_due(self, key_id: str) -> bool:
-        """At most one failure re-check per key a minute, so repeated calls
-        cannot hammer a miner's account."""
+        """At most one vendor check per key a minute in this process, so a
+        burst of calls cannot hammer a miner's account."""
 
         now = time.monotonic()
         with self._recheck_lock:

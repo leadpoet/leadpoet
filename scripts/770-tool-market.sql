@@ -229,26 +229,14 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $active
   AND NOT EXISTS(SELECT 1 FROM public.tool_market_key_revocations r WHERE r.key_id=p_key_id);
 $active770$;
 
--- A key whose last 3 calls since its latest health event were all refused
--- (403), for at least two buyers, leaves the book until its miner asks for a
--- check. One buyer alone cannot bench a key.
-CREATE FUNCTION public.tool_market__key_refused_v1(p_key_id UUID,p_since TIMESTAMPTZ)
-RETURNS BOOLEAN LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $refused770$
- WITH recent AS (
-  SELECT s.http_status,t.hotkey FROM public.tool_market_calls c
-   JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
-   JOIN public.tool_market_tabs t ON t.tab_id=c.tab_id
-  WHERE c.key_id=p_key_id AND c.opened_at>p_since ORDER BY c.sequence DESC LIMIT 3)
- SELECT count(*)=3 AND bool_and(http_status=403) AND count(DISTINCT hotkey)>=2 FROM recent;
-$refused770$;
-
 -- A key goes to the back of its book, and stays in it, after a bare rate
--- limit in the last minute or 3 answers of unknown usage (5xx, timeouts) in
--- the last hour.
+-- limit in the last minute, or in the last hour a 402 it was not failed for
+-- or 3 answers of unknown usage (5xx, timeouts).
 CREATE FUNCTION public.tool_market__key_demoted_v1(p_key_id UUID)
 RETURNS BOOLEAN LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $demoted770$
  SELECT count(*) FILTER (WHERE s.status='skipped' AND s.http_status=429
    AND s.settled_at>clock_timestamp()-interval '1 minute')>0
+  OR count(*) FILTER (WHERE s.status='skipped' AND s.http_status=402)>0
   OR count(*) FILTER (WHERE s.status='uncertain')>=3
  FROM public.tool_market_calls c JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
  WHERE c.key_id=p_key_id AND c.opened_at>clock_timestamp()-interval '1 hour';
@@ -463,8 +451,7 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
    ORDER BY (ask).ask_microusd,(ask).ask_sequence),'[]'::JSONB)
  FROM keyed
  WHERE (ask).ask_microusd IS NOT NULL AND (event).status IN ('valid','unchecked')
-  AND public.tool_market__key_day_v1(key_id)<daily_cap_microusd
-  AND NOT public.tool_market__key_refused_v1(key_id,(event).recorded_at);
+  AND public.tool_market__key_day_v1(key_id)<daily_cap_microusd;
 $book770$;
 
 -- ---------------------------------------------------------------------------
@@ -550,24 +537,19 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
 $statement770$;
 
 -- A buyer's own calls, oldest first, after a watermark (a call sequence).
--- Only finished calls are listed: settled, or open a minute past the
--- late-answer window, so a settle that passed its check just in time has
--- committed. The page stops before the buyer's
--- oldest call still open, so a watermark never passes a call that may still
--- settle. Usage only, never the vendor's answer.
+-- Only calls opened more than a minute past the late-answer window are
+-- listed, settled or expired: by then every call with a lower sequence has
+-- committed and finished, so a watermark never passes one that may still
+-- change. Usage only, never the vendor's answer.
 CREATE FUNCTION public.tool_market_usage_v1(p_hotkey TEXT,p_after BIGINT,p_limit INTEGER)
 RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $usage770$
- WITH mine AS (
+ WITH page AS (
   SELECT c.*,s.status settled,s.http_status,s.units,s.charge_microusd,s.settled_at
   FROM public.tool_market_tabs t JOIN public.tool_market_calls c ON c.tab_id=t.tab_id
   LEFT JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
-  WHERE t.hotkey=p_hotkey AND c.sequence>p_after),
- open_from AS (
-  SELECT min(sequence) seq FROM mine WHERE settled IS NULL
-   AND opened_at>clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1()+60)),
- page AS (
-  SELECT * FROM mine WHERE sequence<coalesce((SELECT seq FROM open_from),9223372036854775807)
-  ORDER BY sequence LIMIT greatest(1,least(p_limit,500)))
+  WHERE t.hotkey=p_hotkey AND c.sequence>p_after
+   AND c.opened_at<clock_timestamp()-make_interval(secs=>public.tool_market__open_seconds_v1()+60)
+  ORDER BY c.sequence LIMIT greatest(1,least(p_limit,500)))
  SELECT jsonb_build_object(
   'calls',coalesce((SELECT jsonb_agg(jsonb_build_object('call_id',call_id,'sequence',sequence,'tool',tool,
     'operation',operation,'opened_at',opened_at,'status',coalesce(settled,'expired'),'http_status',http_status,

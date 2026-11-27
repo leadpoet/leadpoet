@@ -48,8 +48,8 @@ def test_cheapest_ask_first_and_earlier_wins_a_tie():
 
 
 def test_ask_bounds():
-    assert book.valid_ask(1) and book.valid_ask(book.MAX_ASK_MICROUSD)
-    assert not any(book.valid_ask(v) for v in (0, -1, book.MAX_ASK_MICROUSD + 1, True, 1.5, "10"))
+    assert book.valid_ask(1, 10) and book.valid_ask(10, 10)
+    assert not any(book.valid_ask(v, 10) for v in (0, -1, 11, True, 1.5, "10"))
 
 
 def test_key_failures_and_rate_limits():

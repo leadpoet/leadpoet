@@ -152,15 +152,15 @@ A miner owns the vendor account behind their key, so whatever that vendor
 shows its account owner, the miner can see. The vault protects the key, not
 the request.
 
-- Each tool states `miner_sees_requests` in the catalog and its book: `yes`
-  when the vendor documents a request history, `unknown` when it does not
-  (treat it as yes), and `no` only after Leadpoet checks a vendor account
-  itself (`MINER_SEES_REQUESTS` in `catalog.py`).
+- Each tool states its `request_privacy` in the catalog and its book:
+  `visible` when the vendor documents a request history, `unverified` when
+  it does not (treat it as visible), and `private` only after Leadpoet checks
+  a vendor account itself (`REQUEST_PRIVACY` in `catalog.py`).
 - Miners who sign a private-supply agreement, promising not to read buyers'
   requests, are listed in `LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS`. Leadpoet
   can be one of them.
 - A call with `"private": true` goes only to those miners' keys, or to a tool
-  marked `no`. The book marks which asks can serve one.
+  marked `private`. The book marks which asks can serve one.
 - This lowers the risk; it does not remove it. The vendor still holds the
   data.
 

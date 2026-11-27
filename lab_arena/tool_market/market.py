@@ -237,7 +237,7 @@ class ToolMarket:
         asks = book.rank(book.Ask.from_row(row) for row in self._supply(tool))
         return {"tool": tool, "unit": catalog.TOOLS[tool],
                 "operations": sorted(name for (t, name) in catalog.OPERATIONS if t == tool),
-                "miner_sees_requests": catalog.MINER_SEES_REQUESTS[tool],
+                "request_privacy": catalog.REQUEST_PRIVACY[tool],
                 "asks": [{"ask_microusd": a.ask_microusd, "buyer_pays_microusd": book.charge_microusd(a.ask_microusd),
                           "private": self._private(tool, a)} for a in asks]}
 
@@ -251,7 +251,7 @@ class ToolMarket:
             best = listed["asks"][0] if listed["asks"] else None
             tools.append({
                 "tool": tool, "unit": listed["unit"], "max_ask_microusd": catalog.MAX_ASK[listed["unit"]],
-                "miner_sees_requests": listed["miner_sees_requests"],
+                "request_privacy": listed["request_privacy"],
                 "best_ask_microusd": best and best["ask_microusd"],
                 "buyer_pays_microusd": best and best["buyer_pays_microusd"],
                 "operations": [{"operation": op.name, "max_units": op.max_units,
@@ -413,7 +413,7 @@ class ToolMarket:
         """A key that may serve a private call: its miner signed a private-supply
         agreement, or Leadpoet checked that the vendor shows owners no requests."""
 
-        return ask.miner_hotkey in self._config.private_suppliers or catalog.MINER_SEES_REQUESTS[tool] == "no"
+        return ask.miner_hotkey in self._config.private_suppliers or catalog.REQUEST_PRIVACY[tool] == "private"
 
     def _recheck_due(self, key_id: str) -> bool:
         """At most one failure re-check per key a minute, so repeated calls

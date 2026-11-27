@@ -301,7 +301,7 @@ def test_a_private_call_goes_only_to_a_private_supplier(world):
     world.market._config = dataclasses.replace(world.config, private_suppliers=frozenset({trusted}))
     _, token = world.buyer()
     listed = world.market.order_book("harvestapi")
-    assert listed["miner_sees_requests"] == "unknown" and [a["private"] for a in listed["asks"]] == [False, True]
+    assert listed["request_privacy"] == "unverified" and [a["private"] for a in listed["asks"]] == [False, True]
     world.market.call(token, dict(PROFILE, private=True))
     assert [s[0] for s in world.vendor.sent] == ["trusted-key"]
     world.market.call(token, PROFILE)  # not private: the cheapest key

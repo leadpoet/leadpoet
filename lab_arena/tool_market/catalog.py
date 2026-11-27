@@ -263,19 +263,19 @@ _OPERATIONS: Sequence[Operation] = (
 OPERATIONS: Dict[Tuple[str, str], Operation] = {(op.tool, op.name): op for op in _OPERATIONS}
 TOOLS: Dict[str, str] = {op.tool: op.unit for op in _OPERATIONS}
 
-# Whether a key's owner can see what buyers asked, in the vendor's own
-# dashboard or history. "yes": the vendor documents it. "unknown": not
-# documented, so treat it as yes. "no" is set only after Leadpoet checks a
-# vendor account itself. Checked against vendor docs, Nov 27 2026.
-MINER_SEES_REQUESTS: Dict[str, str] = {
-    "zerobounce": "yes",  # validation results, kept up to 30 days
-    "hunter": "yes",  # a request history per call
-    "prospeo": "unknown",
-    "findymail": "unknown",
-    "harvestapi": "unknown",
-    "exa": "unknown",
+# How private a tool's requests are from the key's owner, in the vendor's own
+# dashboard or history. "visible": the vendor documents a request history.
+# "unverified": not documented, so treat it as visible. "private" is set only
+# after Leadpoet checks a vendor account itself. Vendor docs, Nov 27 2026.
+REQUEST_PRIVACY: Dict[str, str] = {
+    "zerobounce": "visible",  # validation results, kept up to 30 days
+    "hunter": "visible",  # a request history per call
+    "prospeo": "unverified",
+    "findymail": "unverified",
+    "harvestapi": "unverified",
+    "exa": "unverified",
 }
-assert set(MINER_SEES_REQUESTS) == set(TOOLS) and set(MINER_SEES_REQUESTS.values()) <= {"yes", "unknown", "no"}
+assert set(REQUEST_PRIVACY) == set(TOOLS) and set(REQUEST_PRIVACY.values()) <= {"visible", "unverified", "private"}
 _NAME_RE = re.compile(r"^[a-z_]{1,40}$")
 
 # One unit per tool, so one ask prices every operation of that tool. A

@@ -242,6 +242,18 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $refuse
  SELECT count(*)=3 AND bool_and(http_status=403) AND count(DISTINCT hotkey)>=2 FROM recent;
 $refused770$;
 
+-- A key goes to the back of its book, and stays in it, after a bare rate
+-- limit in the last minute or 3 answers of unknown usage (5xx, timeouts) in
+-- the last hour.
+CREATE FUNCTION public.tool_market__key_demoted_v1(p_key_id UUID)
+RETURNS BOOLEAN LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $demoted770$
+ SELECT count(*) FILTER (WHERE s.status='skipped' AND s.http_status=429
+   AND s.settled_at>clock_timestamp()-interval '1 minute')>0
+  OR count(*) FILTER (WHERE s.status='uncertain')>=3
+ FROM public.tool_market_calls c JOIN public.tool_market_call_settlements s ON s.call_id=c.call_id
+ WHERE c.key_id=p_key_id AND c.opened_at>clock_timestamp()-interval '1 hour';
+$demoted770$;
+
 CREATE FUNCTION public.tool_market__lock_v1(p_kind TEXT,p_value TEXT)
 RETURNS VOID LANGUAGE sql SET search_path=pg_catalog,public AS $lock770$
  SELECT pg_advisory_xact_lock(hashtextextended('tool_market:'||p_kind||':'||p_value,0));
@@ -446,7 +458,8 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
  SELECT coalesce(jsonb_agg(jsonb_build_object('key_id',key_id,'miner_hotkey',miner_hotkey,'envelope',envelope,
    'key_fingerprint',key_fingerprint,'ask_microusd',(ask).ask_microusd,'ask_sequence',(ask).ask_sequence,
    'needs_check',(event).status='valid'
-     AND (event).recorded_at<clock_timestamp()-make_interval(secs=>p_check_max_age_seconds))
+     AND (event).recorded_at<clock_timestamp()-make_interval(secs=>p_check_max_age_seconds),
+   'demoted',public.tool_market__key_demoted_v1(key_id))
    ORDER BY (ask).ask_microusd,(ask).ask_sequence),'[]'::JSONB)
  FROM keyed
  WHERE (ask).ask_microusd IS NOT NULL AND (event).status IN ('valid','unchecked')

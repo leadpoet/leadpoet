@@ -235,6 +235,23 @@ def test_a_request_the_vault_never_sent_moves_to_the_next_key(world):
     assert world.market.call(token, PROFILE)["status"] == 429
 
 
+def test_rate_limited_and_unreliable_keys_go_to_the_back_of_the_book(world):
+    world.miner_key("flaky-key", 8_000)
+    world.miner_key("limited-key", 9_000)
+    world.miner_key("steady-key", 10_000)
+    _, token = world.buyer()
+    world.vendor.script["flaky-key"] = [ok(status=500)]
+    for _ in range(3):  # answers of unknown usage, never retried elsewhere
+        assert world.market.call(token, PROFILE)["status"] == 500
+    world.vendor.script["limited-key"] = [ok(status=429, headers={})]
+    world.market.call(token, PROFILE)
+    world.vendor.sent.clear()
+    world.market.call(token, PROFILE)
+    # The flaky key (3 unknowns this hour) and the limited key (a bare 429
+    # this minute) are tried after the steady one.
+    assert [s[0] for s in world.vendor.sent] == ["steady-key"]
+
+
 def test_tabs_need_terms_balance_and_budget(world):
     world.miner_key("budget-key", 10_000)
     broke = hotkey()

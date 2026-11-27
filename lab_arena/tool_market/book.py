@@ -61,18 +61,20 @@ class Ask:
     ask_sequence: int
     # A key whose vendor has a free balance check and whose last check is old.
     needs_check: bool = False
+    # Rate-limited in the last minute, or unreliable in the last hour.
+    demoted: bool = False
 
     @classmethod
     def from_row(cls, row: Mapping) -> "Ask":
         return cls(key_id=str(row["key_id"]), miner_hotkey=str(row["miner_hotkey"]), envelope=str(row["envelope"]),
                    ask_microusd=int(row["ask_microusd"]), ask_sequence=int(row["ask_sequence"]),
-                   needs_check=bool(row.get("needs_check")))
+                   needs_check=bool(row.get("needs_check")), demoted=bool(row.get("demoted")))
 
 
 def rank(asks: Iterable[Ask]) -> List[Ask]:
-    """Cheapest first; an equal price goes to the earlier ask."""
+    """Cheapest first, demoted keys last; an equal price goes to the earlier ask."""
 
-    return sorted(asks, key=lambda a: (a.ask_microusd, a.ask_sequence))
+    return sorted(asks, key=lambda a: (a.demoted, a.ask_microusd, a.ask_sequence))
 
 
 def key_failure(status: int) -> Optional[str]:

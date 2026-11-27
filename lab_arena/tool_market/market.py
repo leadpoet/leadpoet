@@ -253,8 +253,10 @@ class ToolMarket:
         epoch = int(self._epoch())
         tried = checks = 0
         for ask in book.rank(book.Ask.from_row(row) for row in self._supply(tool)):
-            if tried >= MAX_KEYS_PER_CALL or ask.ask_microusd > max_ask:
-                break  # ranked cheapest first, so every later ask is higher
+            if tried >= MAX_KEYS_PER_CALL:
+                break
+            if ask.ask_microusd > max_ask:
+                continue
             if ask.needs_check:
                 checks += 1
                 if checks > MAX_KEYS_PER_CALL or not self._recheck(ask.key_id, tool, ask.envelope):

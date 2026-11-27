@@ -120,6 +120,8 @@ Health events come from vault checks and from calls.
   `failed`. A 402 marks it `failed` unless the vendor's free check still sees
   a positive balance; the check runs at most once a minute per key, and
   without one due a 402 only skips the key. A 403 only skips it.
+- A key goes to the back of its book, still in it, after a bare 429 in the
+  last minute or 3 answers of unknown usage (5xx, timeouts) in the last hour.
 - A key whose last 3 calls were all refused (403), for at least two buyers,
   leaves the book until its miner asks for a check.
 - A 429 with no `Retry-After` skips the key for this call only. Hunter's
@@ -188,7 +190,12 @@ deployment, exactly as lead orders do.
 - **Miner payout is not wired yet.** Settlements record what each miner is
   owed for each epoch. Turning that into weight needs a payout ledger and
   validator wiring, which reuse `lab_arena.lead_orders.money.epoch_payout`.
-  Until then, owed amounts build up but pay nothing.
+  Until then, owed amounts build up but pay nothing. That wiring must:
+  skip a hotkey that is not registered on the subnet and keep its amount
+  owed, rather than fail the whole payout; give every positive share at
+  least one weight unit, or record as paid only what the weights deliver;
+  price each epoch from one snapshot at its closing block; and publish each
+  epoch's settlements so validators can check them.
 - **The vendor's answer sets the usage.** Leadpoet counts a credit when the
   answer shows one was spent: a ZeroBounce result other than `unknown`, a
   Prospeo match that is not a free re-enrichment, an email from Findymail
@@ -216,5 +223,7 @@ deployment, exactly as lead orders do.
 - **No vault receipts for miners.** Calls do not yet keep the vault's
   signed receipts, so miners cannot check Leadpoet's reports against the
   vault. Lead orders keep them; this lane can add them the same way.
+- **Ask increases apply at once.** A buyer who cares sends
+  `max_ask_microusd`; a delay on increases can follow.
 - **Lead orders still exist.** They stay as they are, and off. Retiring them
   is a separate decision.

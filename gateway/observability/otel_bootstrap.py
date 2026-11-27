@@ -401,6 +401,30 @@ ARENA_DEEPLINE_TOOLS = frozenset(
 _ARENA_DENIAL_RE = re.compile(r"^[a-z][a-z0-9_]{0,47}$")
 ARENA_NO_DENIAL = "-"
 
+# A claim that grants no work answers 200 with no refusal code, so a runner
+# handed work and a runner handed none look identical on the wire. The store's
+# own ``status`` says which, and separates the two reasons a judging window can
+# go quiet: every slot already leased ("no_free_slot") versus the stage refusing
+# new leases ("stage_closed"). Literal, source-defined values only — an
+# unrecognised status exports as "other", never the raw string.
+ARENA_CLAIM_ROUTE = "/arena/v1/runs/claim"
+ARENA_NO_CLAIM_OUTCOME = "-"
+ARENA_CLAIM_OUTCOME_OTHER = "other"
+ARENA_CLAIM_OUTCOME_CODES = frozenset(
+    {
+        "leased",
+        "no_pending",
+        "no_work",
+        "no_free_slot",
+        "stage_closed",
+        "paused",
+        "not_allowlisted",
+        "request_id_reused",
+        "promotion_pending",
+        ARENA_CLAIM_OUTCOME_OTHER,
+    }
+)
+
 # Only explicit source-defined refusal codes may leave the sidecar. A shape
 # check alone would admit a caller-controlled identifier such as "private_key".
 ARENA_DENIAL_CODES = frozenset(
@@ -754,7 +778,8 @@ ARENA_HTTP_ATTRIBUTE_TYPES: Dict[str, tuple] = {
 }
 
 ARENA_HTTP_ATTRIBUTE_ALLOWLIST = (
-    frozenset(ARENA_HTTP_ATTRIBUTE_TYPES) | frozenset({"arena.round_id"})
+    frozenset(ARENA_HTTP_ATTRIBUTE_TYPES)
+    | frozenset({"arena.round_id", "arena.claim_outcome"})
 )
 
 # A registered public round route can name the requested round. The concrete
@@ -1172,9 +1197,12 @@ def _validating_exporter(
         if attributes is None:
             return "store_error"
         has_round_id = "arena.round_id" in attributes
+        has_claim_outcome = "arena.claim_outcome" in attributes
         expected_types = ARENA_HTTP_ATTRIBUTE_TYPES
         if has_round_id:
             expected_types = {**expected_types, "arena.round_id": (str,)}
+        if has_claim_outcome:
+            expected_types = {**expected_types, "arena.claim_outcome": (str,)}
         if not _attributes_conform(attributes, expected_types):
             return "attributes"
         if has_round_id and (
@@ -1182,6 +1210,11 @@ def _validating_exporter(
             or not _canonical_http_round_id(attributes["arena.round_id"])
         ):
             return "round_id"
+        if has_claim_outcome and (
+            attributes["http.route"] != ARENA_CLAIM_ROUTE
+            or attributes["arena.claim_outcome"] not in ARENA_CLAIM_OUTCOME_CODES
+        ):
+            return "claim_outcome"
         denial = attributes["arena.denial"]
         if denial != ARENA_NO_DENIAL and (
             not _ARENA_DENIAL_RE.fullmatch(denial)
@@ -1191,7 +1224,7 @@ def _validating_exporter(
         trimmed = {
             key: value
             for key, value in attributes.items()
-            if key not in ("arena.denial", "arena.round_id")
+            if key not in ("arena.denial", "arena.round_id", "arena.claim_outcome")
         }
         return _http_violation(span, trimmed)
 
@@ -1695,6 +1728,12 @@ class ArenaTelemetry:
         # A worker thread receives a copy of the request context. Sharing one
         # mutable value lets a sync route report its denial back to ASGI.
         self._denial = contextvars.ContextVar("arena_denial", default=None)
+        # Same single-request contract as the denial above: the claim route
+        # records which outcome the store returned so a quiet judging window
+        # is readable without guessing.
+        self._claim_outcome = contextvars.ContextVar(
+            "arena_claim_outcome", default=None
+        )
 
     def flush(self, *, timeout_millis: int = 1000) -> None:
         """Flush queued spans within a bounded graceful-shutdown window."""
@@ -1725,6 +1764,43 @@ class ArenaTelemetry:
             self._denial.set([ARENA_NO_DENIAL, {}])
         except BaseException:
             pass
+
+    def note_claim_outcome(self, status: str) -> None:
+        """Record the claim status the store returned for this request."""
+        try:
+            # The claim route is sync and runs in a worker thread, which holds
+            # a COPY of the request context. Mutating the shared list is what
+            # lets the outcome reach the ASGI middleware; ``set`` would not.
+            state = self._claim_outcome.get()
+            if state is None:
+                state = [ARENA_NO_CLAIM_OUTCOME]
+                self._claim_outcome.set(state)
+            state[0] = str(status)
+        except BaseException:
+            pass
+
+    def reset_claim_outcome(self) -> None:
+        try:
+            self._claim_outcome.set([ARENA_NO_CLAIM_OUTCOME])
+        except BaseException:
+            pass
+
+    def take_claim_outcome(self) -> str:
+        """Return a source-defined claim status, "other", or the no-outcome mark.
+
+        A status the store invents later must never reach the exporter as a
+        free-form string, so anything unrecognised collapses to "other".
+        """
+        try:
+            state = self._claim_outcome.get()
+        except BaseException:
+            return ARENA_NO_CLAIM_OUTCOME
+        if state is None:
+            return ARENA_NO_CLAIM_OUTCOME
+        value = str(state[0])
+        if value in ARENA_CLAIM_OUTCOME_CODES:
+            return value
+        return ARENA_CLAIM_OUTCOME_OTHER
 
     def take_denial(self) -> str:
         """Return the refusal code's exported form, or the fixed no-denial mark.
@@ -2149,6 +2225,10 @@ def configure_arena_otel(
 
             http_tracer = provider.get_tracer(ARENA_HTTP_SCOPE)
 
+            def _reset_request_state():
+                telemetry.reset_denial()
+                telemetry.reset_claim_outcome()
+
             def _emit(scope, status_code, start_ns, start_mono):
                 route = _safe_route_label(scope)
                 method = str(scope.get("method") or "")
@@ -2166,6 +2246,10 @@ def configure_arena_otel(
                     span.set_attribute("arena.round_id", round_id)
                 denial = telemetry.take_denial()
                 span.set_attribute("arena.denial", denial)
+                if route == ARENA_CLAIM_ROUTE:
+                    claim_outcome = telemetry.take_claim_outcome()
+                    if claim_outcome != ARENA_NO_CLAIM_OUTCOME:
+                        span.set_attribute("arena.claim_outcome", claim_outcome)
                 if int(status_code) == 503 and denial == "arena_store_unavailable":
                     for key, value in telemetry.take_store_error().items():
                         span.set_attribute("arena.store_" + key, value)
@@ -2179,7 +2263,7 @@ def configure_arena_otel(
             app.add_middleware(
                 _GatewayOtelMiddleware,
                 emit=_emit,
-                on_request_start=telemetry.reset_denial,
+                on_request_start=_reset_request_state,
             )
 
         return telemetry

@@ -134,6 +134,17 @@ def note_denial(code: str, *, error: Optional[BaseException] = None) -> None:
         pass
 
 
+def note_claim_outcome(status: str) -> None:
+    """Name the claim status the store returned for the current request."""
+    recorder = _recorder
+    if recorder is None:
+        return
+    try:
+        recorder.note_claim_outcome(status)
+    except BaseException:
+        pass
+
+
 def record_provider(
     provider: str,
     operation: str,
@@ -333,6 +344,7 @@ __all__ = [
     "NO_TOOL",
     "StageResult",
     "install_recorder",
+    "note_claim_outcome",
     "note_denial",
     "record",
     "record_gate",

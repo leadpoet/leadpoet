@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from datetime import date
 from functools import partial
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 import anyio
 from anyio import to_thread
@@ -454,7 +454,16 @@ def create_app(service: ArenaService) -> FastAPI:
     @app.post("/arena/v1/runs/claim")
     async def claim(request: Request) -> Any:
         envelope = await _read_json(request)
-        return await run_in_threadpool(service.handle_claim, envelope)
+        response = await run_in_threadpool(service.handle_claim, envelope)
+        # A claim that grants nothing is a 200 with no refusal code. Name the
+        # store's own status so a judging window that goes quiet says whether
+        # every slot was leased, the stage stopped admitting, or there was
+        # simply no pending work.
+        if isinstance(response, Mapping):
+            status = response.get("status")
+            if isinstance(status, str):
+                telemetry.note_claim_outcome(status)
+        return response
 
     @app.post("/arena/v1/runs/{run_id}/provider")
     async def provider(run_id: str, request: Request, x_lab_arena_lease: Optional[str] = Header(default=None)) -> Any:

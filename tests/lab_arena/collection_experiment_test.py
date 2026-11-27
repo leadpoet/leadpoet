@@ -762,6 +762,25 @@ def test_real_harness_checkpoint_and_archive_under_funded_job_contract(
         assert metadata["correction_pairs"] == metadata["trajectory_rows"] == 1
         assert metadata["dataset_sha256"] != released["dataset_sha256"]
         assert all("reference_answer" not in msg for msg in traj["messages"])
+    # If an interruption lost an external attestation, retain only the hold.
+    # A missing proof must never release the source transcript or abort the archive.
+    partial_path = tmp_path / "partial-missing-attestation.zip"
+    optional = objects.get_optional_bounded
+    def without_attestation(path, limit):
+        return None if path.endswith("/saved/producer-attestation.json") else optional(path, limit)
+    def interrupted(name, args):
+        records = db.rpc(name, args)
+        if name == "collection_pilot_costs_v1":
+            return [dict(record, status="failed", artifact_sha256=None) for record in records]
+        return records
+    with monkeypatch.context() as part:
+        part.setattr(objects, "get_optional_bounded", without_attestation)
+        exports.write_dataset(spec, SimpleNamespace(rpc=interrupted), objects, partial_path,
+                              full_trajectories=True, qualification={"test": True}, publish=False)
+    with ZipFile(partial_path) as z:
+        held = json.loads(z.read(f"trajectories/{rid}.jsonl"))
+        assert held["capture_hold"] == "missing_producer_attestation" and held["messages"] == []
+        assert held["verified_task_pass"] is None and f"pairs/{rid}.jsonl" not in z.namelist()
     # Missing original events must also hold release, even if DB and summary survive.
     first_event = objects._path(f"collection/{spec.batch_id}/{rid}/events/00000.json")
     first_event.unlink()

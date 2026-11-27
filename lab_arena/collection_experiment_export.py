@@ -402,8 +402,11 @@ def write_dataset(
                             ):
                                 hold = "missing_verified_student"
                             else:
-                                _verify_student(spec, database, objects, prompt, student,
-                                                saved("producer-attestation"))
+                                proof = saved("producer-attestation")
+                                if proof is None and "provenance_sha256" in spec.raw:
+                                    hold = "missing_producer_attestation"
+                                else:
+                                    _verify_student(spec, database, objects, prompt, student, proof)
                         if stamp is None or split_doc is None:
                             hold = "missing_verified_split"
                         else:

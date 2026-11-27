@@ -267,6 +267,11 @@ deployment, exactly as lead orders do.
   then move to the next key at no cost, and the key goes to the back only
   once 3 buyers see a 429. A minimum charge per answered call would close
   this.
+- **The vault checks a key before the 30-day rule is read.** A hotkey at
+  its limit still gets one vendor check per tool a minute, which tells it
+  whether a key is live. The miner sealed the key, so it holds it already;
+  the check adds only Leadpoet's address. A read-only 30-day check before
+  the vault would close this.
 - **The book is read on every call.** It computes each key's last 24 h
   and last hour from the call ledger. That is fine at launch volumes;
   cache the public catalog and books before heavy anonymous traffic.

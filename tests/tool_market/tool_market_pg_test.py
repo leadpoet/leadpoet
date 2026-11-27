@@ -515,6 +515,15 @@ def test_an_answer_the_gateway_cannot_send_back_is_free(world):
         assert result["body"] is None and result["charge_microusd"] == 0  # unknown usage: the miner bears it
 
 
+def test_a_tab_stops_buying_when_its_buyer_leaves_the_allowlist(world):
+    world.miner_key("allow-key", 10_000)
+    _, token = world.buyer()
+    world.market._config = dataclasses.replace(world.market._config, buyer_hotkeys=frozenset({hotkey()}))
+    with pytest.raises(ToolMarketError) as gone:
+        world.market.call(token, PROFILE)
+    assert (gone.value.status, gone.value.code) == (403, "buyer_not_allowed") and world.vendor.sent == []
+
+
 def test_a_miner_checks_one_key_at_a_time(world):
     miner, key_id = world.miner_key("one-check", 10_000, tool="zerobounce")
     world.market._in_flight["check:" + miner] = 1  # a registration or check still waiting on the vault
@@ -737,6 +746,11 @@ def test_a_hotkey_registers_one_key_per_tool_every_30_days(world):
         world.register(miner, {"tool": "exa", "daily_cap_microusd": USD,
                                "envelope": world.vault.seal("exa", miner, "exa-stack-2")})
     assert stacked.value.code == "key_registration_too_soon"
+    checks = world.vault.checks
+    with pytest.raises(ToolMarketError) as again:  # a refused listing re-posted is not checked again
+        world.register(miner, {"tool": "exa", "daily_cap_microusd": USD,
+                               "envelope": world.vault.seal("exa", miner, "exa-stack-2")})
+    assert again.value.code == "key_registration_too_soon" and world.vault.checks == checks
     # Another tool is its own 30 days.
     world.register(miner, {"tool": "zerobounce", "daily_cap_microusd": USD,
                            "envelope": world.vault.seal("zerobounce", miner, "zb-thirty-day-key")})

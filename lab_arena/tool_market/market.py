@@ -227,6 +227,12 @@ class ToolMarket:
             raise ToolMarketError(400, "envelope_mismatch")
         if header.miner_hotkey != identity.hotkey:
             raise ToolMarketError(400, "envelope_hotkey_mismatch")
+        # A listing refused as too soon is answered from memory for a minute, so
+        # re-posting it cannot make the vault probe a vendor in a loop.
+        refused = "refused:%s:%s" % (identity.hotkey, tool)
+        with self._lock:
+            if time.monotonic() - self._rechecked.get(refused, -RECHECK_SPACING_SECONDS) < RECHECK_SPACING_SECONDS:
+                raise ToolMarketError(429, "key_registration_too_soon", retry_after_seconds=RECHECK_SPACING_SECONDS)
         with self._slot("check:" + identity.hotkey, 1, "check_in_flight"):
             checked = self._check(tool, envelope)
         if checked.get("status") not in ("valid", "unchecked"):
@@ -238,6 +244,9 @@ class ToolMarket:
             fingerprint=checked["key_fingerprint"], daily_cap_microusd=cap, status=checked["status"],
             host=identity.host, signed_at=identity.signed_at,
             signed_body=signed_body.decode("utf-8"), signature=identity.signature.lower().removeprefix("0x"))
+        if result["status"] == "too_soon":  # checked before duplicates, so it covers re-posting a listed key
+            with self._lock:
+                self._rechecked[refused] = time.monotonic()
         if result["status"] == "duplicate":
             raise ToolMarketError(409, "key_already_listed")
         if result["status"] == "too_soon":
@@ -355,6 +364,8 @@ class ToolMarket:
         if not opened["open"]:
             raise ToolMarketError(401, "tab_closed")
         hotkey = opened["hotkey"]
+        if not self._config.may_buy(hotkey):  # also for a tab opened before the allowlist changed
+            raise ToolMarketError(403, "buyer_not_allowed")
         with self._slot(hotkey, MAX_CALLS_IN_FLIGHT_PER_BUYER, "too_many_calls_in_flight"):
             return self._buy(tool, op, max_ask, private, tab, hotkey, url, headers, payload)
 

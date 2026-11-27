@@ -132,6 +132,8 @@ Only a hotkey registered on the subnet lists keys (`403
 miner_not_registered`). A miner's own tab never buys from their own keys.
 For security, a hotkey registers at most one key per tool every 30 days,
 revoked keys included. A revoked key that never took a call does not count.
+A listing refused as too soon is not checked with the vendor again for a
+minute.
 
 `GET /tool-market/catalog` lists every tool that trades: its operations,
 one line on what each does, their parameters, its price ceiling, and the

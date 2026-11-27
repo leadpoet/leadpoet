@@ -22,7 +22,7 @@ from lab_arena.chain import ArenaChainError
 from lab_arena.lead_orders.auth import BuyerIdentity
 from lab_arena.lead_orders.gamma import GammaReading
 from lab_arena.lead_orders.vault_client import VaultTransportError
-from lab_arena.store import ArenaStoreError, PsycopgTransport
+from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable, PsycopgTransport
 from lab_arena.tool_market import market as market_module
 from lab_arena.tool_market.config import ToolMarketConfig
 from lab_arena.tool_market.market import ATTESTATION, ToolMarket, ToolMarketError
@@ -624,22 +624,7 @@ def test_a_buyer_who_keeps_causing_unknown_usage_is_stopped(world):
     assert fine.value.code == "vendor_unreachable"
 
 
-def test_calls_in_flight_count_toward_the_unknown_usage_limit(world):
-    world.miner_key("busy-key", 10)
-    _, token = world.buyer()
-    tab = market_module.token_hash(token)
-    key_id = world.store.book(tool="harvestapi", terms_sha256=world.terms)[0]["key_id"]
-
-    def reserve():
-        return world.store.reserve_call(call_id=str(uuid.uuid4()), token_hash=tab, tool="harvestapi",
-                                        operation="linkedin_profile", key_id=key_id, ask_microusd=10,
-                                        owed_cap_microusd=10)
-
-    assert [reserve() for _ in range(20)] == ["reserved"] * 20  # none has settled yet
-    assert reserve() == "uncertain_limit"
-
-
-def test_a_month_long_api_key_still_counts_toward_the_unknown_usage_limit(world, database):
+def test_a_month_long_api_key_still_counts_toward_the_unknown_usage_limit(world, admin):
     world.miner_key("long-key", 10)
     month = 30 * 24 * 3600
     _, token = world.buyer(seconds=month)
@@ -647,14 +632,9 @@ def test_a_month_long_api_key_still_counts_toward_the_unknown_usage_limit(world,
         world.buyer(seconds=month + 1)
     assert too_long.value.code == "seconds_invalid"
     tab = market_module.token_hash(token)
-    psycopg2, dsn = database
-    connection = psycopg2.connect(**dsn)
-    connection.autocommit = True
-    with connection.cursor() as cursor:  # the key was created two days ago, past the append-only trigger
-        cursor.execute("SET session_replication_role=replica")
-        cursor.execute("UPDATE public.tool_market_tabs SET opened_at=opened_at-interval '2 days' "
-                       "WHERE token_hash=%s", (tab,))
-    connection.close()
+    # The API key was opened two days ago; its calls in flight still count.
+    admin.execute("UPDATE public.tool_market_tabs SET opened_at=opened_at-interval '2 days' WHERE token_hash=%s",
+                  (tab,))
     key_id = world.store.book(tool="harvestapi", terms_sha256=world.terms)[0]["key_id"]
 
     def reserve():
@@ -1046,8 +1026,6 @@ def test_a_busy_chain_mid_failover_says_retry_not_top_up(world):
 
 
 def test_a_settlement_whose_answer_is_lost_is_read_back_or_named(world, monkeypatch):
-    from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable
-
     world.miner_key("lost-key", 10_000)
     buyer, token = world.buyer()
     settle, lost = world.store.settle_call, []
@@ -1073,8 +1051,6 @@ def test_a_settlement_whose_answer_is_lost_is_read_back_or_named(world, monkeypa
 
 
 def test_a_tab_whose_opening_answer_is_lost_still_hands_over_its_token(world, monkeypatch):
-    from lab_arena.store import ArenaStoreError
-
     buyer = hotkey()
     world.gamma.units[buyer] = 10**9
     world.accept(buyer, "buyer")

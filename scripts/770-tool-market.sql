@@ -600,7 +600,7 @@ BEGIN
   RETURN jsonb_build_object('status','ask_changed');
  END IF;
  SELECT * INTO g FROM public.tool_market__key_ledger_v1(p_key_id,tab.hotkey);
- -- The quarter matches post_ask, which makes a cap hold 4 of the key's largest calls.
+ -- The quarter matches ToolMarket.post_ask, which makes a cap hold 4 of the key's largest calls.
  IF g.day+p_owed_cap>k.daily_cap_microusd OR g.buyer_unknown+p_owed_cap>k.daily_cap_microusd/4 THEN
   RETURN jsonb_build_object('status','key_cap');
  END IF;

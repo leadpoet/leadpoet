@@ -1,4 +1,4 @@
-"""Gamma tool-market routes (docs/gamma-tool-market.md). Off by default.
+"""Stanza tool-market routes (docs/gamma-tool-market.md). Off by default.
 
 While ``LEADPOET_TOOL_MARKET_MODE`` is ``off`` (the default) every route
 answers 404 and nothing is built. The routes touch no Arena or lead-order

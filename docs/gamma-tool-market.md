@@ -1,6 +1,6 @@
-# Gamma tool market
+# Stanza tool market
 
-Gamma's tool market sells metered access to go-to-market (GTM) data tools.
+Stanza's tool market sells metered access to go-to-market (GTM) data tools.
 Miners supply the vendor keys and set a price per unit. Agents and buyers
 pay in Gamma and call one API. Each call goes to the cheapest healthy key.
 
@@ -16,9 +16,9 @@ statement inside the register request (`ATTESTATION` in
 `lab_arena/tool_market/market.py`):
 
 > tool-market-attestation-v1: My account with this tool's provider, and
-> this key, allow me to supply capacity through Gamma. I alone am
+> this key, allow me to supply capacity through Stanza. I alone am
 > responsible for my account's compliance and hold the relationship with
-> the provider. Gamma makes no claim about any provider's terms and is not
+> the provider. Stanza makes no claim about any provider's terms and is not
 > liable for any action a provider takes on my account.
 
 The signed request body, its signature, host and time are stored with the

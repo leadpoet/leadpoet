@@ -23,7 +23,6 @@ import uuid
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from lab_arena.lead_orders.auth import BuyerIdentity
-from lab_arena.lead_orders.gamma import GammaReadError
 from lab_arena.lead_orders.keys import json_document
 from lab_arena.lead_orders.vault_client import VaultTransportError, VaultUnavailable
 from lab_arena.tool_market import book, catalog
@@ -121,7 +120,7 @@ class ToolMarket:
 
         try:
             reading = self._gamma.read(hotkey)
-        except GammaReadError:
+        except ArenaChainError:  # a Gamma read or the finalized head
             raise ToolMarketError(503, "gamma_unavailable") from None
         result = self._store.record_gamma_reading(
             hotkey=hotkey, block_number=reading.block_number, block_hash=reading.block_hash,

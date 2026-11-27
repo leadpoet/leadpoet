@@ -149,7 +149,7 @@ def read_header(envelope: str) -> Tuple[Header, dict]:
     try:
         # Strict: one string per envelope, no ignored characters.
         document = json.loads(base64.b64decode(body + "=" * (-len(body) % 4), altchars=b"-_", validate=True))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         raise EnvelopeError("envelope_invalid") from None
     expected = {"v", "provider", "purpose", "miner_hotkey", "vault_key", "epk", "nonce", "ct"}
     if not isinstance(document, dict) or set(document) != expected or type(document["v"]) is not int or document["v"] != 1:
@@ -182,7 +182,8 @@ def open_envelope(envelope: str, private_key: ec.EllipticCurvePrivateKey) -> Tup
         plaintext = AESGCM(key).decrypt(nonce, ciphertext, _aad(header))
     except InvalidTag:
         raise EnvelopeError("envelope_tampered") from None
-    try:
-        return plaintext.decode("utf-8"), header
-    except UnicodeDecodeError:
-        raise EnvelopeError("envelope_invalid") from None
+    # A provider key is printable ASCII; anything else could not be sent
+    # in a header, so it fails when checked rather than on every call.
+    if not all(0x21 <= byte <= 0x7e for byte in plaintext) or not plaintext:
+        raise EnvelopeError("envelope_invalid")
+    return plaintext.decode("ascii"), header

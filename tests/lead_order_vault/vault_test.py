@@ -104,6 +104,15 @@ def test_editing_the_public_header_breaks_the_envelope(field, value):
         env.open_envelope(forged, ENCRYPTION)
 
 
+def test_an_envelope_opens_only_to_a_key_a_header_can_carry():
+    for secret in ("sk-or\r\nx: y", "key with space", "kéy"):
+        with pytest.raises(env.EnvelopeError, match="envelope_invalid"):
+            env.open_envelope(_seal(secret), ENCRYPTION)
+    nested = env.PREFIX + base64.urlsafe_b64encode(b"[" * 3000).decode().rstrip("=")
+    with pytest.raises(env.EnvelopeError, match="envelope_invalid"):
+        env.read_header(nested)
+
+
 def test_envelope_for_another_vault_is_refused():
     with pytest.raises(env.EnvelopeError, match="sealed_to_another_vault"):
         env.open_envelope(_seal(OPENROUTER_KEY, vault_key=_compressed(_key(0x3333)).hex()), ENCRYPTION)

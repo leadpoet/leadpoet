@@ -383,6 +383,15 @@ def test_tabs_need_terms_balance_and_budget(world):
     with pytest.raises(ToolMarketError) as low:
         world.market.open_tab(world.who(broke), {"budget_microusd": 1_001, "seconds": 600})
     assert low.value.status == 402 and low.value.detail["balance"]["balance_microusd"] == 1_000
+
+    def chain_down(hk, head=None):
+        raise ArenaChainError("finalized head unavailable")
+
+    read, world.gamma.read = world.gamma.read, chain_down
+    with pytest.raises(ToolMarketError) as down:  # any chain error, not only a Gamma read
+        world.market.open_tab(world.who(broke), {"budget_microusd": 1_000, "seconds": 600})
+    assert (down.value.status, down.value.code) == (503, "gamma_unavailable")
+    world.gamma.read = read
     # One call reserves $0.011; a $0.015 budget allows one, not two.
     _, token = world.buyer(budget=15_000)
     world.market.call(token, PROFILE)

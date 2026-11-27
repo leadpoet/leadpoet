@@ -71,8 +71,8 @@ calculation](gamma-tool-market-economics.md).
 
 Both buyers and miners sign the configured terms (`POST /tool-market/terms`,
 text in `docs/tool-market-terms.md`) before they trade. A new version
-applies to tabs a buyer opens after accepting it, and to a miner's keys
-once the miner accepts it; a tab already open keeps its terms.
+applies to tabs a buyer opens after accepting it; a tab already open
+keeps its terms. A miner's keys leave the book until the miner accepts it.
 
 ## For buyers
 
@@ -288,7 +288,7 @@ All tool-market data is in `scripts/770-tool-market.sql`.
   grants. The service role reaches the data only through its functions.
 - The SQL enforces the money rules on stored state: tab budgets, daily
   caps, one listing per key, and one settlement per call that matches any
-  stored one, stays within the call's reserve and owed cap, and charges
+  stored one, stays within the call's owed cap, and charges
   exactly the market fee.
 
 ## Configuration

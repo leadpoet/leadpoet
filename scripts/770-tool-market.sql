@@ -546,6 +546,7 @@ CREATE FUNCTION public.tool_market_reserve_call_v1(p_call_id UUID,p_token_hash T
  p_key_id UUID,p_ask BIGINT,p_owed_cap BIGINT)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $reserve770$
 DECLARE tab public.tool_market_tabs; k public.tool_market_keys; current_ask BIGINT; g RECORD;
+ reserve BIGINT:=p_owed_cap+(p_owed_cap+9)/10;  -- the fee on the most the call can owe
 BEGIN
  SELECT * INTO tab FROM public.tool_market_tabs WHERE token_hash=p_token_hash;
  IF tab.tab_id IS NULL THEN RETURN jsonb_build_object('status','tab_closed'); END IF;
@@ -564,7 +565,7 @@ BEGIN
  IF k.miner_hotkey=tab.hotkey THEN  -- a miner's own tab never buys from their own key
   RETURN jsonb_build_object('status','own_key');
  END IF;
- IF public.tool_market__committed_v1(tab.tab_id)+p_owed_cap+(p_owed_cap+9)/10>tab.budget_microusd THEN
+ IF public.tool_market__committed_v1(tab.tab_id)+reserve>tab.budget_microusd THEN
   RETURN jsonb_build_object('status','tab_budget');
  END IF;
  IF public.tool_market__buyer_uncertain_v1(tab.hotkey,p_tool)>=20 THEN
@@ -585,7 +586,7 @@ BEGIN
  END IF;
  INSERT INTO public.tool_market_calls(call_id,tab_id,tool,operation,key_id,ask_microusd,reserve_microusd,
   owed_cap_microusd)
- VALUES(p_call_id,tab.tab_id,p_tool,p_operation,p_key_id,p_ask,p_owed_cap+(p_owed_cap+9)/10,p_owed_cap);
+ VALUES(p_call_id,tab.tab_id,p_tool,p_operation,p_key_id,p_ask,reserve,p_owed_cap);
  RETURN jsonb_build_object('status','reserved');
 END;
 $reserve770$;

@@ -1,7 +1,7 @@
 """Order-book money and ranking rules, as pure functions.
 
 All amounts are integer micro-USD. A miner's ask is what they earn per unit;
-the buyer pays the ask plus ``MARKUP_PPM`` (10%), rounded up. For a call
+the buyer pays the ask plus 10%, rounded up. For a call
 asked at $0.01 the buyer pays $0.011 and the miner is owed $0.01.
 """
 
@@ -12,10 +12,6 @@ from typing import Iterable, List, Mapping
 
 from lab_arena.tool_market.catalog import Operation
 
-PPM = 1_000_000
-MARKUP_PPM = 100_000
-
-
 def owed_microusd(operation: Operation, units: int, ask_microusd: int) -> int:
     """What the miner earns for ``units`` (``Operation.units`` caps them)."""
 
@@ -23,9 +19,10 @@ def owed_microusd(operation: Operation, units: int, ask_microusd: int) -> int:
 
 
 def charge_microusd(owed: int) -> int:
-    """What the buyer pays for ``owed``: 10% more, rounded up."""
+    """What the buyer pays for ``owed``: 10% more, rounded up (the SQL settle check's formula)."""
 
-    return -(-int(owed) * (PPM + MARKUP_PPM) // PPM)
+    owed = int(owed)
+    return owed + (owed + 9) // 10
 
 
 @dataclass(frozen=True)

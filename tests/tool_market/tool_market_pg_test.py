@@ -54,6 +54,21 @@ def database():
     yield from database_with_lab_arena_migration(MIGRATIONS)
 
 
+@pytest.fixture
+def admin(database):
+    """An owner cursor on the scratch database, past the append-only triggers."""
+
+    psycopg2, dsn = database
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SET session_replication_role=replica")
+            yield cursor
+    finally:
+        connection.close()
+
+
 @pytest.fixture(scope="module")
 def store(database):
     psycopg2, dsn = database
@@ -323,21 +338,17 @@ def test_the_catalog_lists_each_tool_its_operations_and_best_price(world):
     assert tools["exa"]["best_ask_microusd"] is None  # nobody sells it yet
 
 
-def test_polling_a_balance_adds_a_reading_only_when_it_changes(world, database):
+def test_polling_a_balance_adds_a_reading_only_when_it_changes(world, admin):
     buyer = hotkey()
     read = dict(hotkey=buyer, block_number=7, block_hash="0x" + "07" * 32, spent_units=5, available=True)
     for _ in range(3):
         world.store.record_gamma_reading(**read)
     world.store.record_gamma_reading(**dict(read, block_number=8, block_hash="0x" + "08" * 32))
-    psycopg2, dsn = database
-    connection = psycopg2.connect(**dsn)
-    with connection.cursor() as cursor:
-        cursor.execute("SELECT count(*) FROM public.tool_market_gamma_readings WHERE hotkey=%s", (buyer,))
-        assert cursor.fetchone()[0] == 2
-    connection.close()
+    admin.execute("SELECT count(*) FROM public.tool_market_gamma_readings WHERE hotkey=%s", (buyer,))
+    assert admin.fetchone()[0] == 2
 
 
-def test_a_buyer_pages_their_own_finished_calls_by_watermark(world, database):
+def test_a_buyer_pages_their_own_finished_calls_by_watermark(world, admin):
     world.miner_key("usage-key", 10_000)
     buyer, token = world.buyer()
     other, other_token = world.buyer()
@@ -347,21 +358,14 @@ def test_a_buyer_pages_their_own_finished_calls_by_watermark(world, database):
     world.market.call(other_token, PROFILE)
     # A call is listed only once it can no longer change.
     assert world.market.usage(world.who(buyer), 0, 100)["calls"] == []
-    psycopg2, dsn = database
-    connection = psycopg2.connect(**dsn)
-    connection.autocommit = True
-    with connection.cursor() as cursor:
-        # Age the calls on this scratch database, past the append-only trigger.
-        cursor.execute("SET session_replication_role=replica")
-        # A later sequence with an earlier opened_at (two calls racing) waits
-        # for the older one, so paging cannot step past it.
-        latest = ("(SELECT max(c.sequence) FROM public.tool_market_calls c JOIN public.tool_market_tabs t "
-                  "USING (tab_id) WHERE t.hotkey=%s)")
-        age = "UPDATE public.tool_market_calls SET opened_at=opened_at-interval '11 minutes' WHERE sequence"
-        cursor.execute(age + "=" + latest, (buyer,))
-        assert world.market.usage(world.who(buyer), 0, 100)["calls"] == []
-        cursor.execute(age + "<>" + latest, (buyer,))
-    connection.close()
+    # Age the calls. A later sequence with an earlier opened_at (two calls
+    # racing) waits for the older one, so paging cannot step past it.
+    latest = ("(SELECT max(c.sequence) FROM public.tool_market_calls c JOIN public.tool_market_tabs t "
+              "USING (tab_id) WHERE t.hotkey=%s)")
+    age = "UPDATE public.tool_market_calls SET opened_at=opened_at-interval '11 minutes' WHERE sequence"
+    admin.execute(age + "=" + latest, (buyer,))
+    assert world.market.usage(world.who(buyer), 0, 100)["calls"] == []
+    admin.execute(age + "<>" + latest, (buyer,))
     first = world.market.usage(world.who(buyer), 0, 2)
     assert [c["charge_microusd"] for c in first["calls"]] == [11_000, 11_000]
     assert set(first["calls"][0]) == {"call_id", "sequence", "tool", "operation", "opened_at", "status",
@@ -495,7 +499,7 @@ def test_unknown_usage_counts_toward_a_keys_daily_cap_a_quarter_per_buyer(world)
     assert capped.value.code == "no_supply" and len(world.vendor.sent) == 4
 
 
-def test_a_buyers_calls_in_flight_count_toward_their_quarter(world, database):
+def test_a_buyers_calls_in_flight_count_toward_their_quarter(world, admin):
     world.miner_key("parallel-key", 10_000, cap=40_000)
     world.miner_key("parallel-spare", 12_000)
     _, token = world.buyer()
@@ -508,13 +512,9 @@ def test_a_buyers_calls_in_flight_count_toward_their_quarter(world, database):
                                         reserve_microusd=11_000, owed_cap_microusd=10_000)
 
     assert [reserve(), reserve()] == ["reserved", "key_cap"]  # the first is still in flight
-    psycopg2, dsn = database
-    connection = psycopg2.connect(**dsn)
-    connection.autocommit = True
-    with connection.cursor() as cursor:  # a restart cut it off: it never settles
-        cursor.execute("SET session_replication_role=replica")
-        cursor.execute("UPDATE public.tool_market_calls SET opened_at=opened_at-interval '11 minutes'")
-    connection.close()
+    # A restart cut the first off: it never settles, and still counts.
+    admin.execute("UPDATE public.tool_market_calls SET opened_at=opened_at-interval '11 minutes' WHERE key_id=%s",
+                  (cheap["key_id"],))
     assert reserve() == "key_cap"
 
 
@@ -616,7 +616,7 @@ def test_a_settlement_cannot_charge_more_than_its_reserve_or_settle_twice(world)
         == "ask_changed"
 
 
-def test_a_key_is_listed_only_with_its_miners_signed_attestation(world, database):
+def test_a_key_is_listed_only_with_its_miners_signed_attestation(world, admin):
     miner = hotkey()
     world.accept(miner, "miner")
     body = {"tool": "harvestapi", "envelope": world.vault.seal("harvestapi", miner, "attested-key"),
@@ -627,15 +627,8 @@ def test_a_key_is_listed_only_with_its_miners_signed_attestation(world, database
         assert refused.value.code in ("attestation_required", "request_invalid")
     assert world.vault.checks == 0  # refused before any vendor check
     key_id = world.register(miner, body)["key_id"]
-    psycopg2, dsn = database
-    connection = psycopg2.connect(**dsn)
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT signed_body,signature,host,signed_at FROM public.tool_market_keys WHERE key_id=%s",
-                           (key_id,))
-            signed_body, signature, host, signed_at = cursor.fetchone()
-    finally:
-        connection.close()
+    admin.execute("SELECT signed_body,signature,host,signed_at FROM public.tool_market_keys WHERE key_id=%s", (key_id,))
+    signed_body, signature, host, signed_at = admin.fetchone()
     assert json.loads(signed_body)["attestation"] == ATTESTATION
     assert (signature, host, signed_at) == ("ab" * 64, "gw.example", 1)
 

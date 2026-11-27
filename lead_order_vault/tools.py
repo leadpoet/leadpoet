@@ -23,7 +23,6 @@ OPENROUTER_ROUTES = frozenset({
     ("POST", "/api/alpha/decisions"),
     ("GET", "/api/v1/generation"),  # free cost read-back by generation id
 })
-_DEEPLINE_TOOL = re.compile(r"[a-z0-9_]{1,64}")
 # The broker URL-encodes the id, which may hold "." and ":" (as %3A).
 _GENERATION_QUERY = re.compile(r"id=[A-Za-z0-9._~%-]{1,600}")
 # A URL-encoded query string: names and values the caller encoded itself.
@@ -36,12 +35,6 @@ def _openrouter_route(method: str, path: str, query: str) -> bool:
     if (method, path) not in OPENROUTER_ROUTES:
         return False
     return _GENERATION_QUERY.fullmatch(query) is not None if method == "GET" else query == ""
-
-
-def _deepline_route(method: str, path: str, query: str) -> bool:
-    parts = path.split("/")
-    return (method == "POST" and query == "" and len(parts) == 6 and parts[:4] == ["", "api", "v2", "integrations"]
-            and _DEEPLINE_TOOL.fullmatch(parts[4]) is not None and parts[5] == "execute")
 
 
 def shape(method: str, pattern: str, *, query: bool) -> Route:
@@ -94,7 +87,8 @@ class Tool:
 TOOLS: Mapping[str, Tool] = {
     # Lead orders.
     "openrouter": Tool("openrouter.ai", _openrouter_route, "authorization", "Bearer "),
-    "deepline": Tool("code.deepline.com", _deepline_route, "authorization", "Bearer ",
+    "deepline": Tool("code.deepline.com", shape("POST", r"/api/v2/integrations/[a-z0-9_]{1,64}/execute", query=False),
+                     "authorization", "Bearer ",
                      balance_url="https://code.deepline.com/api/v2/billing/balance"),
     # Tool market (docs/gamma-tool-market.md): data endpoints only, never
     # account, billing or key management.

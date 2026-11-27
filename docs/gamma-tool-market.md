@@ -280,8 +280,8 @@ deployment, exactly as lead orders do.
 - **A balance reads every tab the buyer ever opened.** Fine at launch;
   keep a running total before buyers open thousands of tabs.
 - **A signed balance read needs no funds.** Each costs a few chain reads,
-  and a new hotkey per request adds a row each time (one hotkey polling
-  adds none). Rate-limit the route at the edge before opening it widely.
+  and every signed request adds a nonce row (a reading row only when the
+  reading changed). Rate-limit the route at the edge before opening it widely.
 - **Anyone can fill the vault's connections.** It serves at most 128 at
   once, and one that sends nothing holds its slot for 10 s, so a stranger
   can keep every call at `503 no_supply` (nothing is charged). Limit the

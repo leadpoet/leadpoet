@@ -306,3 +306,61 @@ def test_new_paid_case_precedes_rebuilding_a_valid_old_archive(lab):
     lab.add(FIRST, "new", case="P7-s2")
     snapshots.observe(lab.root, lab.out, SimpleNamespace(rpc=lab.rpc), None, {**old,"last_group":""}, max_groups=1)
     assert lab.builds[-1] == ["new"]
+
+
+def test_funded_tick_can_export_three_groups_and_resume_after_its_alarm(lab, monkeypatch):
+    for index in range(4):
+        lab.add(FIRST, f"run{index}", case=f"P8-s{index+1}")
+    original = snapshots._pack
+    attempts = []
+
+    def limited(*args):
+        attempts.append(args[5])
+        if len(attempts) == 3:
+            raise snapshots.ExportWindowExpired()
+        return original(*args)
+
+    monkeypatch.setattr(snapshots, "_pack", limited)
+    db = SimpleNamespace(rpc=lab.rpc)
+    first = snapshots.observe(lab.root, lab.out, db, None)
+    assert first["released"] == 2 and first["pending"] == 2
+    assert first["last_group"] == FIRST + "/P8-s2"
+    assert lab.index()[FIRST]["P8-s3"]["queued"]
+    assert lab.index()[FIRST]["P8-s1"]["released"] == ["run0"]
+    next_tick = snapshots.observe(lab.root, lab.out, db, None, first)
+    assert next_tick["released"] == 4 and next_tick["pending"] == 0
+    assert attempts == ["P8-s1", "P8-s2", "P8-s3", "P8-s3", "P8-s4"]
+
+
+def test_a_first_group_timeout_remains_visible(lab, monkeypatch):
+    lab.add(FIRST, "run")
+    def fail(*args):
+        raise snapshots.ExportWindowExpired()
+    monkeypatch.setattr(snapshots, "_pack", fail)
+    with pytest.raises(snapshots.ExportWindowExpired):
+        snapshots.observe(lab.root, lab.out, SimpleNamespace(rpc=lab.rpc), None)
+
+
+def test_a_slow_zip_leaves_the_next_group_queued(lab, monkeypatch):
+    lab.add(FIRST, "first", case="P8-s1")
+    lab.add(FIRST, "second", case="P8-s2")
+    times = iter([0, 15, 15])
+    monkeypatch.setattr(snapshots, "time", SimpleNamespace(monotonic=lambda: next(times)))
+    result = snapshots.observe(lab.root, lab.out, SimpleNamespace(rpc=lab.rpc), None, deadline=27)
+    assert result["released"] == result["pending"] == 1
+    assert lab.index()[FIRST]["P8-s2"]["queued"]
+
+
+def test_funded_tick_does_not_hide_backend_timeouts(lab, monkeypatch):
+    lab.add(FIRST, "first", case="P8-s1")
+    lab.add(FIRST, "second", case="P8-s2")
+    original = snapshots._pack
+
+    def unavailable(*args):
+        if args[5] == "P8-s2":
+            raise TimeoutError("object storage timeout")
+        return original(*args)
+
+    monkeypatch.setattr(snapshots, "_pack", unavailable)
+    with pytest.raises(TimeoutError, match="object storage timeout"):
+        snapshots.observe(lab.root, lab.out, SimpleNamespace(rpc=lab.rpc), None)

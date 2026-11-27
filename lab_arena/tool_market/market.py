@@ -133,7 +133,7 @@ class ToolMarket:
         if role not in ("buyer", "miner") or set(body) != {"role", "terms_version", "terms_sha256"}:
             raise ToolMarketError(400, "request_invalid")
         if body["terms_version"] != self._config.terms_version or body["terms_sha256"] != self._config.terms_sha256:
-            raise ToolMarketError(409, "terms_outdated")
+            raise ToolMarketError(409, "terms_outdated", terms_version=self._config.terms_version)
         return self._store.accept_terms(
             role=role, hotkey=identity.hotkey, version=self._config.terms_version,
             terms_sha256=self._config.terms_sha256, host=identity.host, signed_at=identity.signed_at,
@@ -345,12 +345,12 @@ class ToolMarket:
         private = body.get("private", False)
         if not isinstance(private, bool):
             raise ToolMarketError(400, "private_invalid")
-        # The most the buyer will let a key ask per unit; the book can move
-        # between reading it and calling.
         tool = body["tool"]
         if not isinstance(tool, str) or tool not in self._config.tools:
             raise ToolMarketError(404, "tool_unavailable")
         ceiling = catalog.MAX_ASK[catalog.TOOLS[tool]]
+        # The most the buyer will let a key ask per unit; the book can move
+        # between reading it and calling.
         max_ask = body.get("max_ask_microusd", ceiling)
         _int(max_ask, 1, ceiling, "max_ask_invalid")
         try:

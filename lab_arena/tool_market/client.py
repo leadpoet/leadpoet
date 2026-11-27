@@ -91,12 +91,10 @@ class Client:
         return self.request("GET", "/tool-market/catalog")
 
     def call(self, tool: str, operation: str, params: Dict[str, Any],
-             max_ask_microusd: Optional[int] = None, private: bool = False) -> Dict[str, Any]:
-        body: Dict[str, Any] = {"tool": tool, "operation": operation, "params": params}
+             max_ask_microusd: Optional[int] = None, private: Any = False) -> Dict[str, Any]:
+        body: Dict[str, Any] = {"tool": tool, "operation": operation, "params": params, "private": private}
         if max_ask_microusd is not None:
             body["max_ask_microusd"] = max_ask_microusd
-        if private:
-            body["private"] = True
         return self.request("POST", "/tool-market/call", body)
 
 
@@ -136,12 +134,9 @@ def mcp_answer(client: Client, message: Dict[str, Any]) -> Optional[Dict[str, An
         if name == "find_tool":
             answer = client.tools()
         elif name == "call_tool":
-            if not isinstance(arguments, dict) or type(arguments.get("private", False)) is not bool:
-                return {"jsonrpc": "2.0", "id": message["id"],
-                        "error": {"code": -32602, "message": "call_tool requires a boolean private option"}}
             answer = client.call(str(arguments.get("tool", "")), str(arguments.get("operation", "")),
                                  arguments.get("params") or {}, arguments.get("max_ask_microusd"),
-                                 arguments.get("private") is True)
+                                 arguments.get("private", False))
         else:
             return {"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32602, "message": "unknown tool"}}
         result = {"content": [{"type": "text", "text": json.dumps(answer)}], "isError": "error" in answer or (isinstance(answer.get("status"), int) and answer["status"] >= 400)}
@@ -217,6 +212,11 @@ def main(argv: Optional[list] = None) -> int:
         version, sha256 = list(PUBLISHED_TERMS.items())[-1]
         answer = client.request("POST", "/tool-market/terms", {
             "role": "buyer", "terms_version": version, "terms_sha256": sha256}, signed=True)
+        wanted = answer.get("terms_version")
+        if answer.get("error") == "terms_outdated" and wanted in PUBLISHED_TERMS:
+            # The gateway trades on another published version: sign that one.
+            answer = client.request("POST", "/tool-market/terms", {
+                "role": "buyer", "terms_version": wanted, "terms_sha256": PUBLISHED_TERMS[wanted]}, signed=True)
     elif args.command == "balance":
         answer = client.request("GET", "/tool-market/balance", signed=True)
     elif args.command == "key":

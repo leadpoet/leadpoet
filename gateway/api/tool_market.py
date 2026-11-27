@@ -8,7 +8,7 @@ state.
   per signature (``lab_arena.lead_orders.auth``), as the lead-order routes.
 * Tab routes: the token a signed ``POST /tool-market/tabs`` returned, as a
   bearer token, so an agent can call tools without signing each call.
-* Public: the order book of each enabled tool.
+* Public: the catalog and the order book of each enabled tool.
 """
 
 from __future__ import annotations

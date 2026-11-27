@@ -66,7 +66,7 @@ def test_the_mcp_server_lists_two_tools_and_calls_with_the_api_key(monkeypatch):
     request = sent.sent[0]
     assert request.get_header("Authorization") == "Bearer tmt_key"
     assert json.loads(request.data) == {"tool": "hunter", "operation": "email_finder",
-                                        "params": {"domain": "acme.com"}}
+                                        "params": {"domain": "acme.com"}, "private": False}
 
 
 def test_a_refused_call_reaches_the_agent_as_an_error(monkeypatch):
@@ -111,14 +111,21 @@ def test_the_client_names_its_gateway_and_follows_no_redirect(monkeypatch):
     assert client_module._NoRedirect().redirect_request(None, None, 302, "", {}, "https://evil.example/") is None
 
 
-def test_mcp_returns_vendor_failure_and_rejects_mistyped_privacy_before_dispatch(monkeypatch):
+def test_mcp_returns_vendor_failure(monkeypatch):
     sent = Recorder({"status": 503, "body": {}, "charge_microusd": 0})
     monkeypatch.setattr(client_module, "_open", sent)
     client = client_module.Client("https://gw.example", api_key="tmt_key")
     msg = {"id": 1, "method": "tools/call", "params": {"name": "call_tool", "arguments": {
-        "tool": "exa", "operation": "search", "private": "true"}}}
-    assert "error" in client_module.mcp_answer(client, msg)
-    assert not sent.sent
-    msg["params"]["arguments"]["private"] = True
+        "tool": "exa", "operation": "search", "private": True}}}
     assert client_module.mcp_answer(client, msg)["result"]["isError"]
     assert len(sent.sent) == 1
+
+
+def test_a_private_request_is_never_dropped_on_the_way(monkeypatch):
+    sent = Recorder({"status": 200})
+    monkeypatch.setattr(client_module, "_open", sent)
+    client = client_module.Client("https://gw.example", api_key="k")
+    for private in (True, "true", 1):  # the gateway refuses all but True; none may become a public call
+        client_module.mcp_answer(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+            "name": "call_tool", "arguments": {"tool": "hunter", "operation": "email_finder", "private": private}}})
+        assert json.loads(sent.sent[-1].data)["private"] == private

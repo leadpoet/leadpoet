@@ -592,6 +592,7 @@ def run_experiment(
     before_claim=None,
     prompt=None,
     on_pool_failure=None,
+    on_pool_settled=None,
 ):
     from lab_arena.collection_prices import claim_at_current_price
     from lab_arena.collection_broker import CollectionBroker
@@ -866,6 +867,8 @@ def run_experiment(
         ):
             # Settlement is already durable. Follow-up preparation has no provider side effect.
             on_pool_failure(spec, job)
+        if pool and on_pool_settled:
+            on_pool_settled(status)
         count += 1
         print(json.dumps({"job": run_id, "batch": batch, "status": status}), flush=True)
     return count

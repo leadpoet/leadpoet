@@ -818,3 +818,124 @@ def test_prelease_price_diagnostic_redacts_provider_details(tmp_path, capsys):
         and not (tmp_path / ".last-pool-program").exists()
     )
     assert "sensitive" not in line and "credentials" not in line
+
+
+def test_productive_burst_finishes_work_then_obeys_time_funding_and_drain():
+    from scripts.run_locked_collection import poll_funded_burst
+
+    now = [100.0]
+    issued = []
+
+    def advance():
+        issued.append(now[0])
+        now[0] += 200
+        return 1
+
+    # The ninth authorized run may finish exactly at the deadline; no tenth lease is started.
+    assert (
+        poll_funded_burst(
+            64,
+            advance,
+            productive=True,
+            monotonic=lambda: now[0],
+            timer_active=lambda: True,
+        )
+        == 9
+    )
+    assert len(issued) == 9
+    issued.clear()
+    assert (
+        poll_funded_burst(
+            64,
+            lambda: issued.append(1) or 1,
+            productive=True,
+            monotonic=lambda: 0,
+            timer_active=lambda: False,
+        )
+        == 8
+    )
+    assert len(issued) == 8
+    issued.clear()
+    assert (
+        poll_funded_burst(
+            64,
+            lambda: issued.append(1) or 0,
+            productive=True,
+            monotonic=lambda: 0,
+            timer_active=lambda: True,
+        )
+        == 0
+    )
+    assert len(issued) == 1
+    issued.clear()
+
+    def failing():
+        issued.append(1)
+        raise RuntimeError("ambiguous claim")
+
+    with pytest.raises(RuntimeError, match="ambiguous claim"):
+        poll_funded_burst(
+            64, failing, productive=True, monotonic=lambda: 0, timer_active=lambda: True
+        )
+    assert len(issued) == 1
+
+    def no_timer():
+        pytest.fail("ordinary operators never inspect the service timer")
+
+    assert (
+        poll_funded_burst(
+            3, lambda: 1, productive=False, monotonic=lambda: 0, timer_active=no_timer
+        )
+        == 3
+    )
+    assert (
+        poll_funded_burst(
+            64,
+            lambda: 1,
+            productive=True,
+            monotonic=lambda: 0,
+            timer_active=lambda: True,
+        )
+        == 64
+    )
+
+
+@pytest.mark.parametrize("terminal", ["accepted", "rejected"])
+def test_installed_worker_extends_only_a_paid_burst(tmp_path, monkeypatch, terminal):
+    import scripts.run_locked_collection as worker
+
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text("{}")
+    calls = []
+    monkeypatch.setattr(
+        worker, "evidence_stores", lambda: (SimpleNamespace(rpc=lambda *a: True), None)
+    )
+
+    def completed(args, parser, raw, *, on_pool_settled, before_claim=None):
+        calls.append(1)
+        on_pool_settled(terminal)
+        return 1
+
+    monkeypatch.setattr(worker, "_run_options", completed)
+    monkeypatch.setattr(
+        worker,
+        "poll_pool_experiments",
+        lambda prompt, directory, database, run, **kw: run({}),
+    )
+    assert (
+        worker.main(
+            [
+                "--batch",
+                str(cfg),
+                "--prompt",
+                str(cfg),
+                "--offer-directory",
+                str(tmp_path),
+                "--productive-burst",
+                "--max-jobs",
+                "5",
+            ]
+        )
+        == 0
+    )
+    assert len(calls) == (5 if terminal == "accepted" else 1)

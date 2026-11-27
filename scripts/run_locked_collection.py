@@ -996,6 +996,49 @@ def poll_paid_offers(baseline, prompt, directory, run):
     return 0
 
 
+def _worker_timer_active():
+    import subprocess
+
+    try:
+        return (
+            subprocess.run(
+                [
+                    "systemctl",
+                    "is-active",
+                    "--quiet",
+                    "leadpoet-collection-pilot.timer",
+                ],
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def poll_funded_burst(
+    limit,
+    poll,
+    *,
+    productive,
+    monotonic=time.monotonic,
+    timer_active=_worker_timer_active,
+):
+    """Reselect funding for each new job. Let an authorized run finish before draining."""
+    deadline = monotonic() + 30 * 60 if productive else None
+    completed = 0
+    while completed < limit:
+        if productive and completed:
+            if monotonic() >= deadline or (completed % 8 == 0 and not timer_active()):
+                break
+        if not poll():
+            break
+        completed += 1
+    return completed
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
@@ -1008,6 +1051,8 @@ def main(argv=None):
     p.add_argument("--champion-repo", type=Path)
     p.add_argument("--poet-repo", type=Path)
     p.add_argument("--max-jobs", type=int, default=1)
+    p.add_argument("--productive-burst", action="store_true",
+                   help="Paid service only: admit up to 64 jobs or 30 minutes of new work, and drain on timer stop")
     p.add_argument("--successor-first-model", nargs=2, metavar=("PROGRAM", "MODEL"),
                    help="Lead only future renewable packs of this program with an existing assigned model")
     p.add_argument("--research-case-index", type=Path)
@@ -1048,7 +1093,10 @@ def main(argv=None):
         from scripts.run_lab_arena_service import load_scoped_environment
 
         load_scoped_environment(args.environment_file)
-    if not 1 <= args.max_jobs <= (8 if args.offer_directory else 6):
+    if args.productive_burst and not args.offer_directory:
+        p.error("productive-burst requires offer-directory")
+    job_limit = 64 if args.productive_burst else (8 if args.offer_directory else 6)
+    if not 1 <= args.max_jobs <= job_limit:
         p.error("invalid job limit for this worker")
     baseline = json.loads(args.batch.read_text())
     if args.offer_directory:
@@ -1060,13 +1108,26 @@ def main(argv=None):
         limit = args.max_jobs
         args.max_jobs = 1  # Re-select the program and live funds after every actual job.
         if database.rpc("collection_pool_active_v1", {}) is True:
-            args.experiment_inputs = args.experiment_inputs or args.offer_directory.parent / "experiment-inputs"
-            for _ in range(limit):
-                if not poll_pool_experiments(prompt, args.offer_directory, database, partial(_run_options, args, p),
-                                             successor_leader=args.successor_first_model):
-                    break
+            args.experiment_inputs = (
+                args.experiment_inputs
+                or args.offer_directory.parent / "experiment-inputs"
+            )
+            def scan():
+                settled = []
+                handled = poll_pool_experiments(
+                    prompt, args.offer_directory, database,
+                    partial(_run_options, args, p, on_pool_settled=settled.append),
+                    successor_leader=args.successor_first_model,
+                )
+                # A clipped, unpayable output is retained. Resume at the ordinary timer
+                # rather than immediately funding more potentially unusable work.
+                return handled and (not args.productive_burst or settled == ["accepted"])
+
+            poll_funded_burst(limit, scan, productive=args.productive_burst)
         else:
-            poll_paid_offers(baseline, prompt, args.offer_directory, partial(_run_options, args, p))
+            poll_paid_offers(
+                baseline, prompt, args.offer_directory, partial(_run_options, args, p)
+            )
         return 0
     if args.next_reference and (
         args.max_jobs != 1
@@ -1154,7 +1215,7 @@ def main(argv=None):
     return 0
 
 
-def _run_options(args, p, raw, *, before_claim=None):
+def _run_options(args, p, raw, *, before_claim=None, on_pool_settled=None):
     """Return how many new jobs were executed, for bounded pilot polling."""
     prompt = json.loads(args.prompt.read_text())
     from lab_arena import collection_experiment as experiments
@@ -1323,7 +1384,7 @@ def _run_options(args, p, raw, *, before_claim=None):
                     if standing else prices_for_assignment(experiment.routes, policy),
                     owner_lookup=lambda hk: resolve_finalized_owner(client, hk), judge_key=judge_key,
                     max_jobs=args.max_jobs, epoch=lambda: chain.current_settlement_epoch(client, cutover),
-                    before_claim=before_claim, prompt=prompt,
+                    before_claim=before_claim, prompt=prompt, on_pool_settled=on_pool_settled,
                     on_pool_failure=(partial(stage_failed_pool_continuation, database=db, objects=objects,
                                              directory=args.offer_directory, inputs=args.experiment_inputs, prompt=prompt)
                                      if standing and args.offer_directory else None),

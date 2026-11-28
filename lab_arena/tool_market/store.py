@@ -45,7 +45,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "tool_market_session_key_v1": (("p_buyer", _T), ("p_digest", _T)),
     "tool_market_reserve_call_v1": (
         ("p_call_id", _U), ("p_token_hash", _T), ("p_tool", _T), ("p_operation", _T), ("p_key_id", _U),
-        ("p_ask", _B), ("p_owed_cap", _B), ("p_session", _T), ("p_first", "boolean"),
+        ("p_ask", _B), ("p_owed_cap", _B), ("p_session", _T), ("p_first", _BOOL),
         ("p_claim", _T),
     ),
     "tool_market_settle_call_v1": (

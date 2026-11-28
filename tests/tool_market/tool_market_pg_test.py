@@ -332,7 +332,7 @@ def test_a_bad_token_reads_neither_the_chain_nor_the_book(world):
         raise AssertionError("the chain was read")
 
     world.market._epoch = chain_read
-    world.market._supply = lambda tool: chain_read()
+    world.market._supply = lambda *_: chain_read()
     for token in ("tmt_nope", closed):
         with pytest.raises(ToolMarketError) as refused:
             world.market.call(token, PROFILE)

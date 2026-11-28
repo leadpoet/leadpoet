@@ -157,10 +157,10 @@ class Operation:
                 raise CatalogError("param_missing")
         values = {self.params[name].vendor_name or name: self.params[name].read(value)
                   for name, value in params.items()}
+        if self.wrap is not None:
+            values = self.wrap(values)
         headers = {"accept": "application/json"}
         if self.method == "GET":
-            if self.wrap is not None:
-                values = self.wrap(values)
             if any(len(quote_plus(str(v))) > MAX_ENCODED_QUERY_VALUE for v in values.values()):
                 raise CatalogError("param_invalid")
             url = self.url + ("?" + urlencode(sorted(values.items())) if values else "")
@@ -168,8 +168,7 @@ class Operation:
                 raise CatalogError("param_invalid")
             return url, headers, b""
         headers["content-type"] = "application/json"
-        document = self.wrap(values) if self.wrap is not None else values
-        return self.url, headers, json.dumps(document, separators=(",", ":")).encode("utf-8")
+        return self.url, headers, json.dumps(values, separators=(",", ":")).encode("utf-8")
 
     def status(self, http_status: int, document: Any) -> int:
         """The answer's real status, in the meaning the market acts on."""

@@ -71,6 +71,8 @@ def rank(asks: Iterable[Ask]) -> List[Ask]:
 
 __all__ = [
     "Ask",
+    "GENERAL_ASK_OPERATIONS",
+    "ask_scope",
     "charge_microusd",
     "owed_microusd",
     "rank",

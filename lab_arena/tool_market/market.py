@@ -24,7 +24,7 @@ import time
 import uuid
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Tuple
 
 from lab_arena.lead_orders.auth import BuyerIdentity
 from lab_arena.lead_orders.config import is_valid_hotkey
@@ -522,14 +522,16 @@ class ToolMarket:
             raise ToolMarketError(403, "buyer_not_allowed")
         with self._slot(hotkey, MAX_CALLS_IN_FLIGHT_PER_BUYER, "too_many_calls_in_flight"):
             url, session = self._session(hotkey, op, url)
-            # Lazy: the tab path reads the book after the epoch; a signed call reads it first, to size its tab.
-            asks = itertools.islice(self._asks(op, max_ask, private, hotkey, session.pinned), MAX_ASKS_PER_CALL)
+            # The book, read before any reserve, so a store error here claims no request_id.
+            asks = list(itertools.islice(self._asks(op, max_ask, private, hotkey, session.pinned), MAX_ASKS_PER_CALL))
+            if not asks:
+                raise ToolMarketError(503, "no_supply")
             request = (url, headers, payload)
             if tab is None:
                 return self._signed_call(op, hotkey, asks, session, request, arrived, request_id)
             return self._buy(op, tab, hotkey, asks, session, request, arrived, request_id)
 
-    def _signed_call(self, op: catalog.Operation, hotkey: str, asks: Iterable[Tuple[book.Ask, int]],
+    def _signed_call(self, op: catalog.Operation, hotkey: str, asks: List[Tuple[book.Ask, int]],
                      session: Session, request: Tuple[str, Mapping[str, str], bytes], arrived: float,
                      request_id: Optional[str]) -> Dict[str, Any]:
         """A call on a tab of its own, closed when the call ends, that holds
@@ -544,9 +546,6 @@ class ToolMarket:
             return self._store.open_tab(tab_id=self._new_id(), hotkey=hotkey, token_hash=tab, budget_microusd=budget,
                                         seconds=CALL_TAB_SECONDS, terms_sha256=None)
 
-        asks = list(asks)
-        if not asks:
-            raise ToolMarketError(503, "no_supply")
         needs = [book.charge_microusd(owed_cap) for _, owed_cap in asks]
         opened, unread = open_for(max(needs)), None
         if opened["status"] == "insufficient_balance":
@@ -606,7 +605,7 @@ class ToolMarket:
             raise ToolMarketError(409, "session_page_one_required")
         return urlunsplit(parts._replace(query=urlencode(params))), Session(digest, first, pinned)
 
-    def _buy(self, op: catalog.Operation, tab: str, hotkey: str, asks: Iterable[Tuple[book.Ask, int]],
+    def _buy(self, op: catalog.Operation, tab: str, hotkey: str, asks: List[Tuple[book.Ask, int]],
              session: Session, request: Tuple[str, Mapping[str, str], bytes], arrived: float,
              request_id: Optional[str]) -> Dict[str, Any]:
         """Reserve and send on the cheapest keys that fit, up to the per-call limits.
@@ -619,7 +618,6 @@ class ToolMarket:
             epoch = int(self._epoch())
         except ArenaChainError:
             raise ToolMarketError(503, "chain_unavailable") from None
-        asks = list(asks)  # the book: a store error here claims nothing
         # A buyer reuses a purchase's request_id across tabs and signatures
         # after an ambiguous answer. Its claim commits with the first reserve,
         # so a duplicate gets the candidate call IDs instead of another vendor

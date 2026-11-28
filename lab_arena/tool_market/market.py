@@ -393,8 +393,7 @@ class ToolMarket:
                 "best_ask_microusd": best and best["ask_microusd"],
                 "buyer_pays_microusd": best and best["buyer_pays_microusd"],
                 "operations": [{"operation": op.name, "does": op.does, "max_units": op.max_units,
-                                "params": {name: {"kind": p.kind, "required": p.required, **(
-                                    {"choices": list(p.choices)} if p.choices else {})}
+                                "params": {name: dict(p.schema(), required=p.required)
                                            for name, p in op.params.items()}}
                                for (t, _), op in sorted(catalog.OPERATIONS.items()) if t == tool]})
         return {"tools": tools}

@@ -3,8 +3,8 @@
 ``set_service`` on chain points to ``services_document``: who publishes
 (the Gamma service hotkey), the OpenAPI spec, how to pay (Gamma, btauth/1)
 and where the balance and prices are. ``openapi`` is built from the catalog,
-so every operation's parameters are in the spec and cannot drift from what
-``/call`` accepts. Prices move with the book, so they are read live from
+so each parameter's type and bounds in the spec are the ones ``/call``
+checks (an operation's cross-field rules are in its description). Prices move with the book, so they are read live from
 ``/tool-market/catalog``.
 """
 
@@ -14,10 +14,6 @@ from typing import Any, Dict
 
 from lab_arena.tool_market import catalog
 from lab_arena.tool_market.config import NETUID, TERMS_URL, ToolMarketConfig
-
-_KINDS = {"str": {"type": "string"}, "int": {"type": "integer"}, "bool": {"type": "boolean"},
-          "str_list": {"type": "array", "items": {"type": "string"}}, "enum": {"type": "string"}}
-
 
 def services_document(config: ToolMarketConfig) -> Dict[str, Any]:
     base = config.public_base_url
@@ -38,10 +34,10 @@ def services_document(config: ToolMarketConfig) -> Dict[str, Any]:
 
 
 def _operation_schema(op: catalog.Operation) -> Dict[str, Any]:
-    params = {name: dict(_KINDS[p.kind], **({"enum": list(p.choices)} if p.choices else {}))
-              for name, p in op.params.items()}
+    params = {name: p.schema() for name, p in op.params.items()}
     required = sorted(name for name, p in op.params.items() if p.required)
-    return {"type": "object", "description": op.does, "required": ["tool", "operation", "params"],
+    return {"type": "object", "description": op.does,
+            "required": ["tool", "operation"] + (["params"] if required else []),
             "properties": {"tool": {"enum": [op.tool]}, "operation": {"enum": [op.name]},
                            "request_id": {"type": "string", "format": "uuid", "description": "Reuse for retries of this purchase."},
                            "params": {"type": "object", "properties": params, "required": required,
@@ -63,11 +59,13 @@ def openapi(config: ToolMarketConfig) -> Dict[str, Any]:
             "type": "apiKey", "in": "header", "name": "X-Bittensor-Signature",
             "description": "btauth/1 (https://www.bittensor.com/docs/guides/signed-requests), sr25519, with "
                            "X-Bittensor-Receiver " + config.gamma_service + ". Spend Gamma at that hotkey "
-                           "on netuid %d first." % NETUID}}},
+                           "on netuid %d first." % NETUID},
+            "tab": {"type": "http", "scheme": "bearer",
+                    "description": "An API key from POST /tool-market/tabs, which holds a budget."}}},
         "paths": {
             "/tool-market/call": {"post": {
                 "summary": "Call one tool operation, charged to the signing hotkey's Gamma balance.",
-                "security": [{"btauth": []}],
+                "security": [{"btauth": []}, {"tab": []}],
                 "requestBody": {"required": True, "content": {"application/json": {"schema": {
                     "oneOf": [_operation_schema(op) for op in operations]}}}},
                 "responses": {

@@ -70,6 +70,14 @@ class Param:
             return False
         return True
 
+    def schema(self) -> Dict[str, Any]:
+        """The JSON Schema of what ``read`` accepts (an operation's cross-field rules aside)."""
+
+        text = {"type": "string", "minLength": 1, "maxLength": self.max_length}
+        return {"str": text, "int": {"type": "integer", "minimum": self.low, "maximum": self.high},
+                "bool": {"type": "boolean"}, "enum": {"enum": list(self.choices)},
+                "str_list": {"type": "array", "minItems": self.low, "maxItems": self.high, "items": text}}[self.kind]
+
     def read(self, value: Any) -> Any:
         if self.kind == "str":
             if not self._text(value):

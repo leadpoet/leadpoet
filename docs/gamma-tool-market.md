@@ -153,7 +153,8 @@ and [signed requests](https://www.bittensor.com/docs/guides/signed-requests) gui
   payment with `btauth/1` and the balance url, the catalog as pricing, and
   the terms.
 - `GET /tool-market/openapi.json` is built from the catalog, so each
-  operation's parameters in the spec are the ones `/call` checks.
+  parameter's type and bounds in the spec are the ones `/call` checks; an
+  operation's cross-field rules are in its description.
 - Credit is read at a finalized block: `GammaSpent` for the buyer at the
   service hotkey. Credit is bound to one chain, netuid, service hotkey and
   subnet registration block (`NetworkRegisteredAt`). If the subnet is

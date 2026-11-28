@@ -3,6 +3,7 @@ from lab_arena import contracts
 
 POOL_SCOPE = "sales_sandbox"
 POOL_PAYMENT_RULE = "verified_actual_cost_v1"
+# Frozen in every standing experiment manifest, including later assignments.
 POOL_TERMS = (
     "I authorize Leadpoet to use my OpenRouter key for operator-run synthetic sales "
     "experiments on Finney subnet 71, including comparisons, same-model repeats, fresh expert "
@@ -29,3 +30,28 @@ POOL_TERMS = (
     "research tools are outside this authorization."
 )
 POOL_TERMS_HASH = contracts.hash_bytes(POOL_TERMS.encode())
+
+
+POOL_TERMS_150 = POOL_TERMS.replace("1.25 times", "1.50 times")
+POOL_TERMS_BY_RATE = {
+    12500: (POOL_TERMS, POOL_TERMS_HASH),
+    15000: (POOL_TERMS_150, contracts.hash_bytes(POOL_TERMS_150.encode())),
+}
+POOL_GRANT_HASHES = frozenset(digest for _, digest in POOL_TERMS_BY_RATE.values())
+
+
+def require_reward_rate(rate_bps):
+    if type(rate_bps) is not int or rate_bps not in POOL_TERMS_BY_RATE:
+        raise ValueError("unknown standing reward rate")
+    return rate_bps
+
+
+def job_reward_rate(job):
+    # Readbacks for grants assigned before the rate migration omit this field.
+    return require_reward_rate(job.get("reward_rate_bps", 12500))
+
+
+def pool_target_microusd(job, settled_microusd):
+    if type(settled_microusd) is not int or settled_microusd < 0:
+        raise ValueError("invalid settled generator cost")
+    return (settled_microusd * job_reward_rate(job) + 9999) // 10000

@@ -9,7 +9,7 @@ import re
 
 from lab_arena import collection_judge as judge
 from lab_arena.collection_intake import MODELS
-from lab_arena.collection_pool import POOL_PAYMENT_RULE
+from lab_arena.collection_pool import POOL_PAYMENT_RULE, job_reward_rate, pool_target_microusd
 from lab_arena.collection_sales_evidence import sales_correction_source
 from lab_arena.collection_workflow import (
     COMPARISON_CAPTURE,
@@ -573,6 +573,13 @@ def native_payment_evidence(objects, job, manifest, *, receipts_out=None):
             and checks["no_hard_failure"]
             and (family in {"P9", "P10"} or expected == final_answer.strip())
         )
+        rate = job_reward_rate(job)
+        if rate != 12500:
+            # Preserve the original proof shape for replay of frozen 1.25x jobs.
+            additional.update(
+                reward_rate_bps=rate,
+                earned_target_microusd=pool_target_microusd(job, total) if complete_verified else 0,
+            )
     else:
         task_pass = eligible
     return {

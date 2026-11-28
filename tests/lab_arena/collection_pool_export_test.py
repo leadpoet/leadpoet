@@ -239,3 +239,75 @@ def test_interrupted_pool_prefix_exports_before_its_final_bill(pool_fixture, tmp
         patch.setattr(snapshots, "_pack", unexpected_pack)
         repeat = observe(root, output, env.db, env.objects, {**stopped, "pass": 3})
         assert repeat["snapshot"] == stopped["snapshot"] and old.read_bytes() == prior_bytes
+
+def test_assignment_pins_rate_replays_archives_and_preserves_original_grant(pool_fixture, tmp_path):
+    from lab_arena import collection_experiment as experiments, contracts
+    from lab_arena.collection_intake import SCOPE, scope_id
+    from lab_arena.collection_pool import POOL_TERMS_BY_RATE, POOL_TERMS_HASH
+
+    e = pool_fixture
+    cash150 = POOL_TERMS_BY_RATE[15000][1]
+    assert POOL_TERMS_HASH == "sha256:1655fcba4ba721aa1559c073e1430853450b1771ebf2dea7c74c5a74c4768df1"
+    raw = pool_raw(repeats=4)
+    good, bad = scripts_for(e, "P9")
+    old = simulation(e, raw, [good])
+    legacy = e.jobs[0]
+    def export(name, ids=None):
+        path = tmp_path / (name + ".zip")
+        metadata = write_dataset(old, e.db, e.objects, path, full_trajectories=True, only_jobs=ids, prompt=PROMPT)
+        with ZipFile(path) as archive:
+            rows = {j["job_id"]:archive.read("trajectories/" + j["job_id"] + ".jsonl")
+                    for j in e.jobs if ids is None or j["job_id"] in ids}
+        return metadata["dataset_sha256"], rows
+
+    old_digest, original = export("before")
+    e.assignment_rate = 15000
+    assert simulation(e, raw, [bad]).batch_id == old.batch_id
+    e.consent = contracts.build_signed_request(
+        scope=SCOPE["register"], round_id=scope_id("live"), hotkey=e.key.ss58_address,
+        body={**e.consent["body"], "terms_sha256":cash150}, timestamp=2, sign_message=lambda m:e.key.sign(m).hex(),
+    )
+    simulation(e, raw, [good, bad])
+    assert export("after", {legacy["job_id"]}) == (old_digest, original)
+    _, encoded = export("mixed")
+    for i, job in enumerate(e.jobs):
+        _, proof = experiments.pool_verified_result(e.objects, job, old)
+        row = json.loads(encoded[job["job_id"]])
+        expected = (5 * proof["cost_microusd"] + 3) // 4 if i == 0 else (3 * proof["cost_microusd"] + 1) // 2
+        assert row["payment_eligible"] and row["verified_task_pass"] is (i in (0, 2))
+        assert row["terms_sha256"] == (POOL_TERMS_HASH if i < 2 else cash150)
+        assert row["earned_target_microusd"] == expected == job["price_microusd"]
+        if i:
+            assert proof["reward_rate_bps"] == row["reward_rate_bps"] == 15000
+            assert proof["earned_target_microusd"] == expected
+        else:
+            assert "reward_rate_bps" not in proof and "reward_rate_bps" not in row
+    job = e.jobs[-1]
+    original_price = job["price_microusd"]
+    for changes in ({"price_microusd":original_price-1},{"reward_rate_bps":12500},{"reward_rate_bps":None},
+                    {"reward_rate_bps":True},{"reward_rate_bps":14999}):
+        with pytest.raises(ValueError):
+            experiments.pool_verified_result(e.objects, {**job, **changes}, old)
+    job["reward_rate_bps"] = 12500
+    with pytest.raises(ValueError, match="below its signed standing terms"):
+        export("downgraded", {job["job_id"]})
+    # The old data-use manifest remains fixed even when the gateway signs new grants.
+    with pytest.raises(ValueError):
+        experiments.load_experiment({**raw,"terms_sha256":cash150}, PROMPT)
+
+@pytest.mark.parametrize("cost,original,uplift", [(0,0,0),(1,2,2),(2,3,3),(3,4,5),(5,7,8),(11,14,17)])
+def test_rates_round_up_once_per_job(cost, original, uplift):
+    from lab_arena.collection_pool import pool_target_microusd
+
+    assert pool_target_microusd({}, cost) == pool_target_microusd({"reward_rate_bps":12500}, cost) == original
+    assert pool_target_microusd({"reward_rate_bps":15000}, cost) == uplift
+
+
+def test_unknown_assignment_rate_cannot_dispatch_a_generation(pool_fixture):
+    env = pool_fixture
+    env.assignment_rate = 14999
+    good, _ = scripts_for(env, "P9")
+    with pytest.raises(RuntimeError, match="experiment interrupted"):
+        simulation(env, pool_raw(repeats=1), [good])
+    assert env.jobs[0]["status"] == "failed" and env.jobs[0]["price_microusd"] == 0
+    assert env.run_costs == {}

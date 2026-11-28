@@ -31,7 +31,7 @@ from lab_arena.collection_workflow import store_artifact
 from lab_arena.collection_journal import WorkflowJournal
 from lab_arena import collection_trajectories as trajectories
 from lab_arena.collection_broker import batch_versions
-from lab_arena.collection_pool import POOL_SCOPE, POOL_PAYMENT_RULE, POOL_TERMS_HASH
+from lab_arena.collection_pool import POOL_SCOPE, POOL_PAYMENT_RULE, POOL_TERMS_HASH, job_reward_rate
 
 CORRECTIONS = "collection.correction-pairs.v1"
 AUDIT = "collection.experiment-private-audit.v1"
@@ -317,12 +317,15 @@ def write_dataset(
                         revision=batch_versions(spec.routes)[job["model"]],
                         route=spec.routes[job["model"]],
                         split=stamp,
-                        terms_sha256=spec.raw["terms_sha256"],
+                        terms_sha256=grants[rid]["consent"]["body"]["terms_sha256"] if pooled else spec.raw["terms_sha256"],
                         experiment=meta,
                         source=student,
                         **kwargs,
                     )
                     if pooled:
+                        rate = job_reward_rate(job)
+                        if rate != 12500:
+                            projected["reward_rate_bps"] = rate
                         if native is not None and not projected.get("capture_hold"):
                             trajectories.apply_native_labels(projected, native, job["price_microusd"])
                         else:

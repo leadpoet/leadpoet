@@ -2754,7 +2754,8 @@ class ArenaService:
 
     def public_collection_status(self) -> Dict[str, Any]:
         """Only aggregate paid work is public. Never forward private participation records."""
-        from lab_arena.collection_intake import PAID_OFFER_ID, POOL_TERMS_HASH
+        from lab_arena.collection_intake import PAID_OFFER_ID
+        from lab_arena.collection_pool import POOL_GRANT_HASHES
 
         mode = self.collection_mode()
         if mode == "off":
@@ -2784,7 +2785,7 @@ class ArenaService:
             offer = self.collection_terms() if mode == "live" else {}
             epoch = self._config.chain.current_settlement_epoch()
             result = {
-                "paid_enrollment_open": offer.get("terms_sha256") == POOL_TERMS_HASH or bool(
+                "paid_enrollment_open": offer.get("terms_sha256") in POOL_GRANT_HASHES or bool(
                     offer.get("fixed_quotes") and PAID_OFFER_ID.fullmatch(offer.get("offer_id") or "")),
                 "champion_rewards_off": self._collection_reward_active(int(epoch)),
                 "running_runs": running,
@@ -2803,7 +2804,8 @@ class ArenaService:
             if mode == "live" and offer_id is None and task_scope in (None, collection_intake.POOL_SCOPE):
                 activated = self._store._transport.rpc("collection_pool_active_v1", {})
                 if activated is True:
-                    return collection_intake.terms(mode, collection_intake.POOL_SCOPE)
+                    rate = collection_intake.active_pool_reward_rate(self._store._transport)
+                    return collection_intake.terms(mode, collection_intake.POOL_SCOPE, reward_rate_bps=rate)
                 if activated is not False:
                     raise ArenaStoreUnavailable("collection pool readiness unavailable")
                 if task_scope == collection_intake.POOL_SCOPE:

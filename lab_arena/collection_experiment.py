@@ -19,7 +19,7 @@ from lab_arena.collection_intake import (
     SYNTHETIC_SCENARIO,
     MAX_MICROUSD,
 )
-from lab_arena.collection_pool import POOL_PAYMENT_RULE, POOL_TERMS_HASH
+from lab_arena.collection_pool import POOL_PAYMENT_RULE, POOL_TERMS_HASH, job_reward_rate, pool_target_microusd
 from lab_arena.collection_workflow import store_artifact
 from lab_arena.collection_journal import WorkflowJournal
 from lab_arena.collection_generation import (
@@ -662,6 +662,8 @@ def run_experiment(
             vote_refs.append(ref)
 
         try:
+            if pool:
+                job_reward_rate(job)  # Refuse an unknown policy before spending.
             if (
                 job["model"] != arm["model"]
                 or job["scenario_id"] != case["scenario_id"]
@@ -911,12 +913,11 @@ def pool_verified_result(objects, job, spec):
     recorded = read_artifact(
         objects, batch, run, "native-verification", manifest["verification"], 4 << 20
     )
-    if proof != recorded or (
-        job["status"] == "accepted"
-        and (
-            not proof["complete_verified"]
-            or job["price_microusd"] != (proof["cost_microusd"] * 5 + 3) // 4
-        )
+    target = pool_target_microusd(job, proof["cost_microusd"]) if proof["complete_verified"] else 0
+    if (
+        proof != recorded
+        or (job["status"] == "accepted") != proof["complete_verified"]
+        or job["price_microusd"] != target
     ):
         raise ValueError(
             "stored native result or earned reward differs from original compute"

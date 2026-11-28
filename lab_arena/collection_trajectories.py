@@ -21,8 +21,10 @@ def verified_grants(database, batch, jobs, *, mode, scope, digest, allow_pending
     from lab_arena import collection_intake as intake
     from lab_arena.chain import verify_hotkey_signature
 
-    from lab_arena.collection_pool import POOL_SCOPE, POOL_TERMS_HASH
+    from lab_arena.collection_pool import POOL_SCOPE, POOL_TERMS_HASH, POOL_TERMS_BY_RATE, job_reward_rate
     pool = mode == "live" and scope == POOL_SCOPE and re.fullmatch(r"pool-[0-9a-f]{64}", batch)
+    if scope == POOL_SCOPE and not pool:
+        raise ValueError("standing release requires a live pool experiment")
     permitted = {POOL_TERMS_HASH} if pool else {intake.SYNTHETIC_TRAINING_TERMS_HASH}
     if mode == "live" and scope == intake.TASK_SCOPE and intake.PAID_OFFER_ID.fullmatch(batch):
         permitted = {intake.PAID_WORKFLOW_TERMS_HASH}
@@ -59,8 +61,14 @@ def verified_grants(database, batch, jobs, *, mode, scope, digest, allow_pending
             verify_signature=verify_hotkey_signature,
         )
         body = signed["body"]
+        terms_hash = body.get("terms_sha256")
         if pool:
             cap = intake.standing_limit(body)
+            # A pre-existing grant can receive a prospective increase. A job
+            # must never be assigned below the miner's signed standing terms.
+            rate = job_reward_rate(j)
+            if terms_hash != POOL_TERMS_HASH and terms_hash != POOL_TERMS_BY_RATE[rate][1]:
+                raise ValueError("job rate is below its signed standing terms")
             valid = (type(auth.get("spend_limit_microusd")) is int and cap == auth["spend_limit_microusd"]
                      and type(auth.get("priority")) is int and body["priority"] == auth["priority"])
         else:
@@ -74,7 +82,7 @@ def verified_grants(database, batch, jobs, *, mode, scope, digest, allow_pending
             or signed["hotkey"] != j["miner_hotkey"]
             or str(UUID(hex=signed["request_id"])) != auth["registration_id"]
             or signed["body"].get("task_scope") != scope
-            or signed["body"].get("terms_sha256") != digest
+            or (not pool and terms_hash != digest)
             or (digest == intake.PAID_WORKFLOW_TERMS_HASH and signed["body"].get("offer_id") != batch)
         ):
             raise ValueError("signed release consent differs from funded job")

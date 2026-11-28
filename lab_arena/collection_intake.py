@@ -12,7 +12,10 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
-from lab_arena.collection_pool import POOL_SCOPE, POOL_PAYMENT_RULE, POOL_TERMS, POOL_TERMS_HASH
+from lab_arena.collection_pool import (
+    POOL_SCOPE, POOL_PAYMENT_RULE, POOL_TERMS, POOL_TERMS_HASH, POOL_TERMS_BY_RATE, POOL_GRANT_HASHES,
+    require_reward_rate,
+)
 from lab_arena import contracts, store
 from lab_arena.credentials import OPENROUTER_FUNDING_FIELDS
 
@@ -187,10 +190,28 @@ def require_correction_grant(mode, digest):
     return digest
 
 
-def terms(mode, task_scope=TASK_SCOPE):
+def active_pool_reward_rate(transport):
+    try:
+        rate = transport.rpc("collection_pool_reward_rate_bps_v1", {})
+    except store.ArenaStoreError as exc:
+        error = getattr(exc, "store_error", {}) or {}
+        if (error.get("operation") == "rpc"
+                and error.get("resource") == "collection_pool_reward_rate_bps_v1"
+                and error.get("code") in ("42883", "PGRST202")):
+            return 12500  # The pre-migration database supports only the original rate.
+        raise
+    try:
+        return require_reward_rate(rate)
+    except ValueError as exc:
+        raise IntakeError("collection_pool_rate_unavailable", 503) from exc
+
+
+def terms(mode, task_scope=TASK_SCOPE, *, reward_rate_bps=12500):
     if mode == "live" and task_scope == POOL_SCOPE:
-        return {"mode": mode, "task_scope": task_scope, "terms": POOL_TERMS, "terms_sha256": POOL_TERMS_HASH,
-                "network": "finney", "netuid": 71, "cap_type": "lifetime", "reward_multiplier": "1.25"}
+        text, digest = POOL_TERMS_BY_RATE[require_reward_rate(reward_rate_bps)]
+        return {"mode": mode, "task_scope": task_scope, "terms": text, "terms_sha256": digest,
+                "network": "finney", "netuid": 71, "cap_type": "lifetime",
+                "reward_multiplier": f"{reward_rate_bps / 10000:.2f}"}
     if task_scope not in (TASK_SCOPE, CORRECTION_SCOPE) or mode not in ("pilot", "live"):
         raise IntakeError("collection_scope_unavailable", 422)
     if task_scope == CORRECTION_SCOPE:
@@ -304,7 +325,8 @@ def signed_daily_slots(body):
 
 def standing_limit(body):
     if (set(body) != {"credentials_sha256", "terms_sha256", "task_scope", "spend_limit_microusd", "priority"}
-            or body["task_scope"] != POOL_SCOPE or body["terms_sha256"] != POOL_TERMS_HASH
+            or body["task_scope"] != POOL_SCOPE or not isinstance(body["terms_sha256"], str)
+            or body["terms_sha256"] not in POOL_GRANT_HASHES
             or type(body["priority"]) is not int or body["priority"] not in (0, 1)):
         raise IntakeError("collection_consent_invalid")
     return _micros(body["spend_limit_microusd"], 1)
@@ -379,11 +401,22 @@ class CollectionIntake:
             signed_daily_slots(body)
             cap = _micros(body["daily_cap_microusd"], 1)
         if published is None:
-            published = terms(self.mode, body["task_scope"])
+            if body["task_scope"] == POOL_SCOPE:
+                published = terms(self.mode, POOL_SCOPE, reward_rate_bps=active_pool_reward_rate(self.transport))
+            else:
+                published = terms(self.mode, body["task_scope"])
             if self.mode == "live" and body["task_scope"] == TASK_SCOPE and "offer_id" in body:
                 published.update(comparison_offer(self.transport, body["offer_id"]))
+        # A miner may retry an enrolled request after its original HTTP response
+        # was lost across the uplift. A keyless register RPC can only acknowledge
+        # an existing identical signed envelope (including its credential digest).
+        replay_only = (
+            self.mode == "live" and body["task_scope"] == POOL_SCOPE
+            and body["terms_sha256"] == POOL_TERMS_HASH
+            and published["terms_sha256"] == POOL_TERMS_BY_RATE[15000][1]
+        )
         if (
-            body["terms_sha256"] != published["terms_sha256"]
+            (body["terms_sha256"] != published["terms_sha256"] and not replay_only)
             or body.get("offer_id") != published.get("offer_id")
             or signed["round_id"] != scope_id(self.mode)
             or not isinstance(credentials, dict)
@@ -403,14 +436,16 @@ class CollectionIntake:
                 raise IntakeError("collection_comparison_prices_unavailable", 503)
         registration = str(uuid.UUID(hex=signed["request_id"]))
         prefix = "collection:" + registration
-        encrypted = self.credential_manager.validate_openrouter_funding(
-            credentials, submission_id=prefix, miner_hotkey=hk
-        )
-        key = {
-            "key_id": str(uuid.uuid5(uuid.UUID(registration), "openrouter")),
-            "fingerprint": contracts.hash_bytes(credentials["openrouter_api_key"].encode()),
-            "ciphertext_b64": encrypted,
-        }
+        key = None
+        if not replay_only:
+            encrypted = self.credential_manager.validate_openrouter_funding(
+                credentials, submission_id=prefix, miner_hotkey=hk
+            )
+            key = {
+                "key_id": str(uuid.uuid5(uuid.UUID(registration), "openrouter")),
+                "fingerprint": contracts.hash_bytes(credentials["openrouter_api_key"].encode()),
+                "ciphertext_b64": encrypted,
+            }
         return self._rpc(
             "register",
             id=registration,

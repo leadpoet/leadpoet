@@ -14,7 +14,7 @@ leadpoet collection-register --wallet-name miner --spend-limit-usd 5
 
 This example lets the sandbox spend up to $5 across experiments. Spending authority does not refill at midnight. Calls already sent and pending provider bills count against available funds. Normal funders have priority 1 by default. Reserve funders choose `--priority 0`. For a given assignment the worker tries eligible normal keys first, then reserves. Within each group it uses the largest available budget, then the earliest enrollment. A run must fit its authorized budget.
 
-**Rewards.** A complete, verifiable run earns a dollar target of 1.25× its settled, authorized generator charges. Correct answers and mistakes both qualify. The worker checks the original provider receipts, task execution and trace. Interrupted runs and unverifiable or unauthorized charges earn no target. Leadpoet pays for private verification. If the epoch pool is insufficient, all targets scale proportionally. Network votes and token prices affect actual payouts.
+**Rewards.** A newly assigned run earns a dollar target of 1.5× its settled, authorized OpenRouter charges once the work is complete and verifiable. The higher rate applies automatically to existing enrollments. Each assignment keeps the rate in effect when it was made. Correct answers and mistakes both qualify. The worker checks the original provider receipts, task execution and trace. Interrupted runs and unverifiable or unauthorized charges earn no target. Leadpoet pays for private verification. If the epoch pool is insufficient, all targets scale proportionally. Network votes and token prices affect actual payouts.
 
 **Check or withdraw funding.**
 

@@ -167,6 +167,8 @@ def pool_fixture(tmp_path, monkeypatch, request):
                 "harness_commit": harness,
                 "status": "running",
             }
+            if hasattr(env, "assignment_rate"):
+                j["reward_rate_bps"] = env.assignment_rate
             env.jobs.append(j)
             return j
 
@@ -178,16 +180,16 @@ def pool_fixture(tmp_path, monkeypatch, request):
                 status=status,
                 quality=quality,
                 artifact_sha256=artifact,
-                price_microusd=(cost * 5 + 3) // 4 if status == "accepted" else 0,
+                price_microusd=(cost * j.get("reward_rate_bps", 12500) + 9999) // 10000 if status == "accepted" else 0,
             )
             env.grants[rid] = dict(
                 job_id=rid,
                 mode="live",
                 miner_hotkey=key.ss58_address,
-                registration_id=str(UUID(hex=consent["request_id"])),
-                consent=consent,
+                registration_id=str(UUID(hex=env.consent["request_id"])),
+                consent=env.consent,
                 task_scope=POOL_SCOPE,
-                terms_sha256=POOL_TERMS_HASH,
+                terms_sha256=env.consent["body"]["terms_sha256"],
                 spend_limit_microusd=1000000,
                 priority=1,
                 unresolved=0,

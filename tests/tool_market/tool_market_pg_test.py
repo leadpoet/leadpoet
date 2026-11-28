@@ -629,6 +629,18 @@ def test_a_buyer_who_keeps_causing_unknown_usage_is_stopped(world):
     assert fine.value.code == "vendor_unreachable"
 
 
+def test_a_status_outside_http_settles_as_unknown_usage(world):
+    world.miner_key("odd-status", 9_000)
+    world.miner_key("odd-status-next", 10_000)
+    world.vendor.script["odd-status"] = [ok({}, status=777), ok()]
+    _, token = world.buyer()
+    with pytest.raises(ToolMarketError) as odd:
+        world.market.call(token, PROFILE)
+    assert (odd.value.status, odd.value.code) == (502, "vendor_unreachable")
+    assert [sent[0] for sent in world.vendor.sent] == ["odd-status"]  # it may have used the key: no failover
+    assert world.market.call(token, PROFILE)["status"] == 200  # settled, so the next call is not held up
+
+
 def test_a_month_long_api_key_still_counts_toward_the_unknown_usage_limit(world, admin):
     world.miner_key("long-key", 10)
     month = 30 * 24 * 3600

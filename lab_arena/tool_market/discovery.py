@@ -41,7 +41,8 @@ def _operation_schema(op: catalog.Operation) -> Dict[str, Any]:
     return {"type": "object", "description": op.does,
             "required": ["tool", "operation"] + (["params"] if required else []),
             "properties": {"tool": {"enum": [op.tool]}, "operation": {"enum": [op.name]},
-                           "request_id": {"type": "string", "format": "uuid", "description": "Reuse for retries of this purchase."},
+                           "request_id": {"type": "string", "format": "uuid", "pattern": "^[0-9a-f-]{36}$",
+                                          "description": "Lowercase; reuse for retries of this purchase."},
                            "params": {"type": "object", "properties": params, "required": required,
                                       "additionalProperties": False},
                            "max_ask_microusd": {"type": "integer", "minimum": 1,
@@ -81,6 +82,9 @@ def openapi(config: ToolMarketConfig) -> Dict[str, Any]:
                                                    "API key's budget is spent. Nothing was charged."),
                     "401": dict(error, description="A btauth/1 problem, or tab_unknown or tab_closed, named by "
                                                    "the error code."),
+                    "409": dict(error, description="request_already_used: this request_id already bought, "
+                                                   "see possible_call_ids; session_page_one_required: "
+                                                   "a lead-search session starts at page one."),
                     "429": dict(error, description="Too many calls in flight or uncertain for this hotkey."),
                     "503": dict(error, description="No key can serve the call now (no_supply), or the chain "
                                                    "or store is down or busy; retry later. One with a call_id may "

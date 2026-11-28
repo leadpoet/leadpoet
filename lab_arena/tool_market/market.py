@@ -619,6 +619,7 @@ class ToolMarket:
             epoch = int(self._epoch())
         except ArenaChainError:
             raise ToolMarketError(503, "chain_unavailable") from None
+        asks = list(asks)  # the book: a store error here claims nothing
         # A buyer reuses a purchase's request_id across tabs and signatures
         # after an ambiguous answer. Its claim commits with the first reserve,
         # so a duplicate gets the candidate call IDs instead of another vendor

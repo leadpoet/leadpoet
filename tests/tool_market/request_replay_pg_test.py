@@ -5,6 +5,7 @@ import uuid
 import pytest
 
 from lab_arena.lead_orders.vault_client import VaultTransportError
+from lab_arena.store import ArenaStoreUnavailable
 from lab_arena.tool_market import book, catalog
 from lab_arena.tool_market.market import ToolMarketError
 from tests.tool_market.tool_market_pg_test import PROFILE, database, ok, store, world
@@ -57,6 +58,23 @@ def test_a_duplicate_of_a_purchase_that_spent_its_tab_still_gets_its_call_ids(wo
         world.market.call(token, body)
     assert (duplicate.value.status, duplicate.value.code) == (409, "request_already_used")
     assert first["call_id"] in duplicate.value.detail["possible_call_ids"]
+
+
+def test_a_book_read_failure_leaves_the_request_id_free(world, monkeypatch):
+    world.miner_key("replay-book-supplier", 5_000)
+    world.vendor.script["replay-book-supplier"] = [ok({"element": {"id": "x"}})]
+    _, token = world.buyer()
+    body = dict(PROFILE, request_id=str(uuid.uuid4()))
+    read = world.market._store.book
+
+    def book_down(**_):
+        raise ArenaStoreUnavailable("down")
+
+    monkeypatch.setattr(world.market._store, "book", book_down)
+    with pytest.raises(ArenaStoreUnavailable):  # nothing reserved: the gateway's plain 503
+        world.market.call(token, body)
+    monkeypatch.setattr(world.market._store, "book", read)
+    assert world.market.call(token, body)["status"] == 200  # the same ID still buys
 
 
 def test_an_error_after_a_purchase_is_claimed_says_so(world):

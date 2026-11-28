@@ -43,9 +43,10 @@ _call_threads = anyio.CapacityLimiter(CALL_THREADS)
 # few threads: a miner re-posting a key cannot hold up other routes.
 CHECK_THREADS = 4
 _check_threads = anyio.CapacityLimiter(CHECK_THREADS)
-# The public balance reads the chain, so it gets a few threads of its own.
-BALANCE_THREADS = 4
-_balance_threads = anyio.CapacityLimiter(BALANCE_THREADS)
+# Public reads of the chain (the balance, and the books' registration filter)
+# share a few threads of their own, so anonymous reads cannot hold the rest.
+PUBLIC_CHAIN_THREADS = 4
+_public_chain_threads = anyio.CapacityLimiter(PUBLIC_CHAIN_THREADS)
 PUBLIC = {"access-control-allow-origin": "*"}
 
 _lock = threading.Lock()
@@ -199,18 +200,20 @@ async def openapi(request: Request) -> Response:
 
 @router.get("/tool-market/catalog")
 async def tool_catalog(request: Request) -> Response:
-    return await _handle(request, lambda m, who, body: m.tool_catalog(), signed=False, public=True)
+    return await _handle(request, lambda m, who, body: m.tool_catalog(), signed=False, public=True,
+                         limiter=_public_chain_threads)
 
 
 @router.get("/tool-market/books/{tool}")
 async def order_book(tool: str, request: Request, operation: Optional[str] = None) -> Response:
-    return await _handle(request, lambda m, who, body: m.order_book(tool, operation), signed=False, public=True)
+    return await _handle(request, lambda m, who, body: m.order_book(tool, operation), signed=False, public=True,
+                         limiter=_public_chain_threads)
 
 
 @router.get("/tool-market/gamma/balance")
 async def gamma_balance(request: Request, hotkey: str = "") -> Response:
     return await _handle(request, lambda m, who, body: m.gamma_balance(hotkey), signed=False, public=True,
-                         limiter=_balance_threads)
+                         limiter=_public_chain_threads)
 
 
 # -- calls: btauth/1 or a tab token ----------------------------------------------

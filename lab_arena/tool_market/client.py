@@ -76,7 +76,7 @@ class Client:
 
     def request(self, method: str, path: str, body: Optional[Dict[str, Any]] = None, *,
                 signed: bool = False, proof: bool = False) -> Dict[str, Any]:
-        """The gateway's JSON answer; an error answer comes back as ``{"error": ..., "status": ...}``.
+        """The gateway's JSON answer; an error answer carries ``error``, and ``status`` once the gateway was reached.
 
         ``signed``: btauth/1 by the hotkey. ``proof``: the lead-order scheme,
         which the terms need, since their signature is stored."""

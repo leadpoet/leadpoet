@@ -890,7 +890,7 @@ def run_experiment(
                 f"collection/{batch}/{run_id}/interruption.json",
                 judge._json(interruption).encode(),
             )
-            intake.complete(
+            saved_failure = intake.complete(
                 run_id,
                 job["lease_token"],
                 "failed",
@@ -898,6 +898,8 @@ def run_experiment(
                 interruption["sha256"] if generator_finished else None,
                 epoch(),
             )
+            if pool and on_pool_settled and saved_failure == {"status": "failed", "job_id": run_id}:
+                on_pool_settled("failed")
             raise RuntimeError(
                 "experiment interrupted: " + type(exc).__name__
             ) from None

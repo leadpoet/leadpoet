@@ -341,9 +341,10 @@ For a native paid call, generate a UUID for `request_id` before sending and
 persist it with the purchase. Reuse it for that logical purchase across
 tabs and fresh signatures. The gateway accepts one dispatch sequence per
 buyer and ID, claimed with its first reservation: a call refused before any
-key was reserved (no supply, a tab budget, busy) leaves the ID free. A
-duplicate receives HTTP 409 and the candidate call IDs for reconciliation
-against that buyer’s usage history. This mechanism
+key was reserved (no supply, a tab budget, busy) leaves the ID free. Once it
+is claimed, a duplicate that reaches a key receives HTTP 409, and any error
+of the claiming call carries `request_id_used: true`; both list the
+candidate call IDs for reconciliation against that buyer’s usage history. This mechanism
 does not store or replay vendor data. A fresh ID starts a separate purchase.
 
 ## Usage history

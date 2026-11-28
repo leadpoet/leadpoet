@@ -34,8 +34,8 @@ def _flag(params: dict, name: str) -> bool:
 
 
 def platform_request(alias: str, payload: Mapping[str, Any]) -> tuple:
-    if alias not in OPERATIONS:
-        raise CatalogError("operation_unknown")
+    """An alias in OPERATIONS and its payload as a catalog call, and the price key it is capped by."""
+
     tool, name = OPERATIONS[alias]
     params = dict(payload)
     price_key = alias

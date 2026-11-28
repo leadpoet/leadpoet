@@ -101,15 +101,16 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
         if tool not in TOOLS or not is_valid_hotkey(hotkey):
             raise ToolMarketConfigError("%s requires tool:hotkey pairs" % APPROVED_SUPPLIERS_ENV)
         approved.add((tool, hotkey))
-    verify_limit = env.get(VERIFY_MAX_ASK_ENV, "").strip()
-    if verify_limit and not (verify_limit.isascii() and verify_limit.isdigit() and len(verify_limit) <= 6
-                             and 0 < int(verify_limit) <= MAX_ASK[TOOLS["zerobounce"]]):
-        raise ToolMarketConfigError("%s must be a positive per-call ask within the catalog limit" % VERIFY_MAX_ASK_ENV)
     try:
         platform_limits = json.loads(env.get(PLATFORM_MAX_ASKS_ENV, "{}"))
     except (ValueError, RecursionError):
         raise ToolMarketConfigError(f"{PLATFORM_MAX_ASKS_ENV} must be a JSON object") from None
-    permitted = (set(platform.OPERATIONS) - {"zerobounce_validate"}) | {platform.SHORT_PROFILE, platform.EMAIL_PROFILE}
+    verify_limit = env.get(VERIFY_MAX_ASK_ENV, "").strip()
+    if verify_limit and isinstance(platform_limits, dict):  # ZeroBounce's ceiling has its own, older variable
+        if not (verify_limit.isascii() and verify_limit.isdigit() and len(verify_limit) <= 6):
+            raise ToolMarketConfigError("%s must be a positive per-call ask" % VERIFY_MAX_ASK_ENV)
+        platform_limits["zerobounce_validate"] = int(verify_limit)
+    permitted = set(platform.OPERATIONS) | {platform.SHORT_PROFILE, platform.EMAIL_PROFILE}
     if not isinstance(platform_limits, dict) or any(
         key not in permitted or type(limit) is not int or not 1 <= limit <= MAX_ASK["call"]
         for key, limit in platform_limits.items()
@@ -119,7 +120,7 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
     if env.get(NETUID_ENV, str(NETUID)).strip() != str(NETUID):
         raise ToolMarketConfigError("%s must be %d: the market counts only that subnet's Gamma" % (NETUID_ENV, NETUID))
     config = ToolMarketConfig(
-        platform_max_asks=dict(platform_limits, **({"zerobounce_validate": int(verify_limit)} if verify_limit else {})),
+        platform_max_asks=platform_limits,
         mode=mode, tools=tools, approved_suppliers=frozenset(approved), buyer_hotkeys=buyers, private_suppliers=private,
         gamma_service=env.get(GAMMA_SERVICE_ENV, "").strip(),
         terms_version=terms_version, terms_sha256=PUBLISHED_TERMS.get(terms_version, ""),

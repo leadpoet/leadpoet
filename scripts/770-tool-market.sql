@@ -587,12 +587,13 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
  SELECT jsonb_build_object('key_id',(SELECT c.key_id FROM public.tool_market_calls c
  JOIN public.tool_market_tabs t USING(tab_id) JOIN public.tool_market_call_settlements s USING(call_id)
  WHERE c.session_digest=p_digest AND t.hotkey=p_buyer AND s.status='settled'
-   AND s.http_status BETWEEN 200 AND 299 AND s.units>0 ORDER BY c.sequence LIMIT 1))
+   AND s.http_status BETWEEN 200 AND 299 AND s.units>0 ORDER BY s.settled_at,c.sequence LIMIT 1))
 $session770$;
 
 -- Hold one call's reserve against its tab, at the key's current ask.
 -- p_claim, a purchase's request_id digest, is spent only with the reserve it
--- is committed with, so a purchase refused before then can be retried.
+-- is committed with, so a purchase refused before then can be retried. Every
+-- claim is written under the buyer lock, so checking it first is exact.
 CREATE FUNCTION public.tool_market_reserve_call_v1(p_call_id UUID,p_token_hash TEXT,p_tool TEXT,p_operation TEXT,
  p_key_id UUID,p_ask BIGINT,p_owed_cap BIGINT,p_session TEXT DEFAULT NULL,p_first BOOLEAN DEFAULT true,
  p_claim TEXT DEFAULT NULL)
@@ -608,6 +609,10 @@ BEGIN
  PERFORM public.tool_market__lock_v1('buyer',tab.hotkey);
  IF NOT public.tool_market__tab_open_v1(tab) THEN
   RETURN jsonb_build_object('status','tab_closed');
+ END IF;
+ IF p_claim IS NOT NULL AND EXISTS(SELECT 1 FROM public.tool_market_nonces n
+   WHERE n.hotkey=tab.hotkey AND n.signature_hash=p_claim) THEN
+  RETURN jsonb_build_object('status','request_already_used');
  END IF;
  IF p_session IS NOT NULL THEN
   IF p_tool<>'harvestapi' OR p_operation<>'search_leads' OR p_session !~ '^[0-9a-f]{64}$' OR p_first IS NULL THEN
@@ -643,10 +648,9 @@ BEGIN
  IF g.day+p_owed_cap>k.daily_cap_microusd OR g.buyer_unknown+p_owed_cap>k.daily_cap_microusd/4 THEN
   RETURN jsonb_build_object('status','key_cap');
  END IF;
- IF p_claim IS NOT NULL THEN  -- under the buyer lock, so concurrent duplicates serialize here
+ IF p_claim IS NOT NULL THEN
   INSERT INTO public.tool_market_nonces(hotkey,signature_hash,signed_at)
-  VALUES(tab.hotkey,p_claim,extract(epoch FROM clock_timestamp())::BIGINT) ON CONFLICT DO NOTHING;
-  IF NOT FOUND THEN RETURN jsonb_build_object('status','request_already_used'); END IF;
+  VALUES(tab.hotkey,p_claim,extract(epoch FROM clock_timestamp())::BIGINT);
  END IF;
  INSERT INTO public.tool_market_calls(call_id,tab_id,tool,operation,key_id,ask_microusd,reserve_microusd,
   owed_cap_microusd,session_digest)

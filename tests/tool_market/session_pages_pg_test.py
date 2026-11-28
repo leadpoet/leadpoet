@@ -53,3 +53,25 @@ def test_page_one_fails_over_and_the_session_pins_to_the_key_that_served_it(worl
     world.vendor.script["session-limited"] = [ok({"status": 200, "elements": []})]
     page(2)
     assert [x[0] for x in world.vendor.sent] == ["session-limited", "session-serving", "session-serving"]
+
+
+def test_a_session_pins_to_the_key_that_first_served_it_not_the_first_reserved(world):
+    for secret, ask in (("pin-slow", 5000), ("pin-fast", 6000)):
+        miner, key = world.miner_key(secret, 10)
+        world.market.post_ask(world.who(miner), dict(key_id=key, operation="search_leads", ask_microusd=ask))
+    _, tab = world.buyer()
+    session = str(uuid4())
+    def page(n):
+        return world.market.call(tab, {"tool": "harvestapi", "operation": "search_leads",
+              "params": {"currentJobTitles": "Owner", "sessionId": session, "page": n}})
+    served = ok({"status": 200, "elements": []})
+    def slow_then_served():  # while the first page one waits on the slow key, a retry is served elsewhere
+        world.vendor.script["pin-slow"] = [ok({}, status=429)]
+        page(1)
+        world.vendor.script["pin-slow"] = [served]
+        return served
+    world.vendor.script["pin-slow"] = [slow_then_served]
+    world.vendor.script["pin-fast"] = [served]
+    page(1)
+    page(2)
+    assert [x[0] for x in world.vendor.sent] == ["pin-slow", "pin-slow", "pin-fast", "pin-fast"]

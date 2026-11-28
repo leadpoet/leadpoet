@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "dab4e6472919e169373d304a353c4633bfef9b70",
+  "baseline_commit": "039e5c4397199a5141b224744b299898de7454d2",
   "entries": [
     {
       "ast_sha256": "sha256:0322239466f9d95f17c77713b5ddd188d15318676bb4e0cbd6d2cacbd19c74ad",
@@ -522,7 +522,7 @@
       "symbol": "verify_roles"
     },
     {
-      "ast_sha256": "sha256:236468f37961e58ab7919b0090bfb9b15f0f3f17fe35955b05c73b4338b01753",
+      "ast_sha256": "sha256:450f56acfbe1f82dabe66b727b147e4f36dac8750811095d3b1b5fca48ae101e",
       "path": "lab_arena/collection_rewards.py",
       "symbol": "__module__"
     },
@@ -637,9 +637,14 @@
       "symbol": "ArenaService.public_reward_basis"
     },
     {
-      "ast_sha256": "sha256:680c00f5740bc6c40102de5e671b7a5c88f69804977e23cd568e9f3ec1680dba",
+      "ast_sha256": "sha256:66751e49045090eba15bddac87bee7078edde8d39aed7a5be32aed874711e1d7",
       "path": "lab_arena/service.py",
       "symbol": "ArenaService.public_weight_state"
+    },
+    {
+      "ast_sha256": "sha256:17be569f8e60a4fc97b50ac85e822d32196e38aed6e90b9faa5a36e40f7a43d5",
+      "path": "lab_arena/weight_state.py",
+      "symbol": "build_accepted_weight_state"
     },
     {
       "ast_sha256": "sha256:9f4961857836dc56672efa945601d67c8bf608bb49eb86f731048255dc1b3f5a",
@@ -647,19 +652,59 @@
       "symbol": "COLLECTION_BASIS_SCHEMA"
     },
     {
+      "ast_sha256": "sha256:96a72a9a2d996d71cb495da2ac3186df87f1edcdad8fcb95385613525710de63",
+      "path": "leadpoet_canonical/arena_weights.py",
+      "symbol": "TOOL_MARKET_SCHEMA"
+    },
+    {
+      "ast_sha256": "sha256:faee8d16fc40f2b6370e10f6b68c633a712b01ff8cbaa58a1af0aa9242c7e7e2",
+      "path": "leadpoet_canonical/arena_weights.py",
+      "symbol": "_OPTIONAL_BODY_FIELDS"
+    },
+    {
+      "ast_sha256": "sha256:33c5d605ccbcfa1a714b99a2e6a307c8dac1dc36b650267113423e7b697a6a82",
+      "path": "leadpoet_canonical/arena_weights.py",
+      "symbol": "_SLOT_FIELDS"
+    },
+    {
       "ast_sha256": "sha256:ddb8df46c33deff556f0a16e538c39ce0e7b73ef00329ea32f615bee57b28c76",
       "path": "leadpoet_canonical/arena_weights.py",
       "symbol": "_collection_basis"
     },
     {
-      "ast_sha256": "sha256:f8f2b3836a9b6a92e4d1002055157ee0e4681b79f01456c8a393a96cbc2a66d5",
+      "ast_sha256": "sha256:baf6210582fce8abd4e222d63d26b35405b65f3eff455bcfb0f1e42ae7be3889",
+      "path": "leadpoet_canonical/arena_weights.py",
+      "symbol": "_validate_emission_valuation"
+    },
+    {
+      "ast_sha256": "sha256:475bab36705af17ee13c43fbac854afee4d2b984f428bd460b8388e498aa98c2",
+      "path": "leadpoet_canonical/arena_weights.py",
+      "symbol": "accepted_weight_state_body"
+    },
+    {
+      "ast_sha256": "sha256:bed1443f690ebcd3064a14bf5e2ebf1e2d830ddd45cad084d98333fe67558612",
       "path": "leadpoet_canonical/arena_weights.py",
       "symbol": "derive_arena_weights"
     },
     {
-      "ast_sha256": "sha256:13a4c67616273a403884a3e5f5f611b767747387a6fa554507328caf307255e9",
+      "ast_sha256": "sha256:7e7f053f07b8d9658bf958fe768cb0f70b8b9e826c6fb9b6ce103f4d8d3fbdf3",
+      "path": "leadpoet_canonical/arena_weights.py",
+      "symbol": "validate_accepted_weight_state"
+    },
+    {
+      "ast_sha256": "sha256:ff34bb76442b052db750f8b6938d9621318ee0f8d209c61168945bad95646743",
       "path": "leadpoet_canonical/arena_weights.py",
       "symbol": "validate_collection_basis"
+    },
+    {
+      "ast_sha256": "sha256:1297c436f735fc71d0f96189596e00a23c9df8249f85e4088ec65f5aa28237cb",
+      "path": "leadpoet_canonical/arena_weights.py",
+      "symbol": "validate_tool_market"
+    },
+    {
+      "ast_sha256": "sha256:0a5fde28f4b3c63d9d9d0b557acc8de01227ed1cc3ca5121eff9eebfd23966ea",
+      "path": "leadpoet_canonical/arena_weights.py",
+      "symbol": "verify_accepted_weight_state_signature"
     },
     {
       "ast_sha256": "sha256:9b6065349bbca6a219f23da8083fb926105743d350b65cccef4fd0b000006c6b",
@@ -992,7 +1037,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:c40553766f1d577eea8bd9ee10d625a5b8fe23c288db13d12270e47f0b146f59",
-  "protected_source_commit": "dab4e6472919e169373d304a353c4633bfef9b70",
+  "manifest_hash": "sha256:de8820860b6df70d908c344dc5754e11cdf8da5f318845e5bda0c32f49ee7b2b",
+  "protected_source_commit": "039e5c4397199a5141b224744b299898de7454d2",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

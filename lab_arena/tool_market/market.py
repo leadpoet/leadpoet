@@ -287,9 +287,7 @@ class ToolMarket:
             raise ToolMarketError(413, "request_too_large")
         if body["attestation"] != ATTESTATION:
             raise ToolMarketError(400, "attestation_required", attestation=ATTESTATION)
-        tool = body["tool"]
-        if not isinstance(tool, str) or tool not in self._config.tools:
-            raise ToolMarketError(404, "tool_unavailable")
+        tool = self._enabled_tool(body["tool"])
         cap = _int(body["daily_cap_microusd"], 1, MAX_KEY_DAILY_CAP_MICROUSD, "daily_cap_invalid")
         try:
             registered = self._is_registered(identity.hotkey)
@@ -347,7 +345,7 @@ class ToolMarket:
         """
 
         key = self._own_key(identity, key_id)
-        self._require_enabled_tool(key["tool"])
+        self._enabled_tool(key["tool"])
         if vault_tools.TOOLS[key["tool"]].balance_url is None:
             raise ToolMarketError(409, "key_cannot_be_checked")
         with self._vendor_check(identity.hotkey, key["key_id"]):
@@ -374,7 +372,7 @@ class ToolMarket:
             raise ToolMarketError(400, "operation_required")
         ceiling = catalog.MAX_EXACT_ASK
         if ask is not None:
-            self._require_enabled_tool(key["tool"])
+            self._enabled_tool(tool)
             _int(ask, 1, ceiling, "ask_invalid", max_ask_microusd=ceiling)
             # Each operation's largest call owes something, so every call
             # reserves, and a key's cap holds 4 of them, so each buyer's
@@ -398,8 +396,7 @@ class ToolMarket:
         """Asks for one tool, cheapest first, with what a buyer pays per unit.
         A key with no room left today for any call is not listed."""
 
-        if tool not in self._config.tools:
-            raise ToolMarketError(404, "tool_unavailable")
+        self._enabled_tool(tool)
         if operation is not None and (tool, operation) not in catalog.OPERATIONS:
             raise ToolMarketError(404, "operation_unknown")
         scope = book.ask_scope(tool, operation)
@@ -441,7 +438,7 @@ class ToolMarket:
     # Calls ------------------------------------------------------------------
     def platform_call(self, token: str, alias: str, request: Mapping[str, Any], *, raw: bool = True,
                       arrived: Optional[float] = None) -> dict:
-        """Serve approved platform calls using the same private supply, reservations and settlement."""
+        """Serve platform calls that have a configured ceiling, using the same private supply, reservations and settlement."""
 
         if alias not in platform.OPERATIONS:
             raise ToolMarketError(404, "tool_unavailable")
@@ -491,9 +488,7 @@ class ToolMarket:
         private = body.get("private", False)
         if not isinstance(private, bool):
             raise ToolMarketError(400, "private_invalid")
-        tool = body["tool"]
-        if not isinstance(tool, str) or tool not in self._config.tools:
-            raise ToolMarketError(404, "tool_unavailable")
+        tool = self._enabled_tool(body["tool"])
         ceiling = catalog.MAX_EXACT_ASK
         # The most the buyer will let a key ask per unit; the book can move
         # between reading it and calling.
@@ -735,9 +730,10 @@ class ToolMarket:
         return {"call_id": call_id, "status": response.status, "body": document, "charge_microusd": charge}
 
     # Helpers ----------------------------------------------------------------
-    def _require_enabled_tool(self, tool: str) -> None:
-        if tool not in self._config.tools:
+    def _enabled_tool(self, tool: Any) -> str:
+        if not isinstance(tool, str) or tool not in self._config.tools:
             raise ToolMarketError(404, "tool_unavailable")
+        return tool
 
     def _asks(self, op: catalog.Operation, max_ask: int, private: bool, buyer: str, pinned: Optional[str]):
         """The book's asks, best first, that a reserve for this call could take

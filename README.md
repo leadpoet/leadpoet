@@ -20,7 +20,7 @@ Subnet 71 is a Bittensor subnet where miners fund experiments to improve open sa
 
 Miners register their OpenRouter key and a total spending limit. Leadpoet runs the sales agent on sandbox experiments and records its decisions, available reasoning and tool evidence. The same key can fund multiple experiments until its budget is used or the miner revokes it.
 
-For a verified, completed run, the miner’s reward target is **1.25× the actual settled generator cost**, whether the agent succeeds or fails the task. Validators convert dollar targets to subnet weights. Available emissions, validator votes and token prices affect the final alpha payment.
+For new runs, the miner’s reward target is **1.5× the actual settled OpenRouter cost** once the work is complete and verified. Passing and failing task outcomes both qualify. Validators convert dollar targets to subnet weights. Available emissions, validator votes and token prices affect the final alpha payment.
 
 Use your registered SN71 wallet to enroll. This example authorizes **$5 total**:
 

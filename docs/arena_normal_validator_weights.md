@@ -610,7 +610,7 @@ transactions are unchanged.
 
 ## Locked collection settlement
 
-A miner signs one spending limit for the sales sandbox. When a run completes and its trace and provider receipts verify, the ledger credits the funding hotkey with 1.25 times its settled, authorized generator charges. Both passing and failing task outcomes qualify. An unresolved receipt holds that job. [Funding and withdrawal](locked-collection.md#enrollment).
+A miner signs one spending limit for the sales sandbox. When a run completes and its trace and provider receipts verify, the ledger credits the funding hotkey at the rate set when the run was assigned. New standing assignments earn 1.5 times the settled, authorized generator charges. Earlier standing assignments retain their 1.25× rate. Both passing and failing task outcomes qualify. An unresolved receipt holds that job. [Funding and withdrawal](locked-collection.md#enrollment).
 
 The signed weight basis retains the name `leadpoet.collection.fixed_run_quotes.v1`. For standing grants, its dollar amounts come from settled receipts. Historical fixed-price jobs retain their signed fees.
 

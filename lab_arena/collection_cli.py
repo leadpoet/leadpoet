@@ -15,7 +15,7 @@ from lab_arena.collection_intake import (
     CORRECTION_SCOPE, MAX_DAILY_SLOTS, MAX_MICROUSD, MODELS, PAID_OFFER_ID, PAID_WORKFLOW_TERMS,
     PAID_WORKFLOW_TERMS_HASH, SCOPE, TASK_SCOPE, TERMS, TERMS_HASH, scope_id,
 )
-from lab_arena.collection_pool import POOL_SCOPE, POOL_TERMS, POOL_TERMS_HASH
+from lab_arena.collection_pool import POOL_SCOPE, POOL_TERMS_BY_RATE
 from lab_arena.credentials import OPENROUTER_FUNDING_FIELDS
 from lab_arena.miner_submit import (
     MinerSubmissionError,
@@ -169,7 +169,11 @@ def run(args, wallet, *, session=requests):
                 ) != MAX_DAILY_SLOTS:
                     raise MinerSubmissionError("collection_slot_opt_in_unavailable")
                 if standing:
-                    expected, text = POOL_TERMS_HASH, POOL_TERMS
+                    for rate, (text, expected) in POOL_TERMS_BY_RATE.items():
+                        if published.get("reward_multiplier") == f"{rate / 10000:.2f}":
+                            break
+                    else:
+                        raise MinerSubmissionError("collection_terms_changed")
                 elif published.get("task_scope") == POOL_SCOPE:
                     raise MinerSubmissionError("collection_standing_consent_required")
                 elif args.mode == "live" and task_scope == TASK_SCOPE and "offer_id" in published:

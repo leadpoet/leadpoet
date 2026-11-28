@@ -153,8 +153,9 @@ and [signed requests](https://www.bittensor.com/docs/guides/signed-requests) gui
   payment with `btauth/1` and the balance url, the catalog as pricing, and
   the terms.
 - `GET /tool-market/openapi.json` is built from the catalog, so each
-  parameter's type and bounds in the spec are the ones `/call` checks; an
-  operation's cross-field rules are in its description.
+  parameter's type and bounds in the spec are the ones `/call` checks.
+  `/call` also applies an operation's cross-field rules and a GET request's
+  encoded length limit (`400 param_invalid`).
 - Credit is read at a finalized block: `GammaSpent` for the buyer at the
   service hotkey. Credit is bound to one chain, netuid, service hotkey and
   subnet registration block (`NetworkRegisteredAt`). If the subnet is
@@ -323,7 +324,9 @@ All amounts are integer micro-USD.
   - A call cut off before it settles, by a restart, counts as unknown
     usage, since it may have reached the vendor. Restarts that cut calls
     can shut a buyer out of a key for a day, or out of a tool for an hour.
-    Give the gateway a stop grace above 45 s so a restart drains calls.
+    A call tries another key only in its first 30 s, so it ends within
+    120 s; give the gateway a stop grace above that so a restart drains
+    calls. The CLI waits 150 s, and a lost answer reads `outcome_unknown`.
   - A request that may have reached the vendor is never retried on another
     key, so it cannot be used twice.
   - A buyer shapes some of these, such as an answer too large to return.

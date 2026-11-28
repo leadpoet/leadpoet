@@ -1107,3 +1107,15 @@ def test_a_tab_whose_opening_answer_is_lost_still_hands_over_its_token(world, mo
     assert world.market.tab(token)["open"] is True
     world.market.close_tab(token)
     assert world.market.tab(token)["open"] is False
+
+
+def test_a_call_tries_another_key_only_early_in_the_call(world, monkeypatch):
+    world.miner_key("late-cheap", 9_000)
+    world.miner_key("late-pricier", 10_000)
+    world.vendor.script["late-cheap"] = [ok({}, status=429)]
+    _, token = world.buyer()
+    monkeypatch.setattr(market_module, "FAILOVER_SECONDS", -1.0)  # past it once the first key answered
+    with pytest.raises(ToolMarketError) as late:
+        world.market.call(token, PROFILE)
+    assert (late.value.status, late.value.code) == (503, "no_supply")
+    assert [sent[0] for sent in world.vendor.sent] == ["late-cheap"]

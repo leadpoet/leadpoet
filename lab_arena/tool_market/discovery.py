@@ -4,8 +4,9 @@
 (the Gamma service hotkey), the OpenAPI spec, how to pay (Gamma, btauth/1)
 and where the balance and prices are. ``openapi`` is built from the catalog,
 so each parameter's type and bounds in the spec are the ones ``/call``
-checks (an operation's cross-field rules are in its description). Prices move with the book, so they are read live from
-``/tool-market/catalog``.
+checks; /call also applies an operation's cross-field rules and a GET
+request's encoded length limit. Prices
+move with the book, so they are read live from ``/tool-market/catalog``.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from typing import Any, Dict
 
 from lab_arena.tool_market import catalog
 from lab_arena.tool_market.config import NETUID, TERMS_URL, ToolMarketConfig
+
 
 def services_document(config: ToolMarketConfig) -> Dict[str, Any]:
     base = config.public_base_url
@@ -41,7 +43,9 @@ def _operation_schema(op: catalog.Operation) -> Dict[str, Any]:
             "properties": {"tool": {"enum": [op.tool]}, "operation": {"enum": [op.name]},
                            "params": {"type": "object", "properties": params, "required": required,
                                       "additionalProperties": False},
-                           "max_ask_microusd": {"type": "integer", "description": "Skip keys asking more per unit."},
+                           "max_ask_microusd": {"type": "integer", "minimum": 1,
+                                                "maximum": catalog.MAX_ASK[catalog.TOOLS[op.tool]],
+                                                "description": "Skip keys asking more per unit."},
                            "private": {"type": "boolean",
                                        "description": "Only suppliers that keep the request private."}}}
 
@@ -69,8 +73,13 @@ def openapi(config: ToolMarketConfig) -> Dict[str, Any]:
                     "oneOf": [_operation_schema(op) for op in operations]}}}},
                 "responses": {
                     "200": {"description": "The vendor's answer: call_id, status, body and charge_microusd."},
-                    "402": dict(error, description="insufficient_balance: spend more Gamma; nothing was charged."),
-                    "401": dict(error, description="A btauth/1 problem, named by the error code."),
+                    "400": dict(error, description="The request does not fit the operation (param_invalid "
+                                                   "also covers its cross-field rules and a GET request's "
+                                                   "encoded length)."),
+                    "402": dict(error, description="insufficient_balance: spend more Gamma; tab_budget: the "
+                                                   "API key's budget is spent. Nothing was charged."),
+                    "401": dict(error, description="A btauth/1 problem, or tab_unknown or tab_closed, named by "
+                                                   "the error code."),
                     "429": dict(error, description="Too many calls in flight or uncertain for this hotkey."),
                     "503": dict(error, description="No key can serve the call now (no_supply), or the chain "
                                                    "or store is down or busy; retry later. One with a call_id may "

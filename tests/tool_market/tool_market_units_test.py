@@ -165,7 +165,7 @@ def test_the_spec_bounds_each_parameter_as_call_does():
 def _sample(param, high=False):
     count = param.high if high else param.low
     return {"str": "https://www.linkedin.com/in/someone", "int": count, "bool": True,
-            "str_list": ["a"] * max(count, 1), "enum": param.choices[-1 if high else 0] if param.choices else None}[param.kind]
+            "str_list": ["a"] * count, "enum": param.choices[-1 if high else 0] if param.choices else None}[param.kind]
 
 
 def test_config_is_off_by_default_and_strict_when_live():

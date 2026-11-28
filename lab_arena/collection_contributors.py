@@ -35,6 +35,8 @@ def _confirmed_payment(path: Path, epoch: int) -> _Payment:
     for hotkey, quote in receipt["quotes_microusd"].items():
         amount = receipt["amounts"][hotkey]
         paid = amount["actual_rao"]
+        if hotkey in receipt.get("supplier_targets_microusd", {}) and paid is None:
+            continue  # Combined UID earnings cannot be reported as lab income.
         if (hotkey == receipt["burn_hotkey"] or amount["quoted_microusd"] != quote
                 or type(paid) is not int or paid < 0
                 or receipt["miner_emissions_rao"].get(hotkey, 0) != paid):

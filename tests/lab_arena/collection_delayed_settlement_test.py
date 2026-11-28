@@ -128,6 +128,17 @@ def payout(monkeypatch):
     )
 
 
+def test_shared_hotkey_does_not_attribute_combined_alpha_to_lab(payout):
+    check, _, _, _ = payout
+    source = settlement.ArenaStore(None).get_weight_state("finney", 71, 11)["state_doc"]
+    source["tool_market"] = {"allocations_microusd": {"miner": 250}}
+    receipt = check()
+    assert receipt["result"] == "collection_recipients_observed"
+    assert receipt["miner_emissions_rao"]["miner"] == 4
+    assert receipt["amounts"]["miner"]["actual_rao"] is None
+    assert receipt["amounts"]["miner"]["actual_microusd_at_signed_price"] is None
+
+
 def test_proves_delayed_payment_without_changing_the_original_receipts(payout):
     check, paid, _, _ = payout
     result = check()

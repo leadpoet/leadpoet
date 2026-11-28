@@ -118,17 +118,26 @@ def receipt_at(graph, rpc, db, signer, cutover, boundary, epoch, validators):
     every_vector_matches = all(v == "matches" for side in checks.values() for v in side.values())
     recipients_match = (bool(actual) and not ambiguous and set(actual) == set(target) and set(quotes) <= set(actual)
                         and not any(other_mechanisms.values()) and expected["champion_share_ppb"] == 0)
-    if not quotes:
+    supplier_targets = state.get("tool_market", {}).get("allocations_microusd", {})
+    if supplier_targets:
+        recipients_match = recipients_match and supplier_targets.keys() <= actual.keys()
+    elif not quotes:
         recipients_match = (recipients_match and actual.keys() == {burn} and target == {burn: 65535}
                             and basis["job_count"] == 0 and basis["job_set_sha256"] == sha256(b"").hexdigest())
     result = "inspect"
     if every_vector_matches and recipients_match:
-        result = "collection_recipients_observed" if quotes else "burn_only"
+        if quotes:
+            result = "collection_recipients_observed"
+        elif supplier_targets:
+            result = "supplier_recipients_observed"
+        else:
+            result = "burn_only"
     # Include the raw totals even if a UID cannot be attributed to a hotkey.
     return {"epoch": epoch, "boundary": boundary, "parent_hash": parent_hash, "block_hash": block_hash,
             "total_miner_rao": sum(amounts), "ambiguous_recipient_uids": ambiguous,
             "state_hash": state["state_hash"], "closed_at": closed.observed_at, "event_index": event_index,
             "job_count": basis["job_count"], "job_set_sha256": basis["job_set_sha256"], "quotes_microusd": quotes,
+            **({"supplier_targets_microusd": supplier_targets} if supplier_targets else {}),
             "burn_hotkey": burn, "expected_weights_u16": target, "validators": checks,
             "miner_emissions_rao": actual, "other_mechanism_miner_rao": other_mechanisms, "result": result}
 

@@ -226,6 +226,15 @@ def test_signed_student_pass_failure_import_and_bulk_correction(
             and rows[1]["first_failed_check"]
         )
         assert rows[1]["state_history"]["states"] and rows[0]["model"] == v3.STUDENT
+        from scripts import freeze_sales_sandbox as freeze
+        prepared = list(freeze.signed_students([bundle], h, b, pub))
+        facts = [freeze.observation(r, 256, node=True) for r, _ in prepared]
+        assert len({o.run for o in facts}) == 2
+        assert {o.passed for o in facts} == {False, True}
+        assert {o.collection for o in facts} == {"C3"}
+        assert all(o.origin == "verified_node" and o.role == "student" for o in facts)
+        with pytest.raises(ValueError, match="duplicate node repetition"):
+            list(freeze.signed_students([bundle, bundle], h, b, pub))
     target = tmp_path / "offers"
     args = SimpleNamespace(
         collection="C4",
@@ -454,6 +463,11 @@ def test_verified_followups_recover_after_interruption_and_map_only_exports(
         )
     )
     assert len(restored) == 7 and not any(r["repeat"] == 2 for r in restored)
+    from scripts import freeze_sales_sandbox as freeze
+    targets = list(freeze.signed_restatements([bundle], producer, key.public_key(), lambda _: teacher))
+    assert len(targets) == 7 and all(len(r["label_turns"]) == 1 for r in targets)
+    assert all(r["messages"][:-1] == teacher["messages"][:r["message_index"]] for r in targets)
+    assert all(r["messages"][-1] == r["student_action"] for r in targets)
     signed_index(dict(list(records.items())[:-1]))
     with pytest.raises(ValueError, match="incomplete eight-draw"):
         list(

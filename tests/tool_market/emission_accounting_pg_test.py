@@ -153,7 +153,11 @@ def test_accepted_targets_carry_shortfall_and_late_usage_without_double_allocati
 
     with ThreadPoolExecutor(2) as pool:
         assert sorted(pool.map(other_epoch, competing)) == ["accepted", "refused"]
-    assert store.emission_statement(miner)["scheduled_microusd"] == 30_000
+    statement = w.market.statement(miner)
+    assert statement["emission"] == store.emission_statement(miner)
+    assert statement["emission"]["scheduled_microusd"] == 30_000
+    assert statement["emission"]["realized_alpha_rao"] is None
+    assert statement["keys"][0]["owed_microusd"] == 30_000
     with pg.connect(**dsn) as conn, conn.cursor() as q:
         q.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         doc = signed(e + 4, 1000)

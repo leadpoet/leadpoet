@@ -77,6 +77,23 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
   'unscheduled_microusd',accrued.amount-scheduled.amount,'realized_alpha_rao',NULL) FROM accrued,scheduled
 $f$;
 
+-- Extend the signed GET /statement RPC in place so its owner and grants stay
+-- intact. Original 770 installations expose their original statement until 771.
+DO $statement$
+DECLARE
+ d text:=pg_get_functiondef('public.tool_market_statement_v1(text)'::regprocedure);
+ old_projection constant text:=$old$SELECT jsonb_build_object('keys',coalesce(jsonb_agg$old$;
+ new_projection constant text:=$new$SELECT jsonb_build_object('emission',public.tool_market_emission_statement_v1(p_hotkey),
+  'keys',coalesce(jsonb_agg$new$;
+BEGIN
+ IF position(new_projection IN d)>0 THEN RETURN; END IF;
+ IF (length(d)-length(replace(d,old_projection,'')))<>length(old_projection) THEN
+  RAISE EXCEPTION 'unexpected 770 supplier statement; cannot install emissions projection';
+ END IF;
+ EXECUTE replace(d,old_projection,new_projection);
+END
+$statement$;
+
 CREATE OR REPLACE FUNCTION public.tool_market_guard_epoch_v1() RETURNS trigger LANGUAGE plpgsql
 SECURITY DEFINER SET search_path=pg_catalog,public AS $f$
 DECLARE overlay jsonb:=NEW.state_doc->'tool_market'; amounts jsonb:=overlay->'allocations_microusd';

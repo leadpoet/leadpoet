@@ -67,7 +67,7 @@ CREATE TABLE public.tool_market_terms (
   terms_version TEXT NOT NULL CHECK(terms_version ~ '^[A-Za-z0-9._-]{1,32}$'),
   host TEXT NOT NULL CHECK(length(host) BETWEEN 1 AND 253),
   signed_at BIGINT NOT NULL,
-  signed_body TEXT NOT NULL CHECK(length(signed_body) BETWEEN 2 AND 8192),
+  signed_body TEXT NOT NULL CHECK(length(signed_body) BETWEEN 2 AND 512),
   signature TEXT NOT NULL CHECK(length(signature) BETWEEN 128 AND 130),
   accepted_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY(role,hotkey,terms_sha256)

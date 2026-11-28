@@ -792,6 +792,11 @@ def test_a_terms_acceptance_keeps_the_body_as_signed(world, admin):
     signed_body, signature, host, signed_at = admin.fetchone()
     assert signed_body == sent.decode()  # the exact bytes, so the signature can be checked again
     assert (signature, host, signed_at) == ("ab" * 64, "gw.example", 1)
+    padded = hotkey()  # any fresh hotkey may send one, so it stays small
+    body = {"role": "buyer", "terms_version": "v1", "terms_sha256": world.terms}
+    with pytest.raises(ToolMarketError) as large:
+        world.market.accept_terms(world.who(padded), body, json.dumps(body).encode() + b" " * 600)
+    assert large.value.status == 413
 
 
 def test_a_buyer_has_a_few_calls_in_flight_at_most(world):
@@ -970,42 +975,45 @@ def test_concurrent_signed_calls_each_hold_only_their_keys_need(world):
     assert inner[0]["charge_microusd"] == 11_000
 
 
-def test_public_balance_reads_past_their_limit_answer_at_once_and_leave_paid_reads_free(world):
-    attacker, buyer = hotkey(), hotkey()
+def test_fresh_hotkeys_cannot_hold_the_chain_reads_credited_buyers_top_up_with(world):
+    attackers, buyer = [hotkey() for _ in range(market_module.CHAIN_READS + 1)], hotkey()
+    for attacker in attackers:  # unfunded: terms cost them nothing
+        world.accept(attacker, "buyer")
+    world.gamma.units[buyer] = 1_000 * 1000
+    world.market.gamma_balance(buyer)  # stored credit, short of the tab below
     world.gamma.units[buyer] = 10**9
     world.accept(buyer, "buyer")
-    read, held, release = world.gamma.read, [], threading.Event()
+    read, held, refused, release = world.gamma.read, [], [], threading.Event()
 
     def slow(hk, head=None):
-        if hk == attacker:
+        if hk in attackers:
             held.append(hk)
             release.wait(10)
         return read(hk, head)
 
-    world.gamma.read = slow
-    answers = []
-
-    def public_read():
+    def open_unfunded(hk):
         try:
-            answers.append(world.market.gamma_balance(attacker))
+            world.market.open_tab(world.who(hk), {"budget_microusd": 1_000, "seconds": 600})
         except ToolMarketError as error:
-            answers.append(error.code)
+            if hk not in held:
+                refused.append(error.code)
 
-    readers = [threading.Thread(target=public_read) for _ in range(market_module.CHAIN_READS + 1)]
-    for reader in readers:
-        reader.start()
+    world.gamma.read = slow
+    threads = [threading.Thread(target=open_unfunded, args=(hk,)) for hk in attackers]
+    for thread in threads:
+        thread.start()
     try:
-        for _ in range(500):  # every reader is held on the chain or has been refused
-            if len(held) + len(answers) == len(readers):
+        for _ in range(500):  # each is held on the chain or refused at once
+            if len(held) + len(refused) == len(attackers):
                 break
             time.sleep(0.01)
-        assert answers == ["gamma_unavailable"] * (len(readers) - len(held))
-        # The public reads hold the chain; a buyer's first tab still reads its Gamma.
-        assert world.market.open_tab(world.who(buyer), {"budget_microusd": 1_000, "seconds": 600})["status"] == "opened"
+        assert refused == ["gamma_unavailable"] * (len(attackers) - len(held))
+        # They hold the uncredited slot; a credited buyer still reads its new Gamma.
+        assert world.market.open_tab(world.who(buyer), {"budget_microusd": 5_000, "seconds": 600})["status"] == "opened"
     finally:
         release.set()
-        for reader in readers:
-            reader.join()
+        for thread in threads:
+            thread.join()
 
 
 def test_a_signed_call_the_stored_balance_covers_reads_no_chain(world):

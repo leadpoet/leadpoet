@@ -299,6 +299,8 @@ _HARVEST_LEAD_LIMITS = {
 
 
 def _lead_search_query(values: Dict[str, Any]) -> Dict[str, Any]:
+    if values.get("page", 1) > 1 and "sessionId" not in values:
+        raise CatalogError("session_required")
     if not any(name in values for name in _HARVEST_LEAD_LIMITS):
         raise CatalogError("param_missing")
     for name, limit in _HARVEST_LEAD_LIMITS.items():
@@ -392,9 +394,9 @@ _OPERATIONS: Sequence[Operation] = (
               does="Read a LinkedIn profile with the vendor's email discovery and SMTP checks."),
     Operation("harvestapi", "search_leads", "GET", _HARVEST + "/linkedin/lead-search", UNIT_CALL, 1,
               {**{key: Param("str", max_length=2000) for key in _HARVEST_LEAD_LIMITS},
-               "recentlyChangedJobs": Param("bool"), "page": Param("int", high=1)},
+               "recentlyChangedJobs": Param("bool"), "sessionId": Param("str", max_length=200), "page": Param("int", high=100)},
               wrap=_lead_search_query, cost=_harvest_page_cost, timeout_seconds=90.0,
-              does="Search one standalone Sales Navigator lead page by company, role or location."),
+              does="Search a Sales Navigator lead page by company, role or location."),
     Operation("harvestapi", "linkedin_company", "GET", _HARVEST + "/linkedin/company", UNIT_CALL, 1,
               {"url": _HARVEST_URL}, cost=_harvest_cost, does="Read a LinkedIn company page."),
 )

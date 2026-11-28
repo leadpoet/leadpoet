@@ -144,6 +144,7 @@ CREATE TABLE public.tool_market_tab_closures (
 CREATE TABLE public.tool_market_calls (
   call_id UUID PRIMARY KEY,
   sequence BIGSERIAL NOT NULL UNIQUE,
+  session_digest TEXT CHECK(session_digest IS NULL OR (session_digest ~ '^[0-9a-f]{64}$' AND tool='harvestapi' AND operation='search_leads')),
   tab_id UUID NOT NULL REFERENCES public.tool_market_tabs(tab_id),
   tool TEXT NOT NULL,
   operation TEXT NOT NULL CHECK(operation ~ '^[a-z_]{1,40}$'),
@@ -154,6 +155,7 @@ CREATE TABLE public.tool_market_calls (
   owed_cap_microusd BIGINT NOT NULL CHECK(owed_cap_microusd>=0),
   opened_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
+CREATE INDEX tool_market_calls_session ON public.tool_market_calls(session_digest,sequence) WHERE session_digest IS NOT NULL;
 CREATE INDEX tool_market_calls_tab ON public.tool_market_calls(tab_id,sequence);
 CREATE INDEX tool_market_calls_tab_tool ON public.tool_market_calls(tab_id,tool,opened_at);
 CREATE INDEX tool_market_calls_key ON public.tool_market_calls(key_id,opened_at);
@@ -577,11 +579,20 @@ $book770$;
 -- Calls
 -- ---------------------------------------------------------------------------
 
+-- A vendor's pagination session belongs to the account that served the first page.
+-- Tabs rotate; the authenticated buyer is the stable owner of the request.
+CREATE FUNCTION public.tool_market_session_key_v1(p_buyer TEXT,p_digest TEXT)
+RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $session770$
+ SELECT jsonb_build_object('key_id',(SELECT c.key_id FROM public.tool_market_calls c
+ JOIN public.tool_market_tabs t USING(tab_id)
+ WHERE c.session_digest=p_digest AND t.hotkey=p_buyer ORDER BY c.sequence LIMIT 1))
+$session770$;
+
 -- Hold one call's reserve against its tab, at the key's current ask.
 CREATE FUNCTION public.tool_market_reserve_call_v1(p_call_id UUID,p_token_hash TEXT,p_tool TEXT,p_operation TEXT,
- p_key_id UUID,p_ask BIGINT,p_owed_cap BIGINT)
+ p_key_id UUID,p_ask BIGINT,p_owed_cap BIGINT,p_session TEXT DEFAULT NULL,p_first BOOLEAN DEFAULT true)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $reserve770$
-DECLARE tab public.tool_market_tabs; k public.tool_market_keys; current_ask BIGINT; g RECORD;
+DECLARE tab public.tool_market_tabs; k public.tool_market_keys; current_ask BIGINT; session_key UUID; g RECORD;
  reserve BIGINT:=p_owed_cap+(p_owed_cap+9)/10;  -- the fee on the most the call can owe
 BEGIN
  SELECT * INTO tab FROM public.tool_market_tabs WHERE token_hash=p_token_hash;
@@ -592,6 +603,19 @@ BEGIN
  PERFORM public.tool_market__lock_v1('buyer',tab.hotkey);
  IF NOT public.tool_market__tab_open_v1(tab) THEN
   RETURN jsonb_build_object('status','tab_closed');
+ END IF;
+ -- The existing buyer lock makes concurrent first-page reservations agree.
+ IF p_session IS NOT NULL THEN
+  IF p_tool<>'harvestapi' OR p_operation<>'search_leads' OR p_session !~ '^[0-9a-f]{64}$' OR p_first IS NULL THEN
+   RAISE EXCEPTION 'invalid supplier session';
+  END IF;
+  SELECT (public.tool_market_session_key_v1(tab.hotkey,p_session)->>'key_id')::uuid INTO session_key;
+  IF session_key IS NOT NULL AND session_key<>p_key_id THEN RETURN jsonb_build_object('status','session_key_changed'); END IF;
+  IF NOT p_first AND NOT EXISTS (SELECT 1 FROM public.tool_market_calls c JOIN public.tool_market_tabs t USING(tab_id)
+    JOIN public.tool_market_call_settlements s USING(call_id) WHERE c.session_digest=p_session AND t.hotkey=tab.hotkey
+    AND c.key_id=session_key AND s.status='settled' AND s.http_status BETWEEN 200 AND 299 AND s.units>0) THEN
+   RETURN jsonb_build_object('status','session_page_one_required');
+  END IF;
  END IF;
  -- Key rows never change, so this read needs no key lock.
  SELECT * INTO k FROM public.tool_market_keys WHERE key_id=p_key_id AND tool=p_tool;
@@ -620,8 +644,8 @@ BEGIN
   RETURN jsonb_build_object('status','key_cap');
  END IF;
  INSERT INTO public.tool_market_calls(call_id,tab_id,tool,operation,key_id,ask_microusd,reserve_microusd,
-  owed_cap_microusd)
- VALUES(p_call_id,tab.tab_id,p_tool,p_operation,p_key_id,p_ask,reserve,p_owed_cap);
+  owed_cap_microusd,session_digest)
+ VALUES(p_call_id,tab.tab_id,p_tool,p_operation,p_key_id,p_ask,reserve,p_owed_cap,p_session);
  RETURN jsonb_build_object('status','reserved');
 END;
 $reserve770$;

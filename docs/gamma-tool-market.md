@@ -325,6 +325,14 @@ the request.
 - This lowers the risk; it does not remove it. The vendor still holds the
   data.
 
+For Harvest lead search, use a new `sessionId` on page one and send the same
+ID on subsequent pages. The existing reservation ledger binds it to the buyer
+and one supplier account. A later page needs a settled successful first page
+and that same account still eligible at the buyer's ceiling. Gamma will refuse
+if the session cannot continue. Harvest controls its own scraping resources
+within that account and can itself fall back; these checks cannot guarantee
+an unchanged LinkedIn result set.
+
 ## Retrying after a lost HTTP response
 
 For a native paid call, generate a UUID for `request_id` before sending and

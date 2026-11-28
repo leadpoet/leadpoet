@@ -21,6 +21,7 @@ import secrets
 import threading
 import time
 import uuid
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -519,7 +520,8 @@ class ToolMarket:
                                         seconds=CALL_TAB_SECONDS, terms_sha256=None)
 
         with self._slot(hotkey, MAX_CALLS_IN_FLIGHT_PER_BUYER, "too_many_calls_in_flight"):
-            asks = list(self._asks(tool, op, max_ask, private, hotkey))[:MAX_ASKS_PER_CALL]
+            _, _, _, pinned = self._session(hotkey, op, url)
+            asks = list(self._asks(tool, op, max_ask, private, hotkey, pinned))[:MAX_ASKS_PER_CALL]
             if not asks:
                 raise ToolMarketError(503, "no_supply")
             needs = [book.charge_microusd(owed_cap) for _, owed_cap in asks]
@@ -563,6 +565,22 @@ class ToolMarket:
                 if left:
                     self._in_flight[name] = left
 
+    def _session(self, hotkey: str, op: catalog.Operation, url: str):
+        """Keep pagination on its upstream account and namespace the vendor token by buyer."""
+        if (op.tool, op.name) != ("harvestapi", "search_leads"):
+            return url, None, True, None
+        parts = urlsplit(url)
+        params = dict(parse_qsl(parts.query))
+        if "sessionId" not in params:
+            return url, None, True, None
+        digest = hashlib.sha256((hotkey + ":" + params["sessionId"]).encode()).hexdigest()
+        params["sessionId"] = digest[:32]
+        first = int(params.get("page", "1")) == 1
+        pinned = self._store.session_key(hotkey, digest)
+        if not first and pinned is None:
+            raise ToolMarketError(409, "session_page_one_required")
+        return urlunsplit(parts._replace(query=urlencode(params))), digest, first, pinned
+
     def _buy(self, tool: str, op: catalog.Operation, max_ask: int, private: bool, tab: str, hotkey: str,
              url: str, headers: Mapping[str, str], payload: bytes,
              asks: Optional[List[Tuple[book.Ask, int]]] = None, request_id: Optional[str] = None) -> Dict[str, Any]:
@@ -588,16 +606,19 @@ class ToolMarket:
                 raise ToolMarketError(409, "request_already_used", request_id=request_id,
                                       possible_call_ids=[str(uuid.uuid5(purchase, str(i))) for i in
                                                          range(1, MAX_ASKS_PER_CALL + 1)])
+        url, session, first, pinned = self._session(hotkey, op, url)
         tried = attempts = 0
         short = False
-        for ask, owed_cap in self._asks(tool, op, max_ask, private, hotkey) if asks is None else asks:
+        for ask, owed_cap in self._asks(tool, op, max_ask, private, hotkey, pinned) if asks is None else asks:
             if tried >= MAX_KEYS_PER_CALL or attempts >= MAX_ASKS_PER_CALL:
                 break
             attempts += 1
             call_id = str(uuid.uuid5(purchase, str(attempts))) if purchase else self._new_id()
             status = self._store.reserve_call(
                 call_id=call_id, token_hash=tab, tool=tool, operation=op.name, key_id=ask.key_id,
-                ask_microusd=ask.ask_microusd, owed_cap_microusd=owed_cap)
+                ask_microusd=ask.ask_microusd, owed_cap_microusd=owed_cap, session=session, first_page=first)
+            if status == "session_page_one_required":
+                raise ToolMarketError(409, status)
             if status == "tab_closed":
                 raise ToolMarketError(401, "tab_closed")
             if status == "tab_budget":
@@ -669,11 +690,13 @@ class ToolMarket:
         if not self._config.may_supply(tool, hotkey):
             raise ToolMarketError(403, "supplier_not_approved")
 
-    def _asks(self, tool: str, op: catalog.Operation, max_ask: int, private: bool, buyer: str):
+    def _asks(self, tool: str, op: catalog.Operation, max_ask: int, private: bool, buyer: str, pinned: Optional[str] = None):
         """The book's asks, best first, that a reserve for this call could take
         (never the buyer's own keys), each with the most the call could owe on it."""
 
         for ask in self._supply(tool, op.name):
+            if pinned is not None and ask.key_id != pinned:
+                continue
             owed_cap = book.owed_microusd(op, op.max_units, ask.ask_microusd)
             if ask.ask_microusd <= max_ask and (not private or self._private(tool, ask)) \
                     and owed_cap <= ask.remaining_microusd and ask.miner_hotkey != buyer:

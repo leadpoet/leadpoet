@@ -55,7 +55,6 @@ def test_standalone_people_search_preserves_filters_and_requests_one_page():
 @pytest.mark.parametrize(
     "extra",
     [
-        {"sessionId": "session"},
         {"page": 2},
         {"salesNavUrl": "search"},
         {"requiredAccountId": "id"},

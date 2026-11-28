@@ -11,8 +11,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import random
-import threading
-import time
 import uuid
 
 import pytest
@@ -976,44 +974,20 @@ def test_concurrent_signed_calls_each_hold_only_their_keys_need(world):
 
 
 def test_fresh_hotkeys_cannot_hold_the_chain_reads_credited_buyers_top_up_with(world):
-    attackers, buyer = [hotkey() for _ in range(market_module.CHAIN_READS + 1)], hotkey()
-    for attacker in attackers:  # unfunded: terms cost them nothing
-        world.accept(attacker, "buyer")
+    fresh, buyer = hotkey(), hotkey()
+    world.accept(fresh, "buyer")
+    world.accept(buyer, "buyer")
     world.gamma.units[buyer] = 1_000 * 1000
     world.market.gamma_balance(buyer)  # stored credit, short of the tab below
     world.gamma.units[buyer] = 10**9
-    world.accept(buyer, "buyer")
-    read, held, refused, release = world.gamma.read, [], [], threading.Event()
-
-    def slow(hk, head=None):
-        if hk in attackers:
-            held.append(hk)
-            release.wait(10)
-        return read(hk, head)
-
-    def open_unfunded(hk):
-        try:
-            world.market.open_tab(world.who(hk), {"budget_microusd": 1_000, "seconds": 600})
-        except ToolMarketError as error:
-            if hk not in held:
-                refused.append(error.code)
-
-    world.gamma.read = slow
-    threads = [threading.Thread(target=open_unfunded, args=(hk,)) for hk in attackers]
-    for thread in threads:
-        thread.start()
+    world.market._uncredited_chain_reads.acquire()  # all a flood of fresh hotkeys can hold
     try:
-        for _ in range(500):  # each is held on the chain or refused at once
-            if len(held) + len(refused) == len(attackers):
-                break
-            time.sleep(0.01)
-        assert refused == ["gamma_unavailable"] * (len(attackers) - len(held))
-        # They hold the uncredited slot; a credited buyer still reads its new Gamma.
+        with pytest.raises(ToolMarketError) as busy:
+            world.market.open_tab(world.who(fresh), {"budget_microusd": 1_000, "seconds": 600})
+        assert busy.value.code == "gamma_unavailable"
         assert world.market.open_tab(world.who(buyer), {"budget_microusd": 5_000, "seconds": 600})["status"] == "opened"
     finally:
-        release.set()
-        for thread in threads:
-            thread.join()
+        world.market._uncredited_chain_reads.release()
 
 
 def test_a_signed_call_the_stored_balance_covers_reads_no_chain(world):

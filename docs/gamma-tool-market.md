@@ -199,7 +199,7 @@ same vendors. Each one bills per request or reports its own cost.
 | [Prospeo](https://prospeo.io/api-docs) | per credit; no match is free | `enrich_person` | yes: account information |
 | [Findymail](https://app.findymail.com/docs) | per credit; no email found is free | `find_from_linkedin`, `find_from_name` | yes: credits |
 | [Hunter](https://hunter.io/api-documentation/v2) | per search; no email found is free | `email_finder` | yes: account (key only, no balance) |
-| [HarvestAPI](https://docs.harvestapi.io/) | per call | `linkedin_profile`, `linkedin_company` | no |
+| [HarvestAPI](https://docs.harvestapi.io/) | per call | `linkedin_profile`, `linkedin_company` (tool-wide ask); jobs, posts, `linkedin_profile_email` and `search_leads` by per-operation ask | no |
 | [Exa](https://docs.exa.ai/reference/search) | vendor USD (`costDollars.total`) | `search`, `contents` | no |
 
 ## Using the existing Lead Search client
@@ -498,7 +498,8 @@ deployment, exactly as lead orders do.
   can keep every call at `503 no_supply` (nothing is charged). Limit the
   vault port to the gateway's egress, leaving only `/v1/identity` public.
 - **HarvestAPI prices are unconfirmed.** Its per-endpoint prices are not
-  published, so launch keeps only its two profile reads.
+  published, so a tool-wide ask covers only the profile and company reads;
+  every other SKU is priced by its own operation ask.
 - **No vault receipts for miners.** Calls do not yet keep the vault's
   signed receipts, so miners cannot check Leadpoet's reports against the
   vault. Lead orders keep them; this lane can add them the same way.

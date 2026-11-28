@@ -364,7 +364,7 @@ class ToolMarket:
         name = body.get("operation")
         if "operation" in body and (not isinstance(name, str) or (tool, name) not in catalog.OPERATIONS):
             raise ToolMarketError(400, "operation_unknown")
-        scope = [name] if name is not None else book.GENERAL_ASK_OPERATIONS.get(tool, ())
+        scope = book.ask_scope(tool, name)
         if not scope:
             raise ToolMarketError(400, "operation_required")
         ceiling = catalog.MAX_ASK[catalog.TOOLS[tool]]
@@ -397,7 +397,7 @@ class ToolMarket:
             raise ToolMarketError(404, "tool_unavailable")
         if operation is not None and (tool, operation) not in catalog.OPERATIONS:
             raise ToolMarketError(404, "operation_unknown")
-        scope = (operation,) if operation is not None else book.GENERAL_ASK_OPERATIONS.get(tool, ())
+        scope = book.ask_scope(tool, operation)
         ops = [catalog.OPERATIONS[tool, name] for name in scope]
         asks = [a for a in self._supply(tool, operation)
                 if any(book.owed_microusd(op, op.max_units, a.ask_microusd) <= a.remaining_microusd for op in ops)]
@@ -456,7 +456,8 @@ class ToolMarket:
                                    "private": True, "max_ask_microusd": ceiling}, arrived=arrived)
         status, body = result["status"], result["body"]
         op = catalog.operation(tool, name)
-        answered = 200 <= op.status(status, body) < 300 and op.units(status, body) is not None
+        real = op.status(status, body)
+        answered = 200 <= real < 300 and op.units(real, body) is not None
         verdict = "completed" if answered else "failed"
         # Prospeo documents this exact 400 as a free, valid miss.
         if alias == "prospeo_enrich_person" and status == 400 and isinstance(body, dict) and body.get("error_code") == "NO_MATCH":

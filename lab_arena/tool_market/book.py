@@ -8,7 +8,7 @@ asked at $0.01 the buyer pays $0.011 and the miner is owed $0.01.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List, Mapping
+from typing import Iterable, List, Mapping, Optional, Tuple
 
 from lab_arena.tool_market.catalog import Operation
 
@@ -22,6 +22,12 @@ GENERAL_ASK_OPERATIONS = {
     "exa": ("search", "contents"),
     "harvestapi": ("linkedin_profile", "linkedin_company"),
 }
+
+
+def ask_scope(tool: str, operation: Optional[str]) -> Tuple[str, ...]:
+    """The operations an ask covers: its own operation, else the tool-wide set."""
+
+    return (operation,) if operation is not None else GENERAL_ASK_OPERATIONS.get(tool, ())
 
 
 def owed_microusd(operation: Operation, units: int, ask_microusd: int) -> int:

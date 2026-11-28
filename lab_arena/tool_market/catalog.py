@@ -289,8 +289,9 @@ def _harvest_page_cost(document: Any) -> Optional[int]:
     return 1
 
 
-# One independent lead-search page. Use the subset of vendor filters used by
-# Lead Search. Session-bound paging is a separate marketplace capability.
+# One lead-search page, with the subset of vendor filters Lead Search uses.
+# A page after the first needs the sessionId that ToolMarket._session pins
+# to the key that served page one.
 _HARVEST_LEAD_LIMITS = {
     "currentCompanies": 50, "currentJobTitles": 70, "excludeCurrentJobTitles": 70,
     "locations": 70, "lastNames": 70, "pastCompanies": 50, "schools": 50,
@@ -384,8 +385,8 @@ _OPERATIONS: Sequence[Operation] = (
       for name, path, description in (
           ("post_reactions", "post-reactions", "Read one page of reactions to a LinkedIn post."),
           ("post_comments", "post-comments", "Read one page of comments on a LinkedIn post."))),
-    # HarvestAPI: per-request credits. Its prices are not published per
-    # endpoint, so launch keeps the two profile reads only.
+    # HarvestAPI: per-request credits. A tool-wide ask covers only the profile
+    # and company reads (book.GENERAL_ASK_OPERATIONS); every other SKU needs its own ask.
     Operation("harvestapi", "linkedin_profile", "GET", _HARVEST + "/linkedin/profile", UNIT_CALL, 1,
               {"url": _HARVEST_URL, "main": Param("enum", choices=("true",))}, cost=_harvest_cost, does="Read a LinkedIn profile: name, headline, current jobs."),
     Operation("harvestapi", "linkedin_profile_email", "GET", _HARVEST + "/linkedin/profile", UNIT_CALL, 1,

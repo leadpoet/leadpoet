@@ -115,15 +115,17 @@ def test_an_unreachable_gateway_fails_the_call_not_the_mcp_server(monkeypatch):
     assert [(r["id"], r["result"]["isError"]) for r in replies] == [(1, True), (2, True)]
 
 
-def test_a_connection_dropped_after_the_request_reads_outcome_unknown():
+@pytest.mark.parametrize("sent", [b"", b"HTTP/1.1 503 Busy\r\nContent-Length: 99\r\n\r\n{\"call_"])
+def test_a_connection_dropped_after_the_request_reads_outcome_unknown(sent):
     import socket
     import threading
 
     server = socket.create_server(("127.0.0.1", 0))
 
-    def read_then_drop():  # a gateway that dies mid-call
+    def read_then_drop():  # a gateway that dies mid-call, before or while answering
         conn, _ = server.accept()
         conn.recv(65536)
+        conn.sendall(sent)
         conn.close()
 
     threading.Thread(target=read_then_drop, daemon=True).start()

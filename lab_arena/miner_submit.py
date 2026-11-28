@@ -132,6 +132,15 @@ def submission_credentials_from_environment(
     return validate_submission_credentials(credentials)
 
 
+def read_masked_credential(prompt: str, getpass_fn: Callable[[str], str] | None = None) -> str:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", getpass.GetPassWarning)
+            return (getpass_fn or getpass.getpass)(prompt)
+    except (getpass.GetPassWarning, EOFError) as exc:
+        raise MinerSubmissionError("credential_prompt_unavailable") from exc
+
+
 def prompt_submission_credentials(
     *,
     environ: Mapping[str, str] | None = None,
@@ -152,12 +161,7 @@ def prompt_submission_credentials(
         if value:
             credentials[name] = value
             continue
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("error", getpass.GetPassWarning)
-                prompted = getpass_fn(prompts[name])
-        except (getpass.GetPassWarning, EOFError) as exc:
-            raise MinerSubmissionError("credential_prompt_unavailable") from exc
+        prompted = read_masked_credential(prompts[name], getpass_fn)
         if name in OPTIONAL_SUBMISSION_CREDENTIAL_ENV_VARS and prompted == "":
             continue
         credentials[name] = prompted

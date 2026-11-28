@@ -182,7 +182,7 @@ class ArenaWeightSigner:
                 commitment=commitment, reveal_round=int(reveal_round),
             )
             preimage, signed_message = encode_weight_signature_payload(
-                profile=profile, call_bytes=call,
+                profile={**profile, "extrinsic_period": era_period}, call_bytes=call,
                 era_current=era_current, nonce=finalized_nonce,
                 block_hash=mortality_hash,
             )
@@ -269,6 +269,7 @@ class ArenaWeightSigner:
                 "commitment": bytes(commitment), "reveal_round": int(reveal_round),
                 "subnet_epoch_index": int(epoch_authority["subnet_epoch_index"]),
                 "nonce": int(finalized_nonce), "minimum_block": era_current,
+                "valid_until_block": int(state["valid_until_block"]),
                 "maximum_block": min(int(state["valid_until_block"]), int(death) - 1),
                 "reveal_deadline_block": recovery_body["reveal_deadline_block"],
             }
@@ -319,7 +320,7 @@ class ArenaWeightSigner:
             )
             call = bytes.fromhex(str(recovery["call_data_hex"]))
             preimage, signed_message = encode_weight_signature_payload(
-                profile=profile, call_bytes=call,
+                profile={**profile, "extrinsic_period": authorization["era_period"]}, call_bytes=call,
                 era_current=int(authorization["era_current"]), nonce=int(authorization["nonce"]),
                 block_hash=str(authorization["block_hash"]),
             )
@@ -362,6 +363,7 @@ class ArenaWeightSigner:
                 "reveal_round": int(authorization["reveal_round"]),
                 "subnet_epoch_index": int(recovery["subnet_epoch_index"]),
                 "nonce": int(authorization["nonce"]),
+                "valid_until_block": int(request["accepted_state"]["valid_until_block"]),
                 "minimum_block": int(recovery["minimum_block"]),
                 "maximum_block": int(recovery["maximum_block"]),
                 "reveal_deadline_block": int(recovery["reveal_deadline_block"]),
@@ -393,7 +395,7 @@ class ArenaWeightSigner:
                 minimum_block=record["minimum_block"], maximum_block=record["maximum_block"],
             )
         except Exception as scan_error:
-            from lab_arena.chain_source import ValidatorChainSourceV2Error
+            from lab_arena.chain_source import FinalizedExtrinsicAbsent, ValidatorChainSourceV2Error
             if not isinstance(scan_error, ValidatorChainSourceV2Error):
                 raise
             if str(scan_error) == "authorized extrinsic range is not finalized":
@@ -412,6 +414,31 @@ class ArenaWeightSigner:
                     "finalized": False, "state_hash": result["state_hash"],
                     "extrinsic_hash": result["extrinsic_hash"], "finalized_head": head,
                 }
+            expired = {
+                "schema_version": "leadpoet.arena.chain_outcome.v1",
+                "status": "not_included_expired", "finalized": False,
+                "state_hash": result["state_hash"], "extrinsic_hash": result["extrinsic_hash"],
+                "finalized_head": head, "attempt_sequence": result["attempt_sequence"],
+            }
+            if int(head["block"]) > record["valid_until_block"]:
+                if (not isinstance(scan_error, FinalizedExtrinsicAbsent)
+                        or scan_error.first_block != record["minimum_block"]
+                        or scan_error.last_block != record["maximum_block"]):
+                    raise ArenaWeightSignerError("closed Arena era lacks a complete absence proof") from scan_error
+                nonce = self._chain_source.read_finalized_account_nonce(
+                    account_public_key_hex=self.hotkey_public_key_hex,
+                    finalized_block_hash=scan_error.last_block_hash,
+                    archive=True,
+                )
+                if nonce != record["nonce"]:
+                    raise ArenaWeightSignerError("closed Arena era has an ambiguous terminal nonce") from scan_error
+                # A later transaction can advance the nonce after this era. This
+                # receipt closes the journal and does not release the signing record.
+                expired["expiry_proof"] = {
+                    "first_block": scan_error.first_block, "last_block": scan_error.last_block,
+                    "last_block_hash": scan_error.last_block_hash, "nonce": nonce,
+                }
+                return expired
             nonce = self._chain_source.read_finalized_account_nonce(
                 account_public_key_hex=self.hotkey_public_key_hex,
                 finalized_block_hash=head["block_hash"],
@@ -425,13 +452,8 @@ class ArenaWeightSigner:
                 if (active is not None and active["result"]["extrinsic_hash"]
                         == result["extrinsic_hash"]):
                     self._records.pop(result["state_hash"], None)
-            return {
-                "schema_version": "leadpoet.arena.chain_outcome.v1",
-                "status": "not_included_expired", "finalized": False,
-                "state_hash": result["state_hash"], "extrinsic_hash": result["extrinsic_hash"],
-                "finalized_head": head, "finalized_nonce": nonce,
-                "attempt_sequence": result["attempt_sequence"],
-            }
+            expired["finalized_nonce"] = nonce
+            return expired
         expected_weights = list(zip(result["sparse_uids"], result["sparse_weights_u16"]))
         reveal = self._chain_source.prove_timelocked_reveal_transition(
             netuid=int(result["netuid"]), validator_hotkey=self.validator_hotkey,

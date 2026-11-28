@@ -12,6 +12,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
+from lab_arena.collection_pool import POOL_SCOPE, POOL_PAYMENT_RULE, POOL_TERMS, POOL_TERMS_HASH
 from lab_arena import contracts, store
 from lab_arena.credentials import OPENROUTER_FUNDING_FIELDS
 
@@ -45,23 +46,63 @@ GENERATOR_ROUTES = {
 MODELS = tuple(GENERATOR_ROUTES)
 PROVIDERS = ("openrouter",)
 TASK_SCOPE = "synthetic_workflows"
-SYNTHETIC_SCENARIO = re.compile(r"(?:C[0-9]{2}|K[0-9]{2}|B[1-8]|E[1-7]|P[1-6])-s[1-9][0-9]{0,7}")
+SYNTHETIC_SCENARIO = re.compile(
+    r"(?:C[0-9]{2}|K[0-9]{2}|B[1-8]|E[1-7]|P[1-7])-s[1-9][0-9]{0,7}"
+)
 SCOPE = {
     op: "lab_arena.collection." + op + ".v1"
     for op in ("register", "revoke", "statement")
 }
-TERMS = (
-    "I authorize Leadpoet to spend on my OpenRouter key for centrally assigned simulated sales workflows "
-    "within the rolling 24-hour limit I sign below. I will keep input/output logging, product-use sharing "
-    "and external trace broadcast disabled for this key. The scenarios use invented data and local tools. "
-    "My enrollment does not authorize live web research, third-party enrichment or Deepline charges. "
-    "Leadpoet funds verification and ranking. The read-only management key is used only to verify the runtime key. "
-    "Revocation stops new calls. Already dispatched calls can still be billed. I will keep private run data confidential. "
-    "Pilot jobs incur real provider charges and earn no on-chain reward. Authentic completed live jobs earn the "
-    "assigned fixed run quote under the epoch settlement rules; spending more does not increase "
-    "the quote. If total quotes exceed available epoch emissions, payouts scale proportionally. Unpaid amounts do not carry forward."
+CORRECTION_SCOPE = "synthetic_corrections"
+# Keep historical consent identifiable without upgrading its permissions.
+LEGACY_COMPARISON_TERMS_HASH = "sha256:df00d01897792eca6eb2aa88eab4a16dcba253ef3c8998581a124dead92686ca"
+LEGACY_CORRECTION_TERMS_HASHES = {
+    "pilot": "sha256:41588b51710c8218e5dce56ef12386709e4ebd2409ca76fe4427251425cc6119",
+    "live": "sha256:88d5b6886024e7aa5960c3d76586e2831d96650c071a348b145d19a7e155ba6c",
+}
+
+PILOT_AND_PANEL_PAY = (
+    "Pilot work pays no emissions. In live mode an authentic completed assignment earns its approved "
+    "fixed quote, regardless of spend or model performance. "
 )
-TERMS_HASH = contracts.hash_bytes(TERMS.encode())
+VERIFIED_WORKFLOW_PAY = (
+    "I earn the published fixed quote for a completed assignment under the offer I sign if its sales "
+    "task passes the native checks and Leadpoet verifies the complete authorized trace, original "
+    "reasoning and settled provider charges. Failed, partial and unverifiable work earns no quote. "
+    "The price is set in advance at 1.25 times the measured reference cost for that model and task. "
+)
+PAID_OFFER_ID = re.compile(r"dv-[0-9a-f]{64}")
+VERIFIED_PRICE_SCHEMA = "leadpoet.collection.verified_p7_prices.v1"
+VERIFIED_TASK_PRICE_SCHEMA = "leadpoet.collection.verified_task_prices.v1"
+PAID_TASK_FAMILIES = {"verified_p7_v1": "P", "verified_sales_evidence_v1": "P8"}
+
+SYNTHETIC_TRAINING_TERMS = (
+    "I authorize Leadpoet to charge my dedicated OpenRouter key up to my signed rolling 24-hour limit "
+    "for the synthetic sales tasks, scope and payment mode in this enrollment. The subnet assigns the "
+    "agent and model. Tasks may include model comparisons, repeat runs or continuations from a saved state. "
+    "Failed and partial attempts can incur charges. " + PILOT_AND_PANEL_PAY +
+    "If quotes exceed the epoch's available emissions, each quote is scaled proportionally. Unpaid "
+    "differences do not carry forward. Leadpoet pays for private verification. "
+    "Leadpoet may record messages, original reasoning exposed by the provider, tools, results, evidence, "
+    "task states, costs, checks and outcomes from successful, failed and partial runs. I assign to Leadpoet "
+    "any rights I hold in those outputs. Where assignment is unavailable, I grant Leadpoet a perpetual, "
+    "worldwide, royalty-free, transferable and sublicensable license to store, evaluate, train on, publish "
+    "and license them, including as complete trajectories or chosen/rejected pairs. Other rights holders' "
+    "licenses and privacy protections still apply. I will keep private run data confidential, keep no "
+    "copies beyond my funding statements, and disable input/output logging, sharing and external trace "
+    "broadcast on the enrolled key. The management key is used only to verify the runtime key. I may "
+    "revoke access at any time. Revocation blocks new calls. Already dispatched calls may still be billed. "
+    "This authorization covers only synthetic tasks using OpenRouter and local tools. Live research, hosted "
+    "search and Deepline charges require separate authorization. Changing mode or scope requires a new signature."
+)
+PAID_WORKFLOW_TERMS = SYNTHETIC_TRAINING_TERMS.replace(PILOT_AND_PANEL_PAY, VERIFIED_WORKFLOW_PAY)
+PAID_WORKFLOW_TERMS_HASH = contracts.hash_bytes(PAID_WORKFLOW_TERMS.encode())
+SYNTHETIC_TRAINING_TERMS_HASH = contracts.hash_bytes(SYNTHETIC_TRAINING_TERMS.encode())
+# These public names are used by existing miners and configuration tooling.
+TERMS = CORRECTION_TERMS = LIVE_CORRECTION_TERMS = SYNTHETIC_TRAINING_TERMS
+TERMS_HASH = SYNTHETIC_TRAINING_TERMS_HASH
+
+
 LABEL = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 SHA = re.compile(r"sha256:[0-9a-f]{64}")
 MAX_MICROUSD = 10_000_000_000
@@ -128,19 +169,145 @@ def mode_from_environment():
     return mode
 
 
-def terms(mode):
+def correction_terms_hash(mode="pilot"):
+    if mode not in ("pilot", "live"):
+        raise IntakeError("collection_scope_unavailable", 422)
+    setting = "LAB_ARENA_CORRECTION_TERMS_SHA256" if mode == "pilot" else "LAB_ARENA_LIVE_CORRECTION_TERMS_SHA256"
+    digest = SYNTHETIC_TRAINING_TERMS_HASH
+    if os.getenv(setting, digest) != digest:
+        raise IntakeError("collection_correction_terms_unavailable", 503)
+    return digest
+
+
+def require_correction_grant(mode, digest):
+    """Keep signed legacy work valid within its original mode and task scope."""
+    current = correction_terms_hash(mode)
+    if digest not in (current, LEGACY_CORRECTION_TERMS_HASHES[mode]):
+        raise IntakeError("collection_correction_terms_changed")
+    return digest
+
+
+def terms(mode, task_scope=TASK_SCOPE):
+    if mode == "live" and task_scope == POOL_SCOPE:
+        return {"mode": mode, "task_scope": task_scope, "terms": POOL_TERMS, "terms_sha256": POOL_TERMS_HASH,
+                "network": "finney", "netuid": 71, "cap_type": "lifetime", "reward_multiplier": "1.25"}
+    if task_scope not in (TASK_SCOPE, CORRECTION_SCOPE) or mode not in ("pilot", "live"):
+        raise IntakeError("collection_scope_unavailable", 422)
+    if task_scope == CORRECTION_SCOPE:
+        correction_terms_hash(mode)
     return {
         "mode": mode,
-        "task_scope": TASK_SCOPE,
-        "terms": TERMS,
-        "terms_sha256": TERMS_HASH,
+        "task_scope": task_scope,
+        "max_selectable_slots_per_utc_day": MAX_DAILY_SLOTS,
+        "terms": SYNTHETIC_TRAINING_TERMS,
+        "terms_sha256": SYNTHETIC_TRAINING_TERMS_HASH,
         "network": "finney",
         "netuid": 71,
     }
 
 
+def comparison_offer(transport, offer_id=None):
+    """Expose only the public offer and its prices from the immutable schedule."""
+    try:
+        if offer_id is not None and (not isinstance(offer_id, str) or not PAID_OFFER_ID.fullmatch(offer_id)):
+            raise IntakeError("collection_offer_unknown", 404)
+        if offer_id is None:
+            schedule = transport.rpc("collection_reward_schedule_v1", {})
+            if (schedule.get("pilot_evidence", {}).get("schema") == VERIFIED_PRICE_SCHEMA
+                    and not schedule.get("staged")):
+                schedule = transport.rpc("collection_offer_schedule_v1", {"p_offer": None})
+        else:
+            schedule = transport.rpc("collection_offer_schedule_v1", {"p_offer": offer_id})
+            if schedule.get("pilot_evidence", {}).get("live_batch_id") != offer_id:
+                raise IntakeError("collection_offer_unknown", 404)
+        if schedule == {}:
+            return {"fixed_quotes": []}
+        evidence = schedule["pilot_evidence"]
+        prices, budgets = evidence["prices"], evidence["budgets"]
+        if not isinstance(prices, dict) or not isinstance(budgets, dict) or not prices:
+            raise ValueError("invalid price schedule")
+        quotes = []
+        offer = {"fixed_quotes": quotes}
+        if evidence.get("schema") in (VERIFIED_PRICE_SCHEMA, VERIFIED_TASK_PRICE_SCHEMA):
+            family = PAID_TASK_FAMILIES[evidence["payment_rule"]] if evidence.get("schema") == VERIFIED_TASK_PRICE_SCHEMA else "P"
+            offer_id = evidence["live_batch_id"]
+            if (not isinstance(offer_id, str) or not PAID_OFFER_ID.fullmatch(offer_id)
+                    or set(prices) != {family} or set(budgets) != {family}
+                    or not prices[family] or set(prices[family]) != set(budgets[family])
+                    or not set(prices[family]).issubset(MODELS)):
+                raise ValueError("invalid priced workflow offer")
+            offer.update(offer_id=offer_id, terms=PAID_WORKFLOW_TERMS, terms_sha256=PAID_WORKFLOW_TERMS_HASH)
+            if evidence.get("schema") == VERIFIED_TASK_PRICE_SCHEMA:
+                offer["reference_runs"] = evidence["job_count"]
+                if "historical_realization" in evidence:
+                    offer["historical_realization"] = evidence["historical_realization"]
+            if schedule.get("available_offers"):
+                offer["available_offers"] = schedule["available_offers"]
+        for family in ("B", "C", "E", "K", "P", "P8"):
+            if family not in prices:
+                continue
+            for model in MODELS:
+                if "offer_id" in offer and model not in prices[family]:
+                    continue
+                quotes.append({
+                    "task_class": family,
+                    "model": model,
+                    "quote_microusd": _micros(prices[family][model], 1),
+                    "cap_microusd": _micros(budgets[family][model], 1),
+                })
+        return offer
+    except IntakeError:
+        raise
+    except (KeyError, TypeError, ValueError, store.ArenaStoreError) as exc:
+        raise IntakeError("collection_comparison_prices_unavailable", 503) from exc
+
+
+def approved_comparison_quotes(transport):
+    return comparison_offer(transport)["fixed_quotes"]
+
+
+def open_correction_quotes(transport):
+    register_signatures()
+    try:
+        quotes = transport.rpc("collection_open_correction_quotes_v1", {})
+    except store.ArenaStoreError as exc:
+        raise IntakeError("collection_compensated_corrections_unavailable", 503) from exc
+    if not isinstance(quotes, list):
+        raise IntakeError("collection_compensated_corrections_unavailable", 503)
+    return quotes
+
+
 def scope_id(mode):
     return f"finney:71:locked-collection:{mode}"
+
+
+MAX_DAILY_SLOTS = 6
+REGISTRATION_FIELDS = {"credentials_sha256", "terms_sha256", "daily_cap_microusd", "task_scope"}
+
+
+def signed_daily_slots(body):
+    if set(body) - {"offer_id", "max_slots_per_utc_day"} != REGISTRATION_FIELDS:
+        raise IntakeError("collection_consent_invalid")
+    if body["terms_sha256"] == PAID_WORKFLOW_TERMS_HASH:
+        if (body["task_scope"] != TASK_SCOPE or not isinstance(body.get("offer_id"), str)
+                or not PAID_OFFER_ID.fullmatch(body["offer_id"])):
+            raise IntakeError("collection_consent_invalid")
+    elif "offer_id" in body:
+        raise IntakeError("collection_consent_invalid")
+    slots = body.get("max_slots_per_utc_day", 1)
+    if type(slots) is not int or not 1 <= slots <= MAX_DAILY_SLOTS:
+        raise IntakeError("collection_consent_invalid")
+    if "max_slots_per_utc_day" in body and body["terms_sha256"] not in (SYNTHETIC_TRAINING_TERMS_HASH, PAID_WORKFLOW_TERMS_HASH):
+        raise IntakeError("collection_consent_invalid")
+    return slots
+
+
+def standing_limit(body):
+    if (set(body) != {"credentials_sha256", "terms_sha256", "task_scope", "spend_limit_microusd", "priority"}
+            or body["task_scope"] != POOL_SCOPE or body["terms_sha256"] != POOL_TERMS_HASH
+            or type(body["priority"]) is not int or body["priority"] not in (0, 1)):
+        raise IntakeError("collection_consent_invalid")
+    return _micros(body["spend_limit_microusd"], 1)
 
 
 def _micros(value, minimum):
@@ -160,6 +327,16 @@ def _uuid(value):
 
 
 def register_signatures():
+    store.FUNCTION_SIGNATURES.setdefault(
+        "collection_priced_claim_v1",
+        tuple(("p_" + name, kind) for name, kind in _SIGNATURES["claim"]) + (("p_expected_model", "text"),),
+    )
+    store.FUNCTION_SIGNATURES.setdefault("collection_interrupted_pilot_judges_v1", (("p_batch", "text"),))
+    store.FUNCTION_SIGNATURES.setdefault("collection_training_consents_v1", (("p_batch", "text"),))
+    store.FUNCTION_SIGNATURES.setdefault("collection_open_correction_quotes_v1", ())
+    store.FUNCTION_SIGNATURES.setdefault("collection_correction_tariff_v1", (("p_batch", "text"),))
+    store.FUNCTION_SIGNATURES.setdefault("collection_experiment_costs_v1", (("p_batch", "text"),))
+    store.FUNCTION_SIGNATURES.setdefault("collection_correction_measurement_v1", (("p_batch", "text"),))
     store.FUNCTION_SIGNATURES.setdefault(
         "collection_reward_statement_v1", (("p_hotkey", "text"),)
     )
@@ -191,13 +368,23 @@ class CollectionIntake:
             raise IntakeError(result["error"], 409)
         return result
 
-    def register(self, signed, owner, credentials):
+    def register(self, signed, owner, credentials, *, published=None):
         """Caller authenticates the scoped signed envelope. Only that envelope is retained."""
         body, hk = signed["body"], signed["hotkey"]
+        if body.get("task_scope") == POOL_SCOPE:
+            if self.mode != "live":
+                raise IntakeError("collection_consent_invalid")
+            cap = standing_limit(body)
+        else:
+            signed_daily_slots(body)
+            cap = _micros(body["daily_cap_microusd"], 1)
+        if published is None:
+            published = terms(self.mode, body["task_scope"])
+            if self.mode == "live" and body["task_scope"] == TASK_SCOPE and "offer_id" in body:
+                published.update(comparison_offer(self.transport, body["offer_id"]))
         if (
-            set(body) != {"credentials_sha256", "terms_sha256", "daily_cap_microusd", "task_scope"}
-            or body["task_scope"] != TASK_SCOPE
-            or body["terms_sha256"] != TERMS_HASH
+            body["terms_sha256"] != published["terms_sha256"]
+            or body.get("offer_id") != published.get("offer_id")
             or signed["round_id"] != scope_id(self.mode)
             or not isinstance(credentials, dict)
             or set(credentials) != set(OPENROUTER_FUNDING_FIELDS)
@@ -205,7 +392,15 @@ class CollectionIntake:
             or body["credentials_sha256"] != contracts.document_hash(credentials)
         ):
             raise IntakeError("collection_consent_invalid")
-        cap = _micros(body["daily_cap_microusd"], 1)
+        if self.mode == "live":
+            if body["task_scope"] == CORRECTION_SCOPE:
+                quotes = published.get("fixed_quotes")
+                if "fixed_quotes" not in published:
+                    quotes = open_correction_quotes(self.transport)
+                if not quotes:
+                    raise IntakeError("collection_compensated_corrections_unavailable", 503)
+            elif "fixed_quotes" in published and not published["fixed_quotes"]:
+                raise IntakeError("collection_comparison_prices_unavailable", 503)
         registration = str(uuid.UUID(hex=signed["request_id"]))
         prefix = "collection:" + registration
         encrypted = self.credential_manager.validate_openrouter_funding(
@@ -249,11 +444,19 @@ class CollectionIntake:
         prices_microusd,
         budgets_microusd,
         *,
+        terms_hash=TERMS_HASH,
+        expected_model="*",
         job_id=None,
         lease_token=None,
     ):
         if not isinstance(batch_id, str) or not LABEL.fullmatch(batch_id):
             raise IntakeError("collection_batch_invalid")
+        paid_offer = bool(PAID_OFFER_ID.fullmatch(batch_id))
+        if paid_offer:
+            if self.mode != "live" or terms_hash != PAID_WORKFLOW_TERMS_HASH:
+                raise IntakeError("collection_terms_changed")
+        elif terms_hash not in (LEGACY_COMPARISON_TERMS_HASH, SYNTHETIC_TRAINING_TERMS_HASH):
+            raise IntakeError("collection_terms_changed")
         if not isinstance(harness_commit, str) or not re.fullmatch(
             r"[0-9a-f]{40}", harness_commit
         ):
@@ -268,13 +471,20 @@ class CollectionIntake:
             or len(set(scenario_ids)) != len(scenario_ids)
         ):
             raise IntakeError("collection_scenarios_invalid")
-        if not all(SYNTHETIC_SCENARIO.fullmatch(s) for s in scenario_ids):
+        if not all(SYNTHETIC_SCENARIO.fullmatch(s) or (paid_offer and re.fullmatch(r"P8-s[1-9][0-9]{0,7}", s)) for s in scenario_ids):
             raise IntakeError("collection_synthetic_scope_required")
+        roster = MODELS
+        if paid_offer:
+            if len({s.split("-", 1)[0] for s in scenario_ids}) != 1 or not scenario_ids[0].startswith(("P7-", "P8-")):
+                raise IntakeError("collection_scenarios_invalid")
+            if not isinstance(prices_microusd, Mapping) or not prices_microusd:
+                raise IntakeError("collection_price_coverage_invalid")
+            roster = tuple(model for model in MODELS if model in prices_microusd)
         for values, minimum in (
             (prices_microusd, 1 if self.mode == "live" else 0),
             (budgets_microusd, 1),
         ):
-            if not isinstance(values, Mapping) or set(values) != set(MODELS):
+            if not isinstance(values, Mapping) or set(values) != set(roster):
                 raise IntakeError("collection_price_coverage_invalid")
             for amount in values.values():
                 _micros(amount, minimum)
@@ -283,20 +493,59 @@ class CollectionIntake:
         token = lease_token if lease_token is not None else store.new_lease_token()
         if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{64}", token):
             raise IntakeError("collection_lease_invalid")
-        job = self._rpc(
-            "claim",
+        return self._lease(token, expected_model,
             job=_uuid(job_id) if job_id else str(uuid.uuid4()),
             token_hash=store.hash_lease_token(token),
             batch=batch_id,
             mode=self.mode,
             commit=harness_commit,
             scenarios=list(scenario_ids),
-            models=list(MODELS),
+            models=list(roster),
             prices=dict(prices_microusd),
             budgets=dict(budgets_microusd),
-            terms_hash=TERMS_HASH,
+            terms_hash=terms_hash,
         )
+
+    def _lease(self, token, expected_model, **arguments):
+        if expected_model == "*":
+            job = self._rpc("claim", **arguments)
+        else:
+            job = self._rpc("priced_claim", expected_model=expected_model, **arguments)
+            if expected_model is None:
+                return job
         return dict(job, lease_token=token) if job else None
+
+    def claim_experiment(self, experiment, harness_commit, *, fixed_quote=0, expected_model="*"):
+        """Claim exactly one frozen slot under its own mode and signed consent."""
+        if self.mode != experiment.raw["mode"] or not re.fullmatch(r"xp-[0-9a-f]{64}", experiment.batch_id):
+            raise IntakeError("collection_correction_pilot_required")
+        terms_hash = require_correction_grant(self.mode, experiment.raw["terms_sha256"])
+        _micros(fixed_quote, 0 if self.mode == "pilot" else 1)
+        if self.mode == "pilot" and fixed_quote:
+            raise IntakeError("pilot_quote_must_be_zero")
+        return self._claim_slots(experiment, harness_commit, terms_hash, fixed_quote, expected_model)
+
+    def claim_pool(self, experiment, harness_commit, *, expected_model="*"):
+        if (self.mode != "live" or experiment.raw["mode"] != "live"
+                or experiment.raw.get("terms_sha256") != POOL_TERMS_HASH
+                or experiment.raw.get("payment_rule") != POOL_PAYMENT_RULE
+                or not re.fullmatch(r"pool-[0-9a-f]{64}", experiment.batch_id)):
+            raise IntakeError("collection_consent_invalid")
+        return self._claim_slots(experiment, harness_commit, POOL_TERMS_HASH, 0, expected_model)
+
+    def _claim_slots(self, experiment, harness_commit, terms_hash, fixed_quote, expected_model):
+        if not re.fullmatch("[0-9a-f]{40}", harness_commit):
+            raise IntakeError("collection_harness_unpinned")
+        token = store.new_lease_token()
+        models = [arm["model"] for _, arm, _ in experiment.slots]
+        return self._lease(token, expected_model,
+            job=str(uuid.uuid4()), token_hash=store.hash_lease_token(token),
+            batch=experiment.batch_id, mode=self.mode, commit=harness_commit,
+            scenarios=[case["scenario_id"] for case, _, _ in experiment.slots], models=models,
+            prices=dict.fromkeys(models, fixed_quote),
+            budgets={arm["model"]:arm["budget_microusd"] for _, arm, _ in experiment.slots},
+            terms_hash=terms_hash,
+        )
 
     def credential(self, job_id, lease_token, provider):
         if provider not in PROVIDERS:
@@ -346,10 +595,22 @@ def _validate_quality(summary):
         "scores",
         "failure_tags",
         "training_status",
+        "payment_rule",
     }:
         raise IntakeError("collection_quality_invalid")
+    if "payment_rule" in summary:
+        rule = summary["payment_rule"]
+        if rule == POOL_PAYMENT_RULE:
+            allowed_statuses = {"accepted", "code_rejected"}
+        elif rule in PAID_TASK_FAMILIES:
+            allowed_statuses = {"needs_review"}
+        else:
+            raise IntakeError("collection_quality_invalid")
+        if set(summary) != {"payment_rule", "training_status"} or summary["training_status"] not in allowed_statuses:
+            raise IntakeError("collection_quality_invalid")
     if "training_status" in summary and summary["training_status"] not in {
         "code_rejected",
+        "claim_rejected",
         "rejected",
         "salvaged",
         "needs_review",

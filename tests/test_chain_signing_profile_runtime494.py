@@ -21,13 +21,14 @@ def _profile():
     return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
 
 
-def test_finney_runtime_494_uses_mechanism_call_and_transaction_version_two():
+@pytest.mark.parametrize("spec", [494, 495, 497])
+def test_measured_finney_runtime_uses_mechanism_call_and_transaction_version_two(spec):
     profile = select_chain_signing_profile(
         _profile(),
-        runtime_version={"specVersion": 494, "transactionVersion": 2},
+        runtime_version={"specVersion": spec, "transactionVersion": 2},
         genesis_hash=GENESIS,
     )
-    assert profile["spec_version"] == 494
+    assert profile["spec_version"] == spec
     assert profile["transaction_version"] == 2
     assert profile["extrinsic_period"] == 32
     assert profile["commit_call_index"] == "0776"
@@ -53,7 +54,7 @@ def test_finney_runtime_494_uses_mechanism_call_and_transaction_version_two():
         b"\x00",  # Nonce.
         b"\x00",  # Zero transaction tip.
         b"\x00",  # Disabled metadata hash.
-        (494).to_bytes(4, "little"),
+        spec.to_bytes(4, "little"),
         (2).to_bytes(4, "little"),
         bytes.fromhex(GENESIS),
         bytes.fromhex(BLOCK_HASH),
@@ -82,11 +83,11 @@ def test_runtime_494_rejects_unmeasured_transaction_version():
         )
 
 
-def test_later_runtime_does_not_inherit_the_494_transaction_version():
+def test_later_runtime_does_not_inherit_the_measured_transaction_version():
     with pytest.raises(HotkeyAuthorityV2Error, match="transactionVersion differs"):
         select_chain_signing_profile(
             _profile(),
-            runtime_version={"specVersion": 495, "transactionVersion": 2},
+            runtime_version={"specVersion": 496, "transactionVersion": 2},
             genesis_hash=GENESIS,
         )
 

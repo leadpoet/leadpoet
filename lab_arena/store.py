@@ -211,6 +211,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_create_round": (("p_round_id", "text"), ("p_configuration_doc", "jsonb")),
     "lab_arena_transition_round": (("p_round_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
     "lab_arena_activate_reward": (("p_round_id", "text"), ("p_reward_basis", "jsonb"), ("p_signing_key_doc", "jsonb")),
+    "lab_arena_prospective_win_737": (("p_round_id", "text"),),
     "lab_arena_reward_slot_snapshot": (("p_round_id", "text"), ("p_slot_policy", "jsonb")),
     "lab_arena_correction_reward_history_v1": (
         ("p_mode", "text"), ("p_network_name", "text"), ("p_netuid", "integer"),
@@ -376,10 +377,16 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_reopen_review_outage_v1": (("p_round_id", "text"), ("p_round_sha256", "text"), ("p_submissions", "jsonb"), ("p_review_deadline", "timestamptz"), ("p_stage_2_close", "timestamptz"), ("p_final_scoring_close", "timestamptz"), ("p_publication_deadline", "timestamptz"), ("p_request_id", "text"), ("p_actor_ref", "text"), ("p_approval_ref", "text"), ("p_dry_run", "boolean")),
     "lab_arena_advance_review_outage_v1": (("p_round_id", "text"),),
     "lab_arena_record_run_scores": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_scores", "jsonb")),
+    "collection_participation_v1": (),
     "collection_reward_start_v1": (),
     "collection_reward_schedule_v1": (),
     "collection_batch_jobs_v1": (("p_batch", "text"),),
+    "collection_public_miners_v1": (("p_after", "text"),),
+    "collection_pool_active_v1": (),
+    "collection_offer_schedule_v1": (("p_offer", "text"),),
+    "collection_offer_samples_v1": (("p_source", "text"), ("p_through_slot", "bigint")),
     "collection_pilot_costs_v1": (("p_batch", "text"),),
+    "collection_verified_p7_fees_v1": (("p_batch", "text"), ("p_jobs", "jsonb")),
     "collection_pilot_fees_v1": (("p_batch", "text"), ("p_controls", "jsonb")),
     "collection_reward_quotes_v1": (("p_epoch", "bigint"),),
     "lab_arena_publish_weight_state_v1": (("p_network", "text"), ("p_netuid", "integer"), ("p_epoch", "bigint"), ("p_state_hash", "text"), ("p_state_doc", "jsonb")),
@@ -1811,6 +1818,12 @@ class ArenaStore:
             ),
             "commit_round_v2",
         )
+
+    def prospective_win_ready(self, round_id: str) -> bool:
+        result = self._transport.rpc("lab_arena_prospective_win_737", {"p_round_id": round_id})
+        if not isinstance(result, bool):
+            raise ArenaStoreError("invalid prospective win authority")
+        return result
 
     def reward_slot_snapshot(
         self, round_id: str, slot_policy: Mapping[str, Any]

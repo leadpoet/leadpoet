@@ -72,6 +72,15 @@ class PipeAPI:
             raise ValueError("research broker refused request")
         return answer["document"]
 
+    def observation(self, document):
+        if (
+            self._exchange(
+                {"type": "http_observation", "row": document}, "observation_result"
+            )
+            is not True
+        ):
+            raise ValueError("research archive refused observation")
+
     def provider(self, run_id, lease_token, frame):
         return self._exchange({"type": "provider", "frame": frame}, "provider_result")
 
@@ -165,7 +174,7 @@ def _catalog(snapshot, op, params):
     return {"tools": rows[start : start + params.get("limit", 50)], "total": len(rows)}
 
 
-def _public_call(frame, broker, trace):
+def _public_call(frame, broker, trace, *, journal=None):
     if not isinstance(frame, dict) or set(frame) != {
         "operation_id",
         "parameters",
@@ -192,6 +201,11 @@ def _public_call(frame, broker, trace):
         deepline_catalog=broker.catalog,
         allow_full_thinking=True,
     )
+    if journal is not None:
+        journal.grant.provider_request(op, params)
+        journal.append(
+            "gateway_request", sequence, {"operation": op, "parameters": params}
+        )
     request_id = f"generate-research-{sequence}"
     if op in operations.CATALOG_OPERATIONS:
         body = _catalog(broker.catalog, op, params)
@@ -203,6 +217,12 @@ def _public_call(frame, broker, trace):
         body = broker.model_call(request_id, params, api=op.split(".")[1])
     # Preserve every exact provider-visible turn privately. Never send model
     # identifiers, prices, evaluator prompts or credentials to the judge.
+    if journal is not None:
+        journal.append(
+            "gateway_result",
+            sequence,
+            {"operation": op, "request_id": request_id, "response": body},
+        )
     trace[sequence] = {"op": op, "request": params, "response": body}
     from lab_arena.provider_costs import openrouter_cost, deepline_cost
 
@@ -316,8 +336,9 @@ def decision_row(entry):
 
 
 class RemoteResearch:
-    def __init__(self, open_channel, load_case, grade):
+    def __init__(self, open_channel, load_case, grade, *, grant, objects):
         self.open_channel, self.load_case, self.grade = open_channel, load_case, grade
+        self.grant, self.objects = grant, objects
 
     def __call__(self, job, broker):
         case = self.load_case(job)
@@ -328,6 +349,10 @@ class RemoteResearch:
             raise ValueError(
                 "research source or model differs from the frozen assignment"
             )
+        journal = self.grant.bind(job, case, self.objects)
+        journal.append(
+            "gateway_input", None, {"icp": case["icp"], "case_ref": case["reference"]}
+        )
         broker.catalog = case["deepline_catalog"]
         trace = {}
         trace_bytes = 0
@@ -336,6 +361,8 @@ class RemoteResearch:
                 writer,
                 {
                     "type": "research_start",
+                    "allowed_hosts": self.grant.document["hosts"],
+                    "expires_at": self.grant.document["expires_at"],
                     **{
                         k: job[k]
                         for k in ("job_id", "scenario_id", "model", "harness_commit")
@@ -350,18 +377,60 @@ class RemoteResearch:
                 event = receive(reader)
                 if event.get("type") == "quota":
                     send(writer, {"type": "quota_result", "document": _usage(broker)})
+                elif (
+                    set(event) == {"type", "row"}
+                    and event["type"] == "http_observation"
+                ):
+                    journal.observation(event["row"])
+                    send(writer, {"type": "observation_result", "document": True})
                 elif event.get("type") == "provider":
-                    document = _public_call(event["frame"], broker, trace)
+                    try:
+                        document = _public_call(
+                            event["frame"], broker, trace, journal=journal
+                        )
+                    except Exception as exc:
+                        journal.append(
+                            "gateway_failure",
+                            event["frame"].get("action_sequence"),
+                            {"error_type": type(exc).__name__},
+                        )
+                        raise
                     trace_bytes += len(encode(event)) + len(document["body_b64"])
                     if trace_bytes > MAX_TRACE_BYTES:
                         raise ValueError("research trace size limit")
                     send(writer, {"type": "provider_result", "document": document})
                 elif (
-                    set(event) == {"type", "job_id", "companies", "execution_completed"}
+                    set(event)
+                    == {
+                        "type",
+                        "job_id",
+                        "companies",
+                        "execution_completed",
+                        "http_capture",
+                    }
                     and type(event["execution_completed"]) is bool
                     and event["type"] == "research_result"
                     and event["job_id"] == job["job_id"]
                 ):
+                    capture = event["http_capture"]
+                    if (
+                        set(capture) != {"recorder_complete", "direct_connections"}
+                        or type(capture["recorder_complete"]) != bool
+                        or type(capture["direct_connections"]) != int
+                        or capture["direct_connections"] < 0
+                    ):
+                        raise ValueError("invalid research capture report")
+                    # A TLS tunnel does not authenticate the decrypted page or
+                    # enumerate every request. Keep it for private audit only.
+                    journal.complete &= (
+                        capture["recorder_complete"]
+                        and capture["direct_connections"] == 0
+                    )
+                    journal.append(
+                        "worker_result",
+                        None,
+                        {"capture": capture, "companies": event["companies"]},
+                    )
                     companies = output.validate_companies(
                         event["companies"],
                         schema_version=case["icp"]["output_schema_version"],
@@ -440,6 +509,7 @@ class RemoteResearch:
             shape=all(r is not None for r in rows),
             training_split=case.get("split") == "train",
             privacy=True,
+            complete_authorized_research_capture=journal.complete,
         )
         packet = {
             "run_id": job["job_id"],
@@ -469,6 +539,12 @@ class RemoteResearch:
             "run": job["job_id"],
             "teacher": job["model"],
             "research_rows": rows,
+            "research_evidence": {
+                "schema": "collection.research-index.v1",
+                "grant_sha256": self.grant.sha256,
+                "event_hashes": journal.hashes,
+                "complete": journal.complete,
+            },
             "capture": wire,
             "native_review_required": not checked["checks"].get(
                 "source_coverage", checked["checks"].get("native_coverage", True)

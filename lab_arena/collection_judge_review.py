@@ -12,6 +12,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    PublicFormat,
     load_pem_private_key,
     load_pem_public_key,
 )
@@ -20,10 +22,28 @@ from lab_arena import collection_judge as judge
 
 BUNDLE_SCHEMA = "collection.review.v1"
 RECEIPT_SCHEMA = "collection.human-review.v1"
+BLIND_RECEIPT_SCHEMA = "collection.human-review.v2"
 
 
-def _read_bundle(bundle):
+class QualificationSampleUnavailable(ValueError):
+    """Only the fixed gate names are safe to print outside private review."""
+
+
+def _read_bundle(bundle, *, require_split=True):
     fields = {"schema", "policy", "assignments", "runs", "planted", "drift"}
+    if "capture_version" in bundle:
+        from lab_arena.collection_workflow import comparison_revisions
+
+        comparison_revisions(bundle)
+        fields.add("capture_version")
+        if bundle.get("failed_attempts"):
+            fields.add("failed_journals")
+    if "claim_protocol" in bundle:
+        from lab_arena.collection_claims import protocol_of
+        protocol_of(bundle)
+        fields.add("claim_protocol")
+    if require_split or "split_manifest_sha256" in bundle:
+        fields.add("split_manifest_sha256")
     if "failed_attempts" in bundle:
         fields.add("failed_attempts")
     judge._fields(bundle, fields)
@@ -47,6 +67,18 @@ def _read_bundle(bundle):
             "immutable run manifest digest",
         )
         p, a = item["packet"], item["assessment"]
+        if require_split:
+            if any(x["schema"] != bundle.get("claim_protocol","collection.fresh-claims.v1")
+                   for x in p.get("fresh_claim_proof", {}).values()):
+                raise ValueError("stored claim protocol differs from review batch")
+            stamp = p.get("split") or {}
+            judge._require(
+                re.fullmatch(r"[a-f0-9]{64}", str(bundle["split_manifest_sha256"]))
+                and stamp.get("manifest_sha256") == bundle["split_manifest_sha256"]
+                and p["checks"].get("training_split") is True
+                and p["checks"].get("privacy") is True,
+                "unverified review split",
+            )
         rid = p["run_id"]
         judge._require(
             rid in schedule
@@ -89,7 +121,23 @@ def _read_bundle(bundle):
                 "invalid input gap",
             )
             continue
+        gate = judge.claim_verdict(p)
+        if gate in ("failed", "missing"):
+            judge._require(
+                a.get("claim_gate") == gate
+                and a["claim_review"] == gate
+                and a["status"]
+                == ("claim_rejected" if gate == "failed" else "cannot_judge")
+                and not a["records"]
+                and a["keep_steps"] == 0
+                and not a["hard_steps"],
+                "invalid claim gate",
+            )
+            continue
         scenario, run = judge._packet(p)
+        from lab_arena.collection_judge_segments import verify_notes
+
+        verify_notes(p, a)
         judge._require(
             a["packet_sha256"] == judge.digest([scenario, run]),
             "assessment packet digest",
@@ -101,7 +149,11 @@ def _read_bundle(bundle):
             and (0 if unavailable else 1) <= len(a["records"]) <= 2,
             "judge record count",
         )
+        generator = schedule[rid]["generator"]
+        if policy.qualification:
+            judge._require(a.get("generator_family") == judge.model_family(generator), "wrong generator family")
         for v in a["records"]:
+            judge._require(v["judge"] in judge.independent_roles(policy, generator), "judge family conflicts with generator")
             identity = {
                 "spec_version": judge.SPEC,
                 "run_id": rid,
@@ -174,8 +226,18 @@ def _read_bundle(bundle):
     return policy, assessments, reviewable
 
 
-def prepare_review(bundle):
-    policy, _, packets = _read_bundle(bundle)
+def prepare_review(bundle, *, for_qualification=False):
+    policy, assessments, packets = _read_bundle(bundle)
+    if for_qualification:
+        judge._require(policy.pilot, "qualification requires a pilot")
+        report = judge.quality_report(
+            policy, assignments=bundle["assignments"], assessments=assessments,
+            human_marks={}, planted=bundle["planted"], drift=bundle["drift"],
+            failed_run_ids={f["run_id"] for f in bundle.get("failed_attempts", [])},
+        )
+        holds = set(report["holds"]) - {"human_sample_incomplete", "human_agreement", "judge_qualification"}
+        if holds:
+            raise QualificationSampleUnavailable("qualification cohort: " + ", ".join(sorted(holds)))
     return judge.blind_human_sample(policy, packets)
 
 
@@ -269,6 +331,10 @@ def sign_review(bundle, blind_marks, reviewer_id, private_key_pem):
         "blind_marks": blind_marks,
         "report": report,
     }
+    return _sign(body, private_key_pem)
+
+
+def _sign(body, private_key_pem):
     key = load_pem_private_key(private_key_pem, password=None)
     judge._require(isinstance(key, Ed25519PrivateKey), "expected Ed25519 reviewer key")
     return {
@@ -279,14 +345,32 @@ def sign_review(bundle, blind_marks, reviewer_id, private_key_pem):
     }
 
 
-def verify_review(bundle, receipt, public_key_pem):
-    """Verify against the deployment's pinned reviewer key before releasing any batch."""
-    judge._fields(
-        receipt,
-        ("schema", "bundle_sha256", "reviewer", "blind_marks", "report", "signature"),
-    )
+def sign_blind_review(jobs, marks, batch_sha256, reviewer, private_key_pem):
+    """Sign the human's decisions on the reviewer machine without disclosing the batch."""
+    _validate_marks(marks)
     judge._require(
-        receipt["schema"] == RECEIPT_SCHEMA
+        judge._text(reviewer, 128) and re.fullmatch(r"[0-9a-f]{64}", str(batch_sha256))
+        and type(jobs) is dict and len(jobs) == 50 and set(jobs) == set(marks["marks"])
+        and judge.digest(jobs) == marks["sample_sha256"],
+        "incomplete or mismatched blind sample",
+    )
+    for scores in marks["marks"].values():
+        judge._fields(scores, judge.PARTS)
+        judge._require(all(judge._integer(score, 0, 3) for score in scores.values()), "human scores")
+    return _sign({
+        "schema": BLIND_RECEIPT_SCHEMA, "bundle_sha256": batch_sha256,
+        "reviewer": reviewer, "blind_marks": marks,
+    }, private_key_pem)
+
+
+def _verified_report(bundle, receipt, public_key_pem):
+    """Verify against the deployment's pinned reviewer key before releasing any batch."""
+    fields = {"schema", "bundle_sha256", "reviewer", "blind_marks", "signature"}
+    if receipt.get("schema") == RECEIPT_SCHEMA:
+        fields.add("report")
+    judge._fields(receipt, fields)
+    judge._require(
+        receipt["schema"] in (RECEIPT_SCHEMA, BLIND_RECEIPT_SCHEMA)
         and judge._text(receipt["reviewer"], 128)
         and receipt["bundle_sha256"] == judge.digest(bundle),
         "review receipt identity",
@@ -312,11 +396,108 @@ def verify_review(bundle, receipt, public_key_pem):
         "review sample changed",
     )
     report = _report(bundle, marks, receipt["reviewer"])
-    judge._require(
-        report == receipt["report"] and report["quality_ready"],
-        "batch did not pass review",
-    )
+    if receipt["schema"] == RECEIPT_SCHEMA:
+        judge._require(report == receipt["report"], "batch did not pass review")
     return report
+
+
+def verify_review(bundle, receipt, public_key_pem):
+    report = _verified_report(bundle, receipt, public_key_pem)
+    judge._require(report["quality_ready"], "batch did not pass review")
+    return report
+
+
+def _qualification_body(bundle, receipt, reviewer_key, approver, allow_live):
+    from lab_arena.collection_claims import CLAIM_RUBRIC
+
+    policy = judge.BatchPolicy(**bundle["policy"])
+    report = _verified_report(bundle, receipt, reviewer_key)
+    judge._require(
+        type(allow_live) is bool
+        and policy.pilot
+        and policy.qualification
+        and report["holds"] == ["judge_qualification"]
+        and judge._text(approver, 128)
+        and approver != receipt["reviewer"],
+        "independent qualification review required",
+    )
+    return {
+        "schema": "collection.judge-qualification.v1",
+        "claim_rubric_sha256": judge.digest(CLAIM_RUBRIC),
+        "bundle_sha256": judge.digest(bundle),
+        "review_sha256": judge.digest(receipt),
+        "prompt_sha256": policy.prompt_sha256,
+        "approver": approver,
+        **({"claim_protocol":bundle["claim_protocol"]} if "claim_protocol" in bundle else {}),
+        "allow_live": allow_live,
+        "judges": {
+            m: {"revision": spec.revision, "route": spec.route}
+            for m, spec in judge.QUALIFICATION_JUDGES.items()
+        },
+    }
+
+
+def approve_qualification(
+    bundle,
+    receipt,
+    reviewer_key_pem,
+    approver,
+    approver_private_pem,
+    *,
+    allow_live=False,
+):
+    """Explicit offline human decision after signed blind calibration."""
+    body = _qualification_body(bundle, receipt, reviewer_key_pem, approver, allow_live)
+    key = load_pem_private_key(approver_private_pem, password=None)
+    judge._require(
+        isinstance(key, Ed25519PrivateKey), "expected qualification signing key"
+    )
+    pub = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    judge._require(
+        pub
+        != load_pem_public_key(reviewer_key_pem).public_bytes(
+            Encoding.Raw, PublicFormat.Raw
+        ),
+        "separate approval key required",
+    )
+    return {
+        **body,
+        "signature": base64.b64encode(key.sign(judge._json(body).encode())).decode(),
+    }
+
+
+def verify_qualification(
+    bundle, receipt, reviewer_key_pem, attestation, approver_key_pem
+):
+    """Authenticate the operator's explicit decision against the registered pilot evidence."""
+    body = _qualification_body(
+        bundle,
+        receipt,
+        reviewer_key_pem,
+        attestation.get("approver"),
+        attestation.get("allow_live"),
+    )
+    judge._require(
+        {k: v for k, v in attestation.items() if k != "signature"} == body,
+        "qualification approval differs from measured evidence",
+    )
+    pub = load_pem_public_key(approver_key_pem)
+    judge._require(
+        isinstance(pub, Ed25519PublicKey)
+        and pub.public_bytes(Encoding.Raw, PublicFormat.Raw)
+        != load_pem_public_key(reviewer_key_pem).public_bytes(
+            Encoding.Raw, PublicFormat.Raw
+        ),
+        "separate approval key required",
+    )
+    try:
+        pub.verify(
+            base64.b64decode(attestation["signature"], validate=True),
+            judge._json(body).encode(),
+        )
+    except (InvalidSignature, ValueError, KeyError, TypeError) as exc:
+        raise ValueError("qualification approval signature invalid") from exc
+    return body
 
 
 def terminal_pilot_attempts(rows):
@@ -382,6 +563,7 @@ def registered_bundle(
     objects,
     expected_builder=None,
     failed_attempts=(),
+    capture_version=None,
 ):
     """Reconstruct from server-owned *complete* batch records at release/sign-off.
 
@@ -390,6 +572,15 @@ def registered_bundle(
     """
     import hashlib
     import json
+    from lab_arena.collection_journal import WorkflowJournal
+    from lab_arena.collection_workflow import comparison_revisions
+
+    capture = (
+        {"capture_version": capture_version} if capture_version is not None else {}
+    )
+    agent, builder = comparison_revisions(capture)
+    if capture and expected_builder != builder:
+        raise ValueError("comparison capture builder differs from the frozen policy")
 
     def ident(value):
         return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value)
@@ -440,16 +631,33 @@ def registered_bundle(
                 record["artifact_sha256"] is None, "conflicting failed manifest"
             )
             continue
-        manifest = verified(
-            rid, "manifest", {"sha256": record["artifact_sha256"]}, 1024 * 1024
-        )
+        effective = record.get("pilot_review_sha256", record["artifact_sha256"])
+        if "pilot_review_sha256" in record:
+            judge._require(
+                policy.pilot
+                and record["status"] == "accepted"
+                and effective != record["artifact_sha256"],
+                "invalid pilot review overlay",
+            )
+        manifest = verified(rid, "manifest", {"sha256": effective}, 1024 * 1024)
+        if "pilot_review_sha256" in record:
+            judge._require(
+                manifest.get("judge_recovery", {}).get("prior_manifest_sha256")
+                == record["artifact_sha256"],
+                "pilot review is not linked to its original manifest",
+            )
         judge._require(
             manifest["job_id"] == rid
             and manifest["batch_id"] == record["batch_id"]
             and manifest["judge_policy"] == asdict(policy)
+            and manifest.get("capture_version") == capture_version
+            and (not capture or manifest["harness_commit"] == agent)
             and manifest["model"] == record["model"]
             and manifest["harness_commit"] == record["harness_commit"]
-            and (expected_builder is None or manifest.get("builder_commit") == expected_builder)
+            and (
+                expected_builder is None
+                or manifest.get("builder_commit") == expected_builder
+            )
             and manifest["scenario_id"] == record["scenario_id"],
             "registered manifest identity",
         )
@@ -465,7 +673,7 @@ def registered_bundle(
                 1024 * 1024,
             )
             judge._require(
-                not policy.pilot
+                (not policy.pilot or "pilot_review_sha256" in record)
                 and "judge_recovery" not in prior
                 and not prior.get("control")
                 and re.fullmatch(
@@ -530,6 +738,8 @@ def registered_bundle(
             )
             case = verified(rid, "control-case", control, 16 * 1024 * 1024)
             checked = controls.validate_case(case)
+            if policy.qualification:
+                controls.verify_control_family(case, [policy.version(r) for r in policy.roles])
             expected = planted[rid] if rid in planted else drift[rid]
             judge._require(
                 control["sha256"] == "sha256:" + checked
@@ -573,8 +783,17 @@ def registered_bundle(
                 )
         else:
             judge._require(control is None, "unexpected control case on generation job")
-            judge._require(isinstance(manifest.get("generator"), dict), "missing generator upload")
+            judge._require(
+                isinstance(manifest.get("generator"), dict), "missing generator upload"
+            )
             row = verified(rid, "generator", manifest["generator"], 128 * 1024 * 1024)
+            if capture:
+                WorkflowJournal(objects, policy.batch_id, rid).comparison_index(
+                    complete=True,
+                    model=record["model"],
+                    manifest_events=manifest.get("events"),
+                    generator=row,
+                )
             judge._require(
                 row.get("run") == rid and row.get("teacher") == record["model"],
                 "generator identity differs from registered job",
@@ -583,7 +802,7 @@ def registered_bundle(
             {
                 "packet": packet,
                 "assessment": assessment,
-                "manifest_sha256": record["artifact_sha256"],
+                "manifest_sha256": effective,
                 **({"control_sha256": control["sha256"][7:]} if control else {}),
             }
         )
@@ -595,7 +814,15 @@ def registered_bundle(
         "planted": planted,
         "drift": drift,
     }
+    result.update(capture)
     if failed_attempts:
         result["failed_attempts"] = failed_attempts
-    _read_bundle(result)
+        if capture:
+            result["failed_journals"] = {
+                failed["run_id"]: WorkflowJournal(
+                    objects, policy.batch_id, failed["run_id"]
+                ).comparison_index(complete=False, model=failed["generator"])
+                for failed in failed_attempts
+            }
+    _read_bundle(result, require_split=False)
     return result

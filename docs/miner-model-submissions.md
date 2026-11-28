@@ -1,6 +1,6 @@
-# Submit a competing model
+# Historical Arena model submissions
 
-The miner menu opens the **Submit Model** flow.
+This guide records the former agent competition. The subnet closes new agent submissions at champion retirement. For current miner participation, follow the [collection enrollment guide](locked-collection.md#enrollment).
 
 ## Source and credentials
 
@@ -328,7 +328,7 @@ the normal gateway restart. Miner and validator clients use
 
 The isolated testnet-401 run completed real CLI admission, source loading in
 gVisor, provider calls, scoring, persistence, publication, and API restart
-recovery. See [the live validation report](miner-model-live-validation-20260905.md).
+recovery. See [the live validation report](https://github.com/leadpoet/leadpoet/blob/fd0c36bc613822934b20b90b8c1b8a02659d818e/docs/miner-model-live-validation-20260905.md).
 This proves the workflow, not model quality: the test miner scored zero.
 
 Production was not changed. The test used the real gateway and validator hosts

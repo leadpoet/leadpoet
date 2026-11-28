@@ -437,6 +437,9 @@ class ArenaWeightOrchestrator:
             if confirmation in {"finalized", "included_pending_reveal"}:
                 return confirmation
             if confirmation == "not_included_expired":
+                if "expiry_proof" in (self._last_confirmation or {}):
+                    self._record_expired(existing, self._last_confirmation)
+                    return "not_included_expired"
                 accepted = existing.get("accepted_state")
                 if not isinstance(accepted, Mapping):
                     raise ArenaValidatorError("Arena retry lacks accepted state")

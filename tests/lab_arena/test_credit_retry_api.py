@@ -173,7 +173,7 @@ def test_retry_cli_needs_owner_wallet_and_no_provider_secrets(monkeypatch, capsy
         "status": "queued", "requeued_count": 1,
     })
     assert miner_cli.main([
-        "retry-credit-failures", "--round-id", ROUND, "--submission-id", SUBMISSION,
+        "retry-credit-failures", "--api-base-url", "https://arena.example", "--round-id", ROUND, "--submission-id", SUBMISSION,
         "--wallet-name", "miner", "--hotkey-name", "owner",
     ]) == 0
     assert '"requeued_count": 1' in capsys.readouterr().out

@@ -95,11 +95,11 @@ local hotkey. The existing runtime, nonce, mortal transaction, and exact
 transaction checks still apply.
 
 Finney signing profiles list measured runtime versions and transaction version
-changes. Runtime 494 keeps the `commit_timelocked_mechanism_weights` call and
+changes. Runtimes 494, 495 and 497 keep the `commit_timelocked_mechanism_weights` call and
 signature payload layout, with transaction version 2 and a 32-block mortality
 window. The signer still rejects any era that extends beyond the accepted
 weight state's validity. Unknown transaction versions remain rejected until
-their metadata is measured.
+their metadata is measured. The runtime 495 profile was measured from the parent metadata of finalized block 9,578,566. Runtime 497 was measured at finalized block 9,587,206. Both blocks contain SN71 reveals for validator UIDs 0 and 155.
 
 Reward-basis v2 uses the [improvement reward slots](arena_reward_slots.md).
 The gateway and validator use the same canonical slot allocation code. Keep
@@ -122,6 +122,13 @@ Signed bytes are persisted before broadcast. Restarts and uncertain results
 reuse those exact bytes. A fresh attempt requires proof of expiry, absence of
 inclusion, an unchanged nonce, and a successful authenticated state read. Each
 cycle attempts the current epoch first, then advances one prior reveal or report.
+After an accepted state closes, a later transaction can advance the wallet nonce.
+The validator can close the original journal as expired once the live and archive
+reads cover every block in its mortal era, the signed bytes are absent, and the
+archive confirms its signed nonce at the final block of that era. It keeps the
+original signed record and writes a local expiry receipt. Only the latest
+finalized nonce can authorize a retry while a state is open.
+
 Prior work rotates across unfinished journals, including after a failed read or
 report. A recovery backlog cannot consume the cycle before current signing.
 Each chain operation retains its existing timeout. Success requires finalized commitment/reveal readback,
@@ -603,7 +610,13 @@ transactions are unchanged.
 
 ## Locked collection settlement
 
-After a reviewed collection cutover on Finney/71, the gateway signs a
+A miner signs one spending limit for the sales sandbox. When a run completes and its trace and provider receipts verify, the ledger credits the funding hotkey with 1.25 times its settled, authorized generator charges. Both passing and failing task outcomes qualify. An unresolved receipt holds that job. [Funding and withdrawal](locked-collection.md#enrollment).
+
+The signed weight basis retains the name `leadpoet.collection.fixed_run_quotes.v1`. For standing grants, its dollar amounts come from settled receipts. Historical fixed-price jobs retain their signed fees.
+
+### Historical fixed-price launch
+
+From the champion retirement epoch on Finney/71, the gateway signs a
 `leadpoet.collection.fixed_run_quotes.v1` basis in the existing accepted
 weight-state envelope. Update every participating validator's canonical
 weight kernel before cutover. Older kernels reject the new basis.
@@ -620,10 +633,11 @@ migration authority, insert the compiled document into `collection_reward_launch
 as `pilot_evidence`, using network `finney`, netuid 71 and
 `first_epoch = cutover_anchor.epoch + 1`. This stages the measured prices
 and permits one live run. Check the source and recent finalized weights of
-primary, Rizzo and Yuma before staging. Drain existing competition awards
-with the established daily-cutoff setting when preparing the transition.
+primary, Rizzo and Yuma before staging. The signed anchor can come from an interim burn-only epoch.
 
-Enrollment alone leaves the champion mechanism active. The worker stores
+Champion retirement and paid launch are independent. To retire champions, use the migration owner to insert the next epoch and the current signed state hash into `public.collection_champion_retirement(first_epoch,previous_state_hash)`. Read back the current finalized epoch before inserting. Cancel any remaining active Finney/71 competition rounds using the existing `lab_arena_cancel_round` operation in the same transaction. The database serializes retirement against signed state publication and rejects stale anchors. The gateway immediately closes legacy submissions and promotions. With zero eligible quotes, validators use the existing designated burn hotkey for the full vector. The pilot can continue.
+
+The worker stores
 the first completed live job and its assessed artifact before activating
 rewards. A fresh worker recovers that completion without another provider call.
 The first accepted live job and activation commit together. A fresh finalized
@@ -632,11 +646,11 @@ epochs cannot earn a retroactive quote. An operator can withdraw the staged
 row before a job starts or after a failed attempt. A running or completed
 launch job must be resolved first. The read-only
 `collection_reward_schedule_v1()` shows the pilot-approved fees, limits
-and any pending launch job. `collection_reward_start_v1()` identifies
-the first actual collection payout epoch.
+and any pending launch job. After the first paid job, its `first_epoch` is the paid settlement boundary. `collection_reward_start_v1()` identifies the first epoch signed with the collection weight basis.
 
-For payout epoch E, sum the frozen prices of all accepted, live,
-miner-funded jobs whose accepted epoch was E−1. Code checks, provider
+### Epoch allocation and finalized payouts
+
+For weight epoch E, sum the dollar targets of all eligible live miner-funded jobs accepted in E−1. Code checks, provider
 receipts and a verified run artifact precede acceptance. Each run is counted
 in precisely this epoch. The signed state binds the job count, digest,
 beneficiary totals and valuation. Retrying a state read returns the first
@@ -656,6 +670,8 @@ The miner statement labels these as weight targets. Use finalized
 commitment/reveal and matching vectors for weight verification; reporting
 actual token income separately requires the subsequent chain distribution.
 
+### Historical pilot review
+
 Build the private batch review on the authorized gateway/worker host with the
 original private manifest and rubric. All outputs below are new private files.
 The installed `LEADPOET_COLLECTION_REVIEW_PUBLIC_KEY_FILE` pins the actual
@@ -664,35 +680,28 @@ authorize a release.
 
 ```sh
 python3.11 -m scripts.collection_batch bundle --batch batch.json --prompt prompt.json --output review-input.json
-python3.11 -m scripts.collection_review sample --bundle review-input.json --jobs blind.json --marks-template marks.json
+python3.11 -m scripts.collection_review sample --for-qualification --bundle review-input.json --jobs blind.json --marks-template marks.json
 ```
 
-The human completes the blind marks on their own machine and signs the
-review with `scripts.collection_review sign`. Use the signed receipt to
-compile quotes and produce the private training release.
+The current pilot worker prepares the same private blind sample once the cohort
+qualifies. The reviewer scores the 50 ordinary runs and signs the receipt on
+their own machine. An authorized operator separately approves the measured
+panel for compensated use with `collection_review qualify --allow-live`. Use
+the signed receipt and that approval to compile prices.
+[Judge qualification procedure](judge-output-spec.md#qualification-and-split-evidence).
 
 ```sh
-python3.11 -m scripts.collection_batch prices --batch batch.json --prompt prompt.json --receipt signed-review.json --output approved-prices.json
-python3.11 -m scripts.collection_batch export --batch batch.json --prompt prompt.json --receipt signed-review.json --output released-rows.zip
+python3.11 -m scripts.collection_batch prices --batch batch.json --prompt prompt.json --receipt signed-review.json --qualification panel-approval.json --output approved-prices.json
 ```
 
-Each command reconstructs the complete registered job set and sealed
-controls. Price compilation checks registered pilot measurements, and the
-cutover transaction verifies the same fee table directly against settled
-provider receipts. The export ZIP contains JSONL for decisions-only,
-reasoning and hard-step reasoning views, plus row counts and file hashes.
-It omits planted/drift controls and all judge response text. An incomplete
-or modified batch cannot publish a partial output file.
+The compiler reconstructs the registered jobs and sealed controls. The database
+checks the fee table against settled miner charges. Export eligibility follows
+each miner's signed terms. Comparison grants with training rights and separately
+consented corrections can contribute eligible data. [Training exports](locked-collection.md#exporting-full-synthetic-trajectories)
 
-Before scheduling the switch, stop opening new competition rounds and let
-all issued paid rounds, pending Git promotions and the latest award finish.
-The cutover must immediately follow the current accepted legacy epoch. The
-price document's `cutover_anchor` records that epoch, its signed state hash,
-and a fresh finalized chain block with its observed timestamp. Use
-`cutover_anchor.epoch + 1` for `first_epoch`. If the anchor is older than
-120 seconds at insertion, rerun the price command for a fresh observation.
-A missing accepted legacy state, a pending promotion, an overlapping award,
-or an incomplete measured six-model cohort stops activation. Once scheduled,
-the gateway and database fence new mainnet competition issuance and new
-Git promotion plans even if a worker returns to an older environment setting.
-Previously issued signed states retain their original signature and history.
+After champion retirement, use the current signed burn-only epoch as the staging
+anchor. The compiled `cutover_anchor` contains its epoch, signed state hash and a
+fresh finalized block observation. Stage the launch for `cutover_anchor.epoch + 1`
+using the owner procedure above. If the observation is more than 120 seconds old,
+rerun the price command for a fresh anchor. The first accepted live job fixes the
+paid settlement boundary. Previously signed states keep their original history.

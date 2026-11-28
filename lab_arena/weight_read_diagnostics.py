@@ -82,13 +82,13 @@ _RPC_OPERATIONS = frozenset(role + "_" + method
 
 def _trusted_errors(exc):
     # Late import avoids a cycle with the source methods that add context.
-    from lab_arena.chain_source import ValidatorChainSourceV2Error
+    from lab_arena.chain_source import FinalizedExtrinsicAbsent, ValidatorChainSourceV2Error
     seen = set()
     for _ in range(8):
         if exc is None or id(exc) in seen:
             break
         seen.add(id(exc))
-        if type(exc) in (ChainSourceV2Error, ValidatorChainSourceV2Error):
+        if type(exc) in (ChainSourceV2Error, ValidatorChainSourceV2Error, FinalizedExtrinsicAbsent):
             yield exc
         cause = exc.__cause__
         exc = cause if cause is not None else (None if exc.__suppress_context__ else exc.__context__)

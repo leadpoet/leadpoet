@@ -176,6 +176,9 @@ def stack(tmp_path_factory):
                 schema_acl, had_create = cursor.fetchone()
                 cursor.execute('GRANT CREATE ON SCHEMA public TO lab_arena_owner')
                 for migration, start, end in (
+                    ("737-lab-arena-nov23-prospective-win.sql",
+                     "CREATE OR REPLACE FUNCTION public.lab_arena_prospective_win_737",
+                     "DO $acl$"),
                     ("604-arena-2026-11-03-forward-only-verifier.sql",
                      "CREATE OR REPLACE FUNCTION public.lab_arena__nov03_preserved_judge_v1",
                      "DO $helpers_verify604$"),
@@ -227,6 +230,33 @@ def stack(tmp_path_factory):
                     "722-collection-call-budget.sql",
                     "723-collection-pilot-prices.sql",
                     "724-collection-scenario-ranking.sql",
+                    "725-collection-generator-roster.sql",
+                    "726-collection-first-paid-job.sql",
+                    "727-collection-synthetic-funding.sql",
+                    "728-collection-pilot-attempts.sql",
+                    "729-collection-ready-judge-recovery.sql",
+                    "732-collection-experiment-pilot.sql",
+                    "733-collection-correction-consent.sql",
+                    "738-collection-correction-tariff.sql",
+                    "740-collection-training-only-platform-task.sql",
+                    "741-collection-funding-statement.sql",
+                    "742-collection-participation-readback.sql",
+                    "743-retire-champion-rewards.sql",
+                    "744-synthetic-training-consent.sql",
+                    "745-collection-dispatch-settings.sql",
+                    "746-reconcile-collection-generation.sql",
+                    "747-bounded-collection-throttle-replacement.sql",
+                    "748-witnessed-pilot-reference-route.sql",
+                    "749-pilot-owner-judge-recovery.sql",
+                    "750-pending-collection-billing.sql",
+                    "751-p7-collection-fee-class.sql",
+                    "752-signed-collection-daily-slots.sql",
+                    "753-interrupted-pilot-judges.sql",
+                    "754-funding-aware-collection-pricing.sql",
+                    "755-verified-p7-collection-prices.sql",
+                    "756-versioned-collection-offers.sql",
+                    "757-public-miner-contributions.sql",
+                    "758-standing-collection-funding.sql",
                 ):
                     cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / migration).read_text())
             # Install additive current readers before PostgREST takes its
@@ -313,6 +343,7 @@ def test_service_role_authorization_reaches_whoami_and_functions_through_postgre
     transport = make_transport(stack, "lab_arena_service")
     store = ArenaStore(transport)
     identity = store.require_service_role()
+    assert transport.rpc("collection_pool_active_v1", {}) is False
     assert identity["current_user"] == "lab_arena_service" and identity["jwt_role"] == "lab_arena_service"
     assert identity["rolsuper"] is False and identity["rolbypassrls"] is False and identity["session_user"] == "authenticator"
     assert store.list_rounds() == []

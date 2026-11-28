@@ -25,10 +25,14 @@
   "supported_spec_versions": [
     437,
     438,
-    494
+    494,
+    495,
+    497
   ],
   "transaction_version_overrides": {
-    "494": 2
+    "494": 2,
+    "495": 2,
+    "497": 2
   },
   "runtime_upgrade_policy": {
     "mode": "exact_payload_invariants_v1",

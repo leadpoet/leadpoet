@@ -1170,6 +1170,8 @@ class ArenaService:
         self._signer_lock = threading.Lock()
         self._clock = config.clock
         self._lock = threading.RLock()
+        self._collection_status_lock = threading.Lock()
+        self._collection_status_cache: Optional[Tuple[float, str, Dict[str, Any]]] = None
         self._hot_round_lock = threading.Lock()
         self._hot_rounds: Dict[str, Tuple[float, Dict[str, Any]]] = {}
         self._submission_request_limiter = (
@@ -1872,6 +1874,8 @@ class ArenaService:
             if unready_reason is None and not defaults.flat_per_icp_cost_policy:
                 unready_reason = "flat_policy_required"
             if unready_reason is None:
+                if baseline_first and document["rewards_enabled"]:
+                    document["dispatch_window_policy"] = "late_predecessor_v1"
                 document["reasoning_capture_policy"] = reasoning_capture.POLICY
                 document[training_coverage.SETTING] = defaults.training_minimum_icp_coverage_percent
                 document[training_coverage.MISSING_REASONING_SETTING] = defaults.training_maximum_missing_reasoning_percent
@@ -2740,12 +2744,81 @@ class ArenaService:
         except collection_intake.IntakeError as exc:
             raise ServiceError(exc.code, exc.status) from None
 
-    def collection_terms(self) -> Dict[str, Any]:
+    def public_collection_miners(self, after: Optional[str] = None) -> Dict[str, Any]:
+        from lab_arena.collection_contributors import public_page
+
+        if self._config.mode != "live" or self._chain_scope() != ("finney", 71) or self._pinned_round_id():
+            raise ServiceError("collection_inactive", 404)
+        rows = self._store._transport.rpc("collection_public_miners_v1", {"p_after": after})
+        return public_page(rows, Path.home() / ".local/share/leadpoet/collection/watch")
+
+    def public_collection_status(self) -> Dict[str, Any]:
+        """Only aggregate paid work is public. Never forward private participation records."""
+        from lab_arena.collection_intake import PAID_OFFER_ID, POOL_TERMS_HASH
+
+        mode = self.collection_mode()
+        if mode == "off":
+            raise ServiceError("collection_inactive", 404)
+        with self._collection_status_lock:
+            cached = self._collection_status_cache
+            if cached is not None and time.monotonic() < cached[0] and cached[1] == mode:
+                return cached[2]
+            snapshot = self._store._transport.rpc("collection_participation_v1", {})
+            work = snapshot.get("work") if isinstance(snapshot, Mapping) else None
+            if not isinstance(work, list):
+                raise ArenaStoreUnavailable("collection work counts unavailable")
+            running = verified = 0
+            for row in work:
+                if not isinstance(row, Mapping) or row.get("mode") not in ("pilot", "live"):
+                    raise ArenaStoreUnavailable("invalid collection work counts")
+                if row["mode"] != "live":
+                    continue
+                counters = ("assigned", "accepted", "ready", "failed", "rejected", "expired")
+                if any(type(row.get(key)) is not int or row[key] < 0 for key in counters):
+                    raise ArenaStoreUnavailable("invalid collection work counts")
+                active = row["assigned"] - sum(row[key] for key in counters[1:])
+                if active < 0:
+                    raise ArenaStoreUnavailable("inconsistent collection work counts")
+                running += active
+                verified += row["accepted"]
+            offer = self.collection_terms() if mode == "live" else {}
+            epoch = self._config.chain.current_settlement_epoch()
+            result = {
+                "paid_enrollment_open": offer.get("terms_sha256") == POOL_TERMS_HASH or bool(
+                    offer.get("fixed_quotes") and PAID_OFFER_ID.fullmatch(offer.get("offer_id") or "")),
+                "champion_rewards_off": self._collection_reward_active(int(epoch)),
+                "running_runs": running,
+                "verified_runs": verified,
+                "as_of": self.now().isoformat(),
+            }
+            self._collection_status_cache = (time.monotonic() + 30, mode, result)
+            return result
+
+    def collection_terms(self, task_scope: Optional[str] = None, offer_id: Optional[str] = None) -> Dict[str, Any]:
         from lab_arena import collection_intake
         mode = self.collection_mode()
         if mode == "off":
             raise ServiceError("collection_inactive", 404)
-        return collection_intake.terms(mode)
+        try:
+            if mode == "live" and offer_id is None and task_scope in (None, collection_intake.POOL_SCOPE):
+                activated = self._store._transport.rpc("collection_pool_active_v1", {})
+                if activated is True:
+                    return collection_intake.terms(mode, collection_intake.POOL_SCOPE)
+                if activated is not False:
+                    raise ArenaStoreUnavailable("collection pool readiness unavailable")
+                if task_scope == collection_intake.POOL_SCOPE:
+                    raise ServiceError("collection_inactive", 404)
+            task_scope = task_scope or collection_intake.TASK_SCOPE
+            if offer_id is not None and (mode != "live" or task_scope != collection_intake.TASK_SCOPE):
+                raise ServiceError("collection_offer_unknown", 404)
+            document = collection_intake.terms(mode, task_scope)
+            if mode == "live" and task_scope == collection_intake.CORRECTION_SCOPE:
+                document["fixed_quotes"] = collection_intake.open_correction_quotes(self._store._transport)
+            elif mode == "live":
+                document.update(collection_intake.comparison_offer(self._store._transport, offer_id))
+            return document
+        except collection_intake.IntakeError as exc:
+            raise ServiceError(exc.code, exc.status) from None
 
     def handle_collection_request(self, operation: str, request: Any) -> Dict[str, Any]:
         from lab_arena import collection_intake as collection
@@ -2758,6 +2831,9 @@ class ArenaService:
         )):
             raise ServiceError("collection_request_invalid", 400)
         envelope = request["authorization"] if register else request
+        # Historical funders retain private access to the grant they signed after the mode changes.
+        if not register and isinstance(envelope, dict):
+            mode = next((m for m in ("pilot", "live") if envelope.get("round_id") == collection.scope_id(m)), mode)
         try:
             signed = contracts.validate_signed_request(
                 envelope, expected_scope=collection.SCOPE[operation], now=int(self.now().timestamp()),
@@ -2779,7 +2855,8 @@ class ArenaService:
                 if self._config.credential_manager is None:
                     raise ServiceError("credential_validation_unavailable", 503)
                 owner = resolve_finalized_owner(self._config.chain, hk)
-                return intake.register(signed, owner.coldkey, request["credentials"])
+                published = self.collection_terms(signed["body"].get("task_scope"), signed["body"].get("offer_id")) if mode == "live" else None
+                return intake.register(signed, owner.coldkey, request["credentials"], published=published)
             if operation == "revoke" and set(signed["body"]) == {"registration_id"}:
                 return intake.revoke(hk, signed["body"]["registration_id"])
             if operation == "statement" and not signed["body"]:
@@ -5931,7 +6008,12 @@ class ArenaService:
 
     def _superseded_by_published_day(self, row: Mapping[str, Any]) -> bool:
         latest = self._latest_published_day()
-        return latest is not None and latest > self._evaluation_day(row)
+        if latest is None or latest <= self._evaluation_day(row):
+            return False
+        decision = (row.get("publication_doc") or {}).get("king_decision") or {}
+        if row["round_id"] == "arena-2026-11-23" and decision.get("outcome") == "crowned":
+            return not self._store.prospective_win_ready(row["round_id"])
+        return True
 
     def _pending_promotion_rows(
         self, *, pinned_round_id: Optional[str] = None,
@@ -9414,6 +9496,7 @@ class ArenaService:
                     valuation_source=self._config.collection_emission_valuation,
                     market_store=getattr(self._config, "market_payout_store", None))
             except collection_rewards.EpochNotCurrent as exc:
+                # The same boundary race the legacy path below refuses with 409.
                 raise ServiceError("accepted_weight_epoch_not_current", 409) from exc
             except ServiceError:
                 raise
@@ -9629,6 +9712,8 @@ class ArenaService:
 
         cutoff = (configuration.get("schedule") or {}).get("submission_cutoff")
         return {
+            **({"dispatch_window_policy": configuration["dispatch_window_policy"]}
+               if "dispatch_window_policy" in configuration else {}),
             "max_replacement_attempts": 1,
             "benchmark_icp_count": contracts.benchmark_icp_count(configuration),
             "promotion_margin": contracts.promotion_margin(configuration),

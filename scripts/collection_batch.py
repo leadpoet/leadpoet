@@ -14,21 +14,52 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from lab_arena import collection_judge as judge, collection_judge_review as review
 from lab_arena.collection_calibration import compile_pilot
 from lab_arena.collection_intake import MODELS, live_finney_arena
-from lab_arena.collection_research import export_research_rows
-from lab_arena.collection_workflow import CHAMPION_REV, POET_REV, export_row
+from lab_arena.collection_workflow import comparison_revisions, read_artifact
 from lab_arena.service import S3ObjectStore
 from lab_arena.store import PostgrestTransport
 from scripts.collection_review import read_file, write_new
 from scripts.run_locked_collection import load_batch, assignment
 
 
+def assigned_export_slots(capacity, first, completed, registered):
+    """A successor can expose only its genuine terminal prefix at the original absolute indices."""
+    unique = sorted(set(registered))
+    if (
+        not completed
+        or not unique
+        or min(unique) != first
+        or max(unique) >= capacity
+        or unique != list(range(first, max(unique) + 1))
+        or sorted(completed) != list(range(first, first + len(completed)))
+        or not set(completed) <= set(unique)
+    ):
+        raise ValueError("missing, fabricated or duplicate successor slots")
+    return set(completed)
+
+
 def source_bundle(raw, prompt, transport, objects):
+    if raw.get("reference_successor"):
+        raise ValueError(
+            "a witnessed route comparison is private reference data only for qualification or pricing"
+        )
+    return _registered_projection(raw, prompt, transport, objects)
+
+
+def _registered_projection(raw, prompt, transport, objects, *, export_successor=False):
     policy = load_batch(raw, prompt)
+    agent, builder = comparison_revisions(raw)
     jobs = transport.rpc("collection_batch_jobs_v1", {"p_batch": policy.batch_id})
     expected_count = len(raw["scenario_ids"]) * len(MODELS)
-    if (
-        not isinstance(jobs, list)
-        or not expected_count <= len(jobs) <= 2 * expected_count
+    registered = jobs
+    successor = raw.get("reference_successor") if export_successor else None
+    if successor:
+        terminal = {"accepted", "rejected", "failed"}
+        active_slots = {r["slot"] for r in jobs if r["status"] not in terminal}
+        jobs = [
+            r for r in jobs if r["status"] in terminal and r["slot"] not in active_slots
+        ]
+    if not isinstance(jobs, list) or (
+        not successor and not expected_count <= len(jobs) <= 2 * expected_count
     ):
         raise ValueError("incomplete registered batch")
     if any(j["batch_id"] != policy.batch_id or j["mode"] != raw["mode"] for j in jobs):
@@ -36,7 +67,14 @@ def source_bundle(raw, prompt, transport, objects):
     failures = []
     if policy.pilot:
         jobs, failures = review.terminal_pilot_attempts(jobs)
-    if len(jobs) != expected_count:
+    if successor:
+        assigned_export_slots(
+            expected_count,
+            successor["next_slot"],
+            [j["slot"] for j in jobs],
+            [j["slot"] for j in registered],
+        )
+    elif len(jobs) != expected_count:
         raise ValueError("incomplete registered batch")
     slots = {}
     for job in jobs:
@@ -49,7 +87,7 @@ def source_bundle(raw, prompt, transport, objects):
             or job["status"] not in {"accepted", "rejected", "failed"}
             or job["scenario_id"] != raw["scenario_ids"][index // len(MODELS)]
             or job["model"] != MODELS[index % len(MODELS)]
-            or job["harness_commit"] != CHAMPION_REV
+            or job["harness_commit"] != agent
             or (
                 not job.get("artifact_sha256")
                 and not (policy.pilot and job["status"] == "failed")
@@ -73,7 +111,8 @@ def source_bundle(raw, prompt, transport, objects):
         jobs=jobs,
         failed_attempts=failures,
         objects=objects,
-        expected_builder=POET_REV,
+        expected_builder=builder,
+        capture_version=raw.get("capture_version"),
         planted=keyed_by_run("control_slots"),
         drift=keyed_by_run("drift_slots"),
     )
@@ -90,162 +129,322 @@ def source_bundle(raw, prompt, transport, objects):
     }
     if checked_controls != expected_controls:
         raise ValueError("registered control differs from frozen private case")
-    return bundle
+    from lab_arena.collection_quality import verify_split
+    if "split_manifest" not in raw:
+        raise ValueError("review requires a frozen template, rule and tool split")
+    for item in bundle["runs"]:
+        verify_split(item["packet"].get("split"), raw["split_manifest"])
+        if (item["packet"]["checks"].get("training_split") is not True
+                or item["packet"]["checks"].get("privacy") is not True):
+            raise ValueError("hidden or unchecked material in review batch")
+    if raw.get("claim_protocol") == "collection.fresh-claims.v2":
+        bundle["claim_protocol"] = raw["claim_protocol"]
+    if successor:
+        # Deliberately non-qualifying. The registered projection was verified in memory above.
+        bundle["schema"] = "collection.successor-export-sources.v1"
+    return {**bundle, "split_manifest_sha256": judge.digest(raw["split_manifest"])}
 
 
-def read_artifact(objects, batch, run, kind, link, limit):
-    digest = link.get("sha256")
-    if type(digest) is not str or not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
-        raise ValueError("missing trusted artifact hash")
-    ref = f"collection/{batch}/{run}/{kind}-{digest[7:]}.json"
-    if link.get("key", ref) != ref:
-        raise ValueError("cross-run artifact reference")
-    data = objects.get_bounded(ref, limit)
-    if hashlib.sha256(data).hexdigest() != digest[7:]:
-        raise ValueError("stored evidence did not match review")
-    return json.loads(data)
+def write_exports(raw, prompt, database, objects, output, *, qualification=None, only_jobs=None, publish=True):
+    """Publish authorized, originally funded comparison traces against a separately qualified panel."""
+    from lab_arena import collection_intake as intake, collection_trajectories as traces
+    from lab_arena.collection_broker import batch_versions
+    from lab_arena.collection_experiment_export import verified_panel
+    from lab_arena.collection_quality import (
+        require_release_partition,
+        verify_split,
+        PARTITIONS,
+    )
+    from lab_arena.collection_workflow import store_artifact
 
+    from lab_arena.collection_worker import registered_native_result
+    from scripts.run_locked_collection import verify_live_panel
 
-def write_exports(bundle, receipt, public_key, objects, output):
-    """Publish an exclusive private ZIP after verifying all members. Failure leaves no partial ZIP."""
-    report = review.verify_review(bundle, receipt, public_key)
-    policy = judge.BatchPolicy(**bundle["policy"])
-    assignments = {a["run_id"]: a for a in bundle["assignments"]}
-    controls = set(bundle["planted"]) | set(bundle["drift"])
-    modes = ("decisions", "reasoning", "hard_steps")
-    metadata = {
-        "schema": "leadpoet.collection.training-release.v1",
-        "batch": policy.batch_id,
-        "review_sha256": judge.digest(receipt),
-        "views": {},
-        "preferred_runs": {},
-    }
+    terms = raw.get("terms_sha256")
+    native = "payment_rule" in raw
+    if only_jobs is not None and not native:
+        raise ValueError("incremental comparison release requires an approved native offer")
+    expected_terms = intake.PAID_WORKFLOW_TERMS_HASH if native else intake.SYNTHETIC_TRAINING_TERMS_HASH
+    if not terms or terms != expected_terms:
+        raise ValueError("comparison enrollment did not grant training release rights")
+    if not qualification and not native:
+        raise ValueError("independent reviewer and qualification signatures required")
+    policy = load_batch(raw, prompt)
+    split = raw["split_manifest"]
+    split_hash = "sha256:" + judge.digest(split)
+    require_release_partition(
+        {
+            "cases": [{"scenario_id": sid} for sid in raw["scenario_ids"]],
+            "split_sha256": split_hash,
+        }
+    )
+    if native:
+        schedule = database.rpc("collection_offer_schedule_v1", {"p_offer": policy.batch_id})
+        approved = (schedule or {}).get("pilot_evidence") or {}
+        verify_live_panel(raw, policy, approved)
+    else:
+        approved = verified_panel(database, objects, raw, policy, **qualification)
+    witness = None
+    successor = raw.get("reference_successor")
+    if successor or raw.get("route_witness_sha256"):
+        from lab_arena.collection_route_witness import (
+            verified_witness,
+            verify_matching_panel,
+        )
+
+        witness = verified_witness(raw, objects)
+        verify_matching_panel(
+            raw,
+            policy,
+            qualification["raw"],
+            qualification["prompt"],
+            database,
+            successor=bool(successor),
+        )
+    if not raw.get("capture_version"):
+        raise ValueError(
+            "comparison training release requires a checkpointed transcript"
+        )
+    bundle = {} if native else _registered_projection(
+        raw, prompt, database, objects, export_successor=bool(successor)
+    )
+    rows = database.rpc("collection_batch_jobs_v1", {"p_batch": policy.batch_id})
+    if only_jobs is not None:
+        rows = [row for row in rows if row["job_id"] in only_jobs]
+        if not only_jobs or len(rows) != len(only_jobs) or {row["job_id"] for row in rows} != set(only_jobs):
+            raise ValueError("snapshot jobs differ from registered work")
+    grants = traces.verified_grants(
+        database,
+        policy.batch_id,
+        rows,
+        mode=raw["mode"],
+        scope=intake.TASK_SCOPE,
+        digest=terms,
+        allow_pending=native or bool(successor),
+        **({"subset": True} if only_jobs is not None else {}),
+    )
+    by_id = {item["packet"]["run_id"]: item for item in bundle.get("runs", ())}
+    failed = {item["run_id"] for item in bundle.get("failed_attempts", ())}
+    if native:
+        rows = [job for job in rows if job["status"] in {"accepted", "rejected", "failed"}
+                and not grants[job["job_id"]]["unresolved"]]
+        if not rows:
+            raise ValueError("no settled native collection runs available to export")
+        roster = [m for m in MODELS if m in raw["budgets_microusd"]]
+        for job in rows:
+            rid = job["job_id"]
+            slot = job["slot"]
+            if (job["batch_id"] != policy.batch_id or job["mode"] != raw["mode"]
+                    or type(slot) is not int or not 0 <= slot < len(raw["scenario_ids"]) * len(roster)
+                    or job["scenario_id"] != raw["scenario_ids"][slot // len(roster)]
+                    or job["model"] != roster[slot % len(roster)] or job["harness_commit"] != comparison_revisions(raw)[0]):
+                raise ValueError("registered native job differs from the frozen assignment")
+            if job["status"] == "failed":
+                failed.add(rid)
+                continue
+            manifest, checked = registered_native_result(job, objects, policy, approved)
+            if (checked["eligible"] != (job["status"] == "accepted")
+                    or checked["cost_microusd"] != grants[rid]["miner_cost_microusd"]
+                    or checked["calls"] != grants[rid]["generator_calls"]):
+                raise ValueError("verified native run differs from the funded outcome")
+            packet = read_artifact(objects, policy.batch_id, rid, "judge-input", manifest["packet"], 16 * 1024 * 1024)
+            by_id[rid] = {"packet": packet, "assessment": None,
+                          "manifest_sha256": job["artifact_sha256"], "native": checked}
+
+    if successor:
+        allowed = set(by_id) | failed
+        rows = [r for r in rows if r["job_id"] in allowed]
+    if set(by_id) | failed != {r["job_id"] for r in rows}:
+        raise ValueError("registered jobs changed during release")
+    controls = set(bundle.get("planted", ())) | set(bundle.get("drift", ()))
+    agent, builder = comparison_revisions(raw)
+    revisions = batch_versions(raw["routes"])
+    settings_hash = "sha256:" + judge.digest(raw)
     if output.exists():
         raise FileExistsError(output)
-    with tempfile.TemporaryDirectory(dir=output.parent) as temporary:
-        root = Path(temporary)
-        paths = {m: root / (m + ".jsonl") for m in modes}
-        import contextlib
-
-        with contextlib.ExitStack() as stack:
-            handles = {m: stack.enter_context(p.open("xb")) for m, p in paths.items()}
-            hashes = {m: hashlib.sha256() for m in modes}
-            counts = dict.fromkeys(modes, 0)
-            allowed = {
-                item["assessment"]["run_id"]
-                for item in bundle["runs"]
-                if item["assessment"]["run_id"] not in controls
-                and judge.training_selection(
-                    item["assessment"],
-                    approved_claim_runs=report.get("approved_claim_runs", []),
-                )
-            }
-            for item in bundle["runs"]:
-                a = item["assessment"]
-                run = a["run_id"]
-                assignment_doc = assignments[run]
-                sid = a["scenario_id"]
-                manifest = read_artifact(
-                    objects,
-                    policy.batch_id,
-                    run,
-                    "manifest",
-                    {"sha256": item["manifest_sha256"]},
-                    1024 * 1024,
-                )
+    with tempfile.TemporaryDirectory(dir=output.parent) as td:
+        stage = Path(td) / "trajectories.zip"
+        with ZipFile(stage, "x", compression=ZIP_DEFLATED) as z:
+            full = traces.TrajectoryArchive(z)
+            for job in sorted(rows, key=lambda r: (r["slot"], r["attempt"])):
+                rid = job["job_id"]
                 if (
-                    manifest["job_id"] != run
-                    or manifest["batch_id"] != policy.batch_id
-                    or manifest["model"] != assignment_doc["generator"]
-                    or manifest["model"] not in MODELS
-                    or manifest["harness_commit"] != CHAMPION_REV
-                    or manifest["builder_commit"] != POET_REV
-                    or manifest["scenario_id"] != sid
-                    or manifest.get("judge_policy") != bundle["policy"]
-                    or manifest["assessment"]["sha256"] != "sha256:" + judge.digest(a)
-                    or manifest["packet"]["sha256"] != "sha256:" + judge.digest(item["packet"])
+                    rid in controls
+                    or str(job["slot"]) in raw["control_slots"]
+                    or str(job["slot"]) in raw["drift_slots"]
                 ):
-                    raise ValueError("generator source authority differs")
-                if manifest.get("ranking"):
-                    ranking = read_artifact(
+                    full.stats["excluded_controls"] += 1
+                    continue
+                auth = grants[rid]
+                if auth["unresolved"]:
+                    raise ValueError("unconfirmed miner charges for successor row")
+                billed = dict(
+                    job,
+                    **{
+                        k: auth[k]
+                        for k in (
+                            "miner_cost_microusd",
+                            "generator_calls",
+                            "unresolved",
+                        )
+                    },
+                )
+                packet = None
+                assessment = None
+                hold = None
+                stamp = None
+                if rid in by_id:
+                    item = by_id[rid]
+                    if item["manifest_sha256"] != job.get(
+                        "pilot_review_sha256", job["artifact_sha256"]
+                    ):
+                        raise ValueError("registered generator manifest changed")
+                    manifest = read_artifact(
                         objects,
                         policy.batch_id,
-                        run,
-                        "ranking",
-                        manifest["ranking"],
+                        rid,
+                        "manifest",
+                        {"sha256": item["manifest_sha256"]},
                         1024 * 1024,
                     )
-                    if ranking is not None and ranking.get("status") == "ranked":
-                        if (
-                            ranking["batch_id"] != policy.batch_id
-                            or ranking["scenario_id"] != sid
-                            or ranking["policy_sha256"]
-                            != judge.digest(bundle["policy"])
-                        ):
-                            raise ValueError("ranking binding differs")
-                        first = ranking["labels"][ranking["record"]["order"][0]]
-                        if first in allowed:
-                            metadata["preferred_runs"][sid] = first
-                if run not in allowed:
-                    continue
-                row = read_artifact(
-                    objects,
-                    policy.batch_id,
-                    run,
-                    "generator",
-                    manifest["generator"],
-                    128 * 1024 * 1024,
-                )
-                if row["run"] != run:
-                    raise ValueError("generator run differs")
-                if sid.startswith("research-"):
-                    segments = row["research_rows"]
-                else:
-                    segments = [row]
-                if not segments or any(
-                    s["teacher"] != manifest["model"]
-                    or s["task"] != sid
-                    or s["run"] != run
-                    for s in segments
-                ):
-                    raise ValueError("generator identity differs")
-                for mode in modes:
-                    views = (
-                        export_research_rows(row, a, mode)
-                        if sid.startswith("research-")
-                        else [export_row(row, a, mode)]
+                    generator = read_artifact(
+                        objects,
+                        policy.batch_id,
+                        rid,
+                        "generator",
+                        manifest["generator"],
+                        128 * 1024 * 1024,
                     )
-                    if not views or any(v is None for v in views):
-                        raise ValueError("selected run has no trainable prefix")
-                    for view in views:
-                        data = (
-                            json.dumps(
-                                view,
-                                ensure_ascii=False,
-                                allow_nan=False,
-                                separators=(",", ":"),
-                            )
-                            + "\n"
-                        ).encode()
-                        hashes[mode].update(data)
-                        handles[mode].write(data)
-                        counts[mode] += 1
-        for m in modes:
-            metadata["views"][m] = {"rows": counts[m], "sha256": hashes[m].hexdigest()}
-        if not counts["decisions"]:
-            raise ValueError("no trainable rows")
-        archive = root / "release.zip"
-        with ZipFile(archive, "x", compression=ZIP_DEFLATED) as z:
-            for m, path in paths.items():
-                z.write(path, arcname=path.name)
-            z.writestr("manifest.json", json.dumps(metadata, sort_keys=True))
-        archive.chmod(0o600)
-        os.link(archive, output)
+                    packet = item["packet"]
+                    assessment = item["assessment"]
+                    stamp = verify_split(packet["split"], split)
+                    if generator.get("split") != {k: stamp[k] for k in PARTITIONS}:
+                        raise ValueError("comparison transcript differs from its split")
+                    calls = [
+                        ev
+                        for ev in (generator.get("evidence") or {}).get("events", [])
+                        if ev["kind"] == "reply"
+                    ]
+                    if (
+                        not billed["generator_calls"]
+                        or not billed["miner_cost_microusd"]
+                    ):
+                        raise ValueError(
+                            "complete generator has no verified funded call"
+                        )
+                else:
+                    saved = f"collection/{policy.batch_id}/{rid}/saved/"
+                    pointer = objects.get_optional_bounded(saved + "split.json", 8192)
+                    if pointer:
+                        stamp = verify_split(
+                            read_artifact(
+                                objects,
+                                policy.batch_id,
+                                rid,
+                                "split",
+                                json.loads(pointer),
+                                1024 * 1024,
+                            ),
+                            split,
+                        )
+                    original = (
+                        bundle.get("failed_journals", {}).get(rid, {}).get("events")
+                    )
+                    generator, calls, hold = traces.partial_generator(
+                        objects, job, original
+                    )
+                    if not stamp:
+                        hold = "missing_verified_split"
+                    if (
+                        objects.get_optional_bounded(saved + "quarantine.json", 8192)
+                        is not None
+                    ):
+                        hold = "quarantine"
+                trajectory = traces.trajectory_row(
+                    job=billed,
+                    generator=None if hold else generator,
+                    packet=packet,
+                    calls=calls,
+                    settings_sha256=settings_hash,
+                    harness=agent,
+                    builder=builder,
+                    revision=revisions[job["model"]],
+                    route=raw["routes"][job["model"]],
+                    split=stamp,
+                    terms_sha256=terms,
+                    assessment=assessment,
+                    partial=rid in failed,
+                    hold=hold,
+                )
+                if native:
+                    checked = by_id.get(rid, {}).get("native")
+                    if checked is not None:
+                        traces.apply_native_labels(trajectory, checked, job.get("price_microusd"))
+                    else:
+                        trajectory.update(verification_method=raw["payment_rule"], verified_complete=False,
+                                          verified_task_pass=None, payment_eligible=False, earned_target_microusd=0)
+                if successor:
+                    trajectory["reference_successor"] = dict(successor)
+                if witness and job["model"] == witness["model"]:
+                    trajectory["route_witness"] = witness
+                full.write(trajectory)
+            result = full.finish()
+            metadata = {
+                "schema": traces.SCHEMA,
+                "batch_id": policy.batch_id,
+                "settings_sha256": settings_hash,
+                "split_sha256": split_hash,
+                ("price_schedule_sha256" if native else "qualification_sha256"): "sha256:" + judge.digest(approved),
+                "rows": result.get("trajectory_rows", 0),
+                **result,
+            }
+            if successor:
+                metadata["reference_successor"] = dict(successor)
+                metadata["actual_slots"] = sorted({j["slot"] for j in rows})
+                metadata["complete_qualification_batch"] = False
+            if witness:
+                metadata["route_witness"] = witness
+            z.writestr("metadata.json", judge._json(metadata))
+        os.chmod(stage, 0o600)
+        if publish:
+            store_artifact(objects, policy.batch_id, "export", "split", split)
+            store_artifact(objects, policy.batch_id, "export", "release", metadata)
+        os.link(stage, output)
     return metadata
 
 
+def paid_capture_counts(archive, job, batch):
+    """Verify the accepted job in a private first-payment export."""
+    from uuid import UUID
+    from lab_arena.collection_worker import P7_PAYMENT_RULE
+
+    if str(UUID(job)) != job:
+        raise ValueError("invalid funded job identifier")
+    path = f"trajectories/{job}.jsonl"
+    with ZipFile(archive) as z:
+        if z.namelist().count(path) != 1:
+            raise ValueError("first paid trajectory is missing or duplicated")
+        with z.open(path) as source:
+            row = json.load(source)
+    if (
+        row["run_id"] != job
+        or row["batch_id"] != batch
+        or row["job_status"] != "accepted"
+        or row["verified_task_pass"] is not True
+        or row["verification_method"] != P7_PAYMENT_RULE
+    ):
+        raise ValueError("export does not prove the first accepted paid job")
+    counts = row["length"]
+    if any(
+        type(counts.get(k)) is not int or counts[k] <= 0
+        for k in ("reasoning_bytes", "tool_result_bytes")
+    ):
+        raise ValueError("first paid trajectory lacks reasoning or tool results")
+    return counts
+
+
 def cutover_anchor(transport, *, launch_job=None):
-    """Bind an operator's pricing document to the current finalized legacy epoch."""
+    """Bind pricing to the current signed, finalized epoch before paid collection."""
     from lab_arena import chain, signing
     from lab_arena.store import ArenaStore
     from leadpoet_canonical.arena_weights import verify_accepted_weight_state_signature
@@ -258,10 +457,21 @@ def cutover_anchor(transport, *, launch_job=None):
         snapshot = chain.finalized_epoch_snapshot(client)
         epoch = snapshot.settlement_epoch_id(chain.load_arena_cutover())
         row = ArenaStore(transport).get_weight_state("finney", 71, epoch)
-        if not row or row["state_doc"]["reward_basis"]["schema_version"].startswith(
-            "leadpoet.collection."
-        ):
-            raise ValueError("current signed legacy state required")
+        if not row:
+            raise ValueError("current signed state required")
+        basis = row["state_doc"]["reward_basis"]
+        if basis["schema_version"].startswith("leadpoet.collection."):
+            # The prospective retirement can have signed many empty epochs.
+            # Paid launch still needs its original signed approvals and live job.
+            schedule = transport.rpc("collection_reward_schedule_v1", {})
+            if (
+                basis["schema_version"] != "leadpoet.collection.fixed_run_quotes.v1"
+                or basis["job_count"] != 0
+                or basis["quotes_microusd"]
+                or basis["valuation"] is not None
+                or (schedule and not schedule.get("staged"))
+            ):
+                raise ValueError("expected an unpaid collection epoch before launch")
         signer = signing.KmsSigner(
             os.environ["LAB_ARENA_SIGNING_KEY_ID"],
             region_name=os.environ.get("AWS_REGION"),
@@ -310,13 +520,23 @@ def cutover_anchor(transport, *, launch_job=None):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=("bundle", "prices", "export"))
+    p.add_argument("action", choices=("bundle", "prices", "export", "experiment-audit", "corrections", "training-feedback"))
     p.add_argument("--batch", type=Path, required=True)
     p.add_argument("--prompt", type=Path, required=True)
     p.add_argument("--receipt", type=Path)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--panel-batch", type=Path)
+    p.add_argument("--panel-prompt", type=Path)
+    p.add_argument("--qualification", type=Path)
+    p.add_argument("--dataset-metadata", type=Path)
+    p.add_argument("--evaluation", type=Path)
     args = p.parse_args(argv)
-    if args.action != "bundle" and args.receipt is None:
+    raw, prompt = (json.loads(read_file(path)) for path in (args.batch, args.prompt))
+    from lab_arena.collection_pool import POOL_PAYMENT_RULE
+    native_export = (args.action == "export" and "payment_rule" in raw) or (
+        args.action == "corrections" and raw.get("payment_rule") == POOL_PAYMENT_RULE
+    )
+    if args.action in {"prices", "export", "corrections"} and not native_export and args.receipt is None:
         p.error("--receipt is required")
     if not live_finney_arena():
         raise ValueError("expected Finney/71 operator configuration")
@@ -328,7 +548,74 @@ def main(argv=None):
         os.environ["LAB_ARENA_BUCKET"],
         prefix=os.environ.get("LAB_ARENA_OBJECT_PREFIX", ""),
     )
-    raw, prompt = (json.loads(read_file(path)) for path in (args.batch, args.prompt))
+    from lab_arena.collection_experiment import SCHEMA, load_experiment
+    from lab_arena.collection_experiment_export import record_feedback, write_dataset
+
+    experiment = raw.get("schema") == SCHEMA
+    if args.action == "training-feedback":
+        if not args.dataset_metadata or not args.evaluation:
+            p.error("supply the released dataset metadata and signed Poet evaluation")
+        metadata = json.loads(read_file(args.dataset_metadata))
+        batch = (
+            load_experiment(raw, prompt).batch_id
+            if experiment
+            else load_batch(raw, prompt).batch_id
+        )
+        if metadata["batch_id"] != batch:
+            raise ValueError("evaluation references a different batch")
+        ref = record_feedback(
+            metadata,
+            json.loads(read_file(args.evaluation)),
+            objects,
+            read_file(
+                Path(os.environ["LAB_ARENA_COLLECTION_TRAINER_PUBLIC_KEY_FILE"]),
+                private=False,
+            ),
+        )
+        write_new(args.output, ref)
+        return 0
+    if args.action in {"experiment-audit", "corrections", "export"}:
+        qualification = None
+        if args.action != "experiment-audit" and not native_export:
+            if not (args.panel_batch and args.panel_prompt and args.qualification):
+                p.error(
+                    "supply the original qualification pilot and independent approvals"
+                )
+            qualification = {
+                "raw": json.loads(read_file(args.panel_batch)),
+                "prompt": json.loads(read_file(args.panel_prompt)),
+                "receipt": json.loads(read_file(args.receipt)),
+                "approval": json.loads(read_file(args.qualification)),
+                "reviewer_key": read_file(
+                    Path(os.environ["LEADPOET_COLLECTION_REVIEW_PUBLIC_KEY_FILE"]),
+                    private=False,
+                ),
+                "approver_key": read_file(
+                    Path(
+                        os.environ["LEADPOET_COLLECTION_QUALIFICATION_PUBLIC_KEY_FILE"]
+                    ),
+                    private=False,
+                ),
+            }
+        if experiment:
+            result = write_dataset(
+                load_experiment(raw, prompt),
+                db,
+                objects,
+                args.output,
+                qualification=qualification,
+                full_trajectories=args.action == "export",
+                corrections_only=args.action == "corrections",
+                prompt=prompt,
+            )
+        elif args.action == "export":
+            result = write_exports(
+                raw, prompt, db, objects, args.output, qualification=qualification
+            )
+        else:
+            p.error("expected an experiment manifest")
+        print(json.dumps({"batch": result["batch_id"], "rows": result["rows"]}))
+        return 0
     bundle = source_bundle(raw, prompt, db, objects)
     if args.action == "bundle":
         write_new(args.output, bundle)
@@ -340,16 +627,39 @@ def main(argv=None):
             maximum=8192,
             private=False,
         )
-        if args.action == "prices":
-            write_new(
-                args.output,
-                dict(
-                    compile_pilot(db, bundle, receipt, public_key, objects),
-                    cutover_anchor=cutover_anchor(db),
+        write_new(
+            args.output,
+            dict(
+                compile_pilot(
+                    db,
+                    bundle,
+                    receipt,
+                    public_key,
+                    objects,
+                    witnessed_batch=(raw, prompt),
+                    approval=(
+                        json.loads(read_file(args.qualification))
+                        if args.qualification
+                        else None
+                    ),
+                    approver_key=(
+                        read_file(
+                            Path(
+                                os.environ[
+                                    "LEADPOET_COLLECTION_QUALIFICATION_PUBLIC_KEY_FILE"
+                                ]
+                            ),
+                            maximum=8192,
+                            private=False,
+                        )
+                        if args.qualification
+                        else None
+                    ),
                 ),
-            )
-        else:
-            write_exports(bundle, receipt, public_key, objects, args.output)
+                cutover_anchor=cutover_anchor(db),
+            ),
+        )
+
     print(
         json.dumps(
             {

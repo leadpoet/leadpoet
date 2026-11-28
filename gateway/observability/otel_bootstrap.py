@@ -409,6 +409,7 @@ ARENA_DENIAL_CODES = frozenset(
         "champion_rounds_replaced_by_collection",
         "collection_inactive",
         "collection_ineligible_hotkey",
+        "collection_offer_unknown",
         "collection_request_invalid",
         "collection_weight_state_unavailable",
         "accepted_judgment_binding_invalid",

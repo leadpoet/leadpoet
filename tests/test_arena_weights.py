@@ -1,4 +1,5 @@
 import base64
+import hashlib
 from copy import deepcopy
 
 import pytest
@@ -351,6 +352,11 @@ def test_runtime_transaction_version_is_bound_across_signed_recovery():
     )
     assert recovered_legacy["extrinsic_hex"] == signed["extrinsic_hex"]
 
+    # A new release may change the default transaction lifetime.
+    restarted.chain_profile = {**restarted.chain_profile, "extrinsic_period": 64}
+    restored = restarted.recover({"accepted_state": state, "recovery_record": legacy})
+    assert restored["extrinsic_hash"] == signed["extrinsic_hash"]
+
 
 def test_protected_signer_rejects_state_burn_key_outside_sealed_policy():
     state, der, key_hash = _signed_state()
@@ -382,6 +388,16 @@ def test_protected_signer_will_not_sign_an_era_past_state_expiry():
     authorization = signed["recovery_record"]["authorization"]
     assert authorization["era_period"] == 4
     assert signed["recovery_record"]["maximum_block"] == 1003
+    # The signed payload must contain the same SCALE mortal-era bytes as the extrinsic.
+    record = signed["recovery_record"]
+    from leadpoet_canonical.hotkey_authority_v2 import encode_weight_signature_payload
+    preimage, _ = encode_weight_signature_payload(
+        profile={**_chain_profile(), "extrinsic_period": 4},
+        call_bytes=bytes.fromhex(record["call_data_hex"]),
+        era_current=authorization["era_current"], nonce=authorization["nonce"],
+        block_hash=authorization["block_hash"],
+    )
+    assert authorization["signature_payload_preimage_hash"] == "sha256:" + hashlib.sha256(preimage).hexdigest()
 
 
 def test_protected_signer_rejects_state_shorter_than_minimum_mortal_era():
@@ -472,3 +488,78 @@ def test_reveal_proof_rejects_rewarded_uid_recycling():
     recycled = [HOTKEYS[0], HOTKEYS[2], HOTKEYS[1]]
     with pytest.raises(ValidatorChainSourceV2Error, match="UID ownership changed"):
         validate_rewarded_uid_ownership(recycled, bindings)
+
+
+@pytest.mark.parametrize("restarted", [False, True])
+@pytest.mark.parametrize("case", ["closed", "open", "changed", "missing_nonce", "partial_scan"])
+def test_historical_nonce_only_closes_a_proved_elapsed_weight_state(restarted, case):
+    from lab_arena import chain_source
+
+    state, der, key_hash = _signed_state()
+    end_hash = "a" * 64
+    head = 1050 if case == "open" else state["valid_until_block"] + 1
+
+    class Source(_ArenaChain):
+        def find_finalized_extrinsic_inclusion(
+            self, *, expected_extrinsics, expected_commitments, minimum_block, maximum_block
+        ):
+            assert list(expected_extrinsics.values()) == [signed["extrinsic_hex"]]
+            assert maximum_block == 1031 and minimum_block == 1000
+            if case == "partial_scan":
+                raise chain_source.ValidatorChainSourceV2Error(
+                    "no authorized weight extrinsic was found in finalized blocks"
+                )
+            raise chain_source.FinalizedExtrinsicAbsent(minimum_block, maximum_block, end_hash)
+
+        def read_finalized_head(self):
+            return {"block": head, "block_hash": "6" * 64}
+
+        def read_finalized_account_nonce(
+            self, *, finalized_block_hash, account_public_key_hex, archive=False
+        ):
+            if archive:
+                assert finalized_block_hash == end_hash and case != "open"
+                if case == "missing_nonce":
+                    raise chain_source.ValidatorChainSourceV2Error("archive unavailable")
+                return 8 if case == "changed" else 7
+            return self.nonce
+
+    source = Source(state)
+    kwargs = dict(
+        validator_hotkey=HOTKEYS[0],
+        hotkey_public_key_hex="3" * 64,
+        chain_profile=_chain_profile(),
+        chain_source=source,
+        drand_backend=_Drand(),
+        sign_sr25519=lambda _: b"x" * 64,
+        verify_sr25519=lambda sig, _: sig == b"x" * 64,
+        arena_public_key_der=der,
+        arena_public_key_hash=key_hash,
+        network="finney",
+        netuid=71,
+        burn_hotkey=HOTKEYS[0],
+        state_source=_StateSource(state),
+    )
+    signer = ArenaWeightSigner(**kwargs)
+    signed = signer.prepare({"accepted_state": state})
+    source.nonce = 12
+    if restarted:
+        kwargs["sign_sr25519"] = lambda _: pytest.fail("signed during old-journal recovery")
+        signer = ArenaWeightSigner(**kwargs)
+        signer.recover({"accepted_state": state, "recovery_record": signed["recovery_record"]})
+    request = {k: signed[k] for k in ("state_hash", "extrinsic_hash")}
+    if case != "closed":
+        with pytest.raises((ArenaWeightSignerError, chain_source.ValidatorChainSourceV2Error)):
+            signer.confirm(request)
+        assert state["state_hash"] in signer._records
+        return
+    result = signer.confirm(request)
+    assert result["status"] == "not_included_expired" and result["finalized"] is False
+    assert result["expiry_proof"] == {
+        "first_block": 1000,
+        "last_block": 1031,
+        "last_block_hash": end_hash,
+        "nonce": 7,
+    }
+    assert "finalized_nonce" not in result
+    assert state["state_hash"] in signer._records  # No fresh signing authority.

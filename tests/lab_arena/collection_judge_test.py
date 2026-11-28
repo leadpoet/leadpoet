@@ -22,6 +22,11 @@ POLICY = j.BatchPolicy("batch-one", "secret-seed", j.digest(PROMPT))
 ASSIGN = {"run_id": "hidden-miner/run-one", "primary": "fable", "overlap": False}
 
 
+SPLIT = {"schema": "collection.split.v1",
+         "training": {"template_id": ["C01"], "rule_pool": ["fixture-train"], "tool_variant": ["functions"]},
+         "heldout": {"template_id": ["C-hidden"], "rule_pool": ["fixture-hidden"], "tool_variant": ["mcp"]}}
+
+
 def packet(rid=ASSIGN["run_id"]):
     return {
         "run_id": rid,
@@ -40,7 +45,8 @@ def packet(rid=ASSIGN["run_id"]):
             }
             for i in range(1, 6)
         ],
-        "checks": {"account": True},
+        "checks": {"account": True, "training_split": True, "privacy": True},
+        "split": {**{k:v[0] for k,v in SPLIT["training"].items()}, "manifest_sha256": j.digest(SPLIT)},
         "claim_reader": {"units": [], "results": []},
         "miner": "hidden-miner",
         "model": "hidden-generator",
@@ -74,11 +80,11 @@ class Caller:
         self.requests.append(req)
         last = json.loads(req["messages"][-1]["content"])
         if "runs" in last:
-            order = list(last["runs"])[::-1]
+            order = sorted(last["runs"], key=lambda k: json.dumps(last["runs"][k], sort_keys=True))
             out = dict(
                 last["identity"],
                 order=order,
-                margin="clear",
+                margin="tie" if len({json.dumps(t, sort_keys=True) for t in last["runs"].values()}) == 1 else "clear",
                 why_first="Grounded claim.",
                 loser_tags={k: "needless_search" for k in order[1:]},
             )
@@ -360,7 +366,8 @@ def test_claim_reader_refuses_unbound_disagreement_and_requires_missing_written_
     asses = lambda: j.judge_run(POLICY, ASSIGN, p, c, prompt=PROMPT)
     a = asses()
     assert (
-        a["status"] == "accepted"
+        a["status"] == "cannot_judge"
+        and not c.requests
         and a["claim_review"] == "missing"
         and not j.training_selection(a)
     )
@@ -374,7 +381,7 @@ def test_claim_reader_refuses_unbound_disagreement_and_requires_missing_written_
     }
     p["claim_reader"]["results"].append(wrapped)
     a = asses()
-    assert a["claim_review"] == "disputed" and not j.training_selection(a)
+    assert a["claim_review"] == "failed" and not c.requests and not j.training_selection(a)
     wrapped["unit_sha256"] = "wrong"
     with pytest.raises(ValueError, match="unbound"):
         asses()

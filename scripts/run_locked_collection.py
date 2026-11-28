@@ -8,19 +8,31 @@ import json
 import os
 import re
 import sys
+import time
+from tempfile import NamedTemporaryFile
+from functools import partial
 from contextlib import closing, contextmanager, redirect_stdout, ExitStack
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from lab_arena import chain, collection_judge as judge
 from lab_arena.broker import HttpxProviderTransport
-from lab_arena.collection_prices import endpoint_prices
-from lab_arena.collection_broker import CollectionBroker, batch_versions
-from lab_arena.collection_intake import GENERATOR_ROUTES, MODELS, CollectionIntake, live_finney_arena
-from lab_arena.collection_worker import process_job
+from lab_arena.collection_prices import claim_at_current_price, endpoint_prices, prices_for_assignment
+from lab_arena.collection_broker import (
+    CollectionBroker,
+    REFERENCE_MODEL,
+    REFERENCE_ROUTE,
+    batch_versions,
+)
+from lab_arena.collection_intake import (
+    GENERATOR_ROUTES, LEGACY_COMPARISON_TERMS_HASH, MODELS, SYNTHETIC_TRAINING_TERMS_HASH,
+    PAID_TASK_FAMILIES, PAID_WORKFLOW_TERMS_HASH, VERIFIED_PRICE_SCHEMA, VERIFIED_TASK_PRICE_SCHEMA, CollectionIntake, live_finney_arena,
+)
+from lab_arena.collection_worker import P7_PAYMENT_RULE, process_job, verify_paid_job
 from lab_arena.collection_workflow import (
     CHAMPION_REV,
     POET_REV,
+    comparison_revisions,
     build_scenario,
     workflow_sources,
 )
@@ -30,12 +42,31 @@ from lab_arena.service import S3ObjectStore
 from lab_arena.store import PostgrestTransport
 
 
+def paid_family(rule):
+    if rule not in PAID_TASK_FAMILIES:
+        raise ValueError("unknown verified workflow payment rule")
+    return PAID_TASK_FAMILIES[rule]
+
+
 def load_batch(raw, prompt):
+    from lab_arena.collection_claims import protocol_of
+    protocol_of(raw)
+    agent, builder = comparison_revisions(raw)
     if set(raw) - {
         "research_index_sha256",
+        "split_manifest",
+        "panel_qualification_sha256",
+        "claim_protocol",
+        "capture_version",
         "thresholds",
+        "terms_sha256",
+        "reference_successor",
+        "route_witness_sha256",
+        "pricing_pilot",
         "control_artifacts",
         "claim_pack_sha256",
+        "payment_rule",
+        "fixed_quotes_microusd",
     } != {
         "mode",
         "seed",
@@ -52,6 +83,12 @@ def load_batch(raw, prompt):
     ):
         raise ValueError("invalid collection batch")
     scenarios = raw["scenario_ids"]
+    paid = "payment_rule" in raw
+    terms = PAID_WORKFLOW_TERMS_HASH if paid else SYNTHETIC_TRAINING_TERMS_HASH
+    if "terms_sha256" in raw and raw["terms_sha256"] != terms:
+        raise ValueError("unrecognized synthetic collection training terms")
+    if "terms_sha256" in raw and any(isinstance(s, str) and s.startswith("research-") for s in scenarios):
+        raise ValueError("synthetic funding terms cannot authorize research")
     if (
         type(scenarios) is not list
         or not 1 <= len(scenarios) <= 4096
@@ -62,33 +99,122 @@ def load_batch(raw, prompt):
         or len(scenarios) != len(set(scenarios))
     ):
         raise ValueError("scenario pack must contain unique identifiers")
+    if "capture_version" in raw and any(s.startswith("research-") for s in scenarios):
+        raise ValueError("checkpoint comparison requires synthetic workflows")
     if any(s.startswith("research-") for s in scenarios) and not re.fullmatch(
         "[0-9a-f]{64}", raw.get("research_index_sha256", "")
     ):
         raise ValueError("research pack needs a frozen case index")
-    if set(raw["budgets_microusd"]) != set(MODELS) or any(
+    models = set(raw["budgets_microusd"])
+    if paid:
+        from lab_arena.collection_generation import CAPTURE_V2
+        family = paid_family(raw["payment_rule"])
+        task = "P7" if family == "P" else family
+        quotes = raw.get("fixed_quotes_microusd")
+        if (
+            raw["mode"] != "live"
+            or not models or not models <= set(MODELS)
+            or not isinstance(quotes, dict) or set(quotes) != models
+            or any(type(v) is not int or not 0 < v <= 10**10 for v in quotes.values())
+            or raw.get("terms_sha256") != terms or raw.get("capture_version") != CAPTURE_V2
+            or not raw.get("split_manifest")
+            or not all(re.fullmatch(task + r"-s[1-9][0-9]{0,7}", sid) for sid in scenarios)
+            or raw["control_slots"] or raw["drift_slots"] or raw.get("control_artifacts")
+            or any(k in raw for k in ("panel_qualification_sha256", "route_witness_sha256",
+                                      "reference_successor", "pricing_pilot", "claim_pack_sha256",
+                                      "research_index_sha256", "thresholds"))
+        ):
+            raise ValueError("invalid deterministic workflow payment offer")
+    elif "fixed_quotes_microusd" in raw or models != set(MODELS):
+        raise ValueError("every model needs a bounded positive budget")
+    if any(
         type(n) is not int or not 0 < n <= 10**10
         for n in raw["budgets_microusd"].values()
     ):
         raise ValueError("every model needs a bounded positive budget")
     revisions = batch_versions(raw["routes"])
     qualification = set(judge.QUALIFICATION_JUDGES) <= revisions.keys()
-    if qualification and raw["mode"] != "pilot":
-        raise ValueError("candidate judges require a qualification pilot")
+    certificate = raw.get("panel_qualification_sha256")
+    if qualification and raw["mode"] == "live" and not paid:
+        if not re.fullmatch(r"[0-9a-f]{64}", str(certificate)) or "split_manifest" not in raw:
+            raise ValueError("live open judges require independent qualification and a frozen split")
+    elif certificate is not None:
+        raise ValueError("unexpected qualification approval")
+
     if not all(
         re.fullmatch(r"[a-z0-9][a-z0-9._/-]{0,127}", v) for v in raw["routes"].values()
     ):
         raise ValueError("every generator and judge needs one pinned provider route")
-    if any(
-        raw["routes"][model] != route.tag for model, route in GENERATOR_ROUTES.items()
-    ):
-        raise ValueError("unverified generator route")
+    successor = raw.get("reference_successor")
+    full_witness = raw.get("route_witness_sha256")
+    if "pricing_pilot" in raw and (not full_witness or raw["mode"] != "live"):
+        raise ValueError("pricing pilot requires a witnessed paid batch")
+    if "route_witness_sha256" in raw:
+        from lab_arena.collection_route_witness import WITNESS
+        from lab_arena.collection_generation import CAPTURE_V2
+
+        if (
+            successor
+            or full_witness != WITNESS
+            or (raw["mode"] == "live" and (
+                not re.fullmatch(r"rq-[0-9a-f]{64}", str(raw.get("pricing_pilot")))
+                or not certificate or raw["control_slots"] or raw["drift_slots"]
+                or raw.get("control_artifacts")
+            ))
+            or not qualification
+            or raw.get("capture_version") != CAPTURE_V2
+            or raw.get("terms_sha256") != SYNTHETIC_TRAINING_TERMS_HASH
+            or not raw.get("split_manifest")
+            or not all(s.startswith("P7-s") for s in scenarios)
+        ):
+            raise ValueError("invalid full witnessed reference cohort")
+
+    if "reference_successor" in raw:
+        from lab_arena.collection_generation import CAPTURE_V2
+
+        if (
+            not isinstance(successor, dict)
+            or set(successor) != {"parent", "next_slot", "owner_witness_sha256"}
+            or not isinstance(successor["parent"], str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]+-[a-f0-9]{24}", successor["parent"])
+            or type(successor["next_slot"]) is not int
+            or not 0 < successor["next_slot"] < len(MODELS) * len(scenarios)
+            or MODELS[successor["next_slot"] % len(MODELS)] != REFERENCE_MODEL
+            or not isinstance(successor["owner_witness_sha256"], str)
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}", successor["owner_witness_sha256"]
+            )
+            or raw["mode"] != "pilot"
+            or raw.get("capture_version") != CAPTURE_V2
+            or raw.get("terms_sha256") != SYNTHETIC_TRAINING_TERMS_HASH
+            or not qualification
+            or not raw.get("split_manifest")
+            or raw["control_slots"]
+            or raw["drift_slots"]
+            or raw.get("control_artifacts")
+        ):
+            raise ValueError("invalid witnessed reference successor")
+        parent_raw = {k: v for k, v in raw.items() if k != "reference_successor"}
+        parent_raw["routes"] = dict(raw["routes"])
+        parent_raw["routes"][REFERENCE_MODEL] = GENERATOR_ROUTES[REFERENCE_MODEL].tag
+        if load_batch(parent_raw, prompt).batch_id != successor["parent"]:
+            raise ValueError("successor changes earlier frozen batch settings")
+    for model, route in GENERATOR_ROUTES.items():
+        expected = (
+            REFERENCE_ROUTE
+            if (successor or full_witness) and model == REFERENCE_MODEL
+            else route.tag
+        )
+        if paid and model in models and model == REFERENCE_MODEL and raw["routes"][model] == REFERENCE_ROUTE:
+            continue
+        if raw["routes"][model] != expected:
+            raise ValueError("unverified generator route")
     bundle_hash = judge.digest(
         {
             "manifest": raw,
             "prompt": judge.digest(prompt),
-            "champion": CHAMPION_REV,
-            "builder": POET_REV,
+            "champion": agent,
+            "builder": builder,
             "model_revisions": revisions,
         }
     )
@@ -102,14 +228,28 @@ def load_batch(raw, prompt):
     versions = {}
     if qualification:
         versions["fable_version"], versions["astra_version"] = judge.QUALIFICATION_JUDGES
+    if paid:
+        batch_id = "dv-" + bundle_hash
+    elif successor:
+        batch_id = "rs-" + bundle_hash
+    elif full_witness:
+        batch_id = ("lq-" if raw["mode"] == "live" else "rq-") + bundle_hash
+    else:
+        batch_id = raw["name"] + "-" + bundle_hash[:24]
     policy = judge.BatchPolicy(
-        raw["name"] + "-" + bundle_hash[:24],
+        batch_id,
         raw["seed"],
         judge.digest(prompt),
         pilot=raw["mode"] == "pilot",
         **versions,
         **thresholds,
     )
+    for slot in raw["drift_slots"]:
+        if not isinstance(slot, str) or not re.fullmatch(r"0|[1-9][0-9]{0,4}", slot) or int(slot) >= len(MODELS) * len(scenarios):
+            raise ValueError("drift slot outside batch")
+        generator = MODELS[int(slot) % len(MODELS)]
+        if len(judge.independent_roles(policy, generator)) != len(policy.roles):
+            raise ValueError("drift slot requires both independent judges")
     judge.validate_prompt(policy, prompt)
     return policy
 
@@ -128,12 +268,13 @@ def assignment(job):
 def ready_launch_evidence(pending, objects, policy, approved):
     from lab_arena.collection_judge_review import registered_bundle
 
+    agent, builder = comparison_revisions(approved)
     if (
         pending["batch_id"] != policy.batch_id
         or policy.pilot
-        or pending["harness_commit"] != CHAMPION_REV
-        or approved["harness_commit"] != CHAMPION_REV
-        or approved["builder_commit"] != POET_REV
+        or pending["harness_commit"] != agent
+        or approved["harness_commit"] != agent
+        or approved["builder_commit"] != builder
         or approved["judge_prompt_sha256"] != policy.prompt_sha256
     ):
         raise ValueError("staged launch differs from calibrated live batch")
@@ -152,7 +293,8 @@ def ready_launch_evidence(pending, objects, policy, approved):
         objects=objects,
         planted={},
         drift={},
-        expected_builder=POET_REV,
+        expected_builder=builder,
+        capture_version=approved.get("capture_version"),
     )
     checks = evidence["runs"][0]["packet"]["checks"]
     if not all(
@@ -174,9 +316,12 @@ def complete_launch_verdict(assessment):
 def finish_launch(database, pending, objects, policy, approved):
     from scripts.collection_batch import cutover_anchor
 
-    evidence = ready_launch_evidence(pending, objects, policy, approved)
-    if not complete_launch_verdict(evidence["assessment"]):
-        raise ValueError("first live collection job awaits owner verification")
+    if approved.get("schema") == VERIFIED_PRICE_SCHEMA:
+        verify_paid_job(pending, objects, policy, approved)
+    else:
+        evidence = ready_launch_evidence(pending, objects, policy, approved)
+        if not complete_launch_verdict(evidence["assessment"]):
+            raise ValueError("first live collection job awaits owner verification")
     anchor = cutover_anchor(database, launch_job=pending)
     result = database.rpc(
         "collection_launch_finish_v1", {"p_job": pending["job_id"], "p_anchor": anchor}
@@ -185,25 +330,79 @@ def finish_launch(database, pending, objects, policy, approved):
         raise ValueError("collection launch acceptance unavailable")
 
 
+class IncompleteOwnerReview(ValueError):
+    """The bounded owner attempt returned no complete verified verdict."""
+
+
 def rejudge_ready(
-    database, objects, transport, raw, policy, prompt, judge_key, job_id, attempt_id
+    database, objects, transport, raw, policy, prompt, judge_key, job_id, attempt_id,
+    *, interrupted_request=None,
 ):
-    """Retry only an unavailable owner verdict against the exact stored live execution."""
+    """Retry only an unavailable owner verdict against the exact stored execution."""
     from lab_arena.collection_launch_review import LaunchReviewBroker, finish_review
     from lab_arena.collection_workflow import store_artifact
     from scripts.collection_batch import read_artifact
 
-    schedule = database.rpc("collection_reward_schedule_v1", {})
-    pending = schedule.get("pending") or {}
-    if (
-        not schedule.get("staged")
-        or pending.get("status") != "ready"
-        or pending.get("job_id") != job_id
-    ):
-        raise ValueError("requested staged job is not ready for owner adjudication")
-    approved = schedule["pilot_evidence"]
-    evidence = ready_launch_evidence(pending, objects, policy, approved)
+    if policy.pilot:
+        from lab_arena import collection_judge_review as review
+        from lab_arena.collection_quality import verify_split
+
+        rows = database.rpc("collection_batch_jobs_v1", {"p_batch": policy.batch_id})
+        pending = next((r for r in rows if r["job_id"] == job_id), None)
+        if (
+            not pending
+            or pending["mode"] != "pilot"
+            or pending["status"] != "accepted"
+            or str(pending["slot"]) in raw.get("control_artifacts", {})
+            or not raw.get("capture_version")
+            or not raw.get("split_manifest")
+        ):
+            raise ValueError("expected one complete funded ordinary pilot job")
+        _, builder = comparison_revisions(raw)
+        bundle = review.registered_bundle(
+            policy,
+            [assignment(pending)],
+            jobs=[pending],
+            objects=objects,
+            expected_builder=builder,
+            capture_version=raw["capture_version"],
+            planted={},
+            drift={},
+        )
+        bundle["split_manifest_sha256"] = judge.digest(raw["split_manifest"])
+        if raw.get("claim_protocol"):
+            bundle["claim_protocol"] = raw["claim_protocol"]
+        review._read_bundle(bundle)
+        (evidence,) = bundle["runs"]
+        packet = evidence["packet"]
+        verify_split(packet["split"], raw["split_manifest"])
+        if not all(packet["checks"].values()) or judge.claim_verdict(packet) not in (
+            "passed",
+            "not_applicable",
+        ):
+            if interrupted_request is not None:
+                return False
+            raise ValueError("pilot lacks complete native, privacy or factual checks")
+        if pending.get("pilot_review_sha256"):
+            return  # Already verified the only registered recovery above.
+    else:
+        schedule = database.rpc("collection_reward_schedule_v1", {})
+        pending = schedule.get("pending") or {}
+        if (
+            not schedule.get("staged")
+            or pending.get("status") != "ready"
+            or pending.get("job_id") != job_id
+        ):
+            raise ValueError("requested staged job is not ready for owner adjudication")
+        approved = schedule["pilot_evidence"]
+        verify_live_panel(raw, policy, approved)
+        evidence = ready_launch_evidence(pending, objects, policy, approved)
     previous = evidence["assessment"]
+    if interrupted_request is not None:
+        missing = previous.get("verifier_unavailable") or {}
+        if (missing.get("reason") != "http_error" or missing.get("request_id") != interrupted_request
+                or any(v["cannot_judge"] for v in previous["records"])):
+            return False
     if not previous.get("verifier_unavailable") or any(
         v["cannot_judge"] for v in previous["records"]
     ):
@@ -227,16 +426,17 @@ def rejudge_ready(
         judge_key=judge_key,
         attempt_id=attempt_id,
     )
+    channel.panel_qualification = raw.get("panel_qualification_sha256")
     replacement = judge.judge_run(
         policy,
-        {"run_id": job_id, "primary": primary, "overlap": previous["overlap"]},
+        {"run_id": job_id, "primary": primary, "overlap": previous["overlap"], "generator":pending["model"]},
         evidence["packet"],
         channel.judge,
         prompt=prompt,
         previous=previous,
     )
     if not complete_launch_verdict(replacement):
-        raise ValueError(
+        raise IncompleteOwnerReview(
             "owner adjudication did not produce a complete verified record"
         )
     batch = policy.batch_id
@@ -269,6 +469,8 @@ def rejudge_ready(
         quality,
         channel.completed_requests,
     )
+    if policy.pilot:
+        return True
     current = database.rpc("collection_reward_schedule_v1", {}).get("pending") or {}
     if (
         current.get("job_id") != job_id
@@ -276,6 +478,101 @@ def rejudge_ready(
     ):
         raise ValueError("revised launch evidence is not current")
     finish_launch(database, current, objects, policy, approved)
+
+
+def recover_idle_judge(database, objects, transport, raw, policy, prompt, judge_key):
+    """Use at most one owner retry on an idle pilot tick. Existing reservations fence restarts."""
+    candidates = database.rpc("collection_interrupted_pilot_judges_v1", {"p_batch": policy.batch_id})
+    if not candidates:
+        return
+    # Rotate so one unready packet or an exhausted budget cannot hold up other jobs.
+    candidate = candidates[int(time.time() // 300) % len(candidates)]
+    job, request = candidate["job"], candidate["request"]
+    attempt = str(uuid5(UUID(job), "owner-pilot-outage:" + request))
+    try:
+        recovered = rejudge_ready(
+            database, objects, transport, raw, policy, prompt, judge_key,
+            job, attempt, interrupted_request=request,
+        )
+    except IncompleteOwnerReview:
+        status = "pilot_judge_held"
+    else:
+        if not recovered:
+            return
+        status = "pilot_judge_recovered"
+    print(json.dumps({"batch": policy.batch_id, "job": job, "status": status}), flush=True)
+
+
+class ComparisonSplitHold(ValueError):
+    """The pinned comparison pack cannot use a miner's funding."""
+
+
+def pack_split(raw, builders, scenario_id):
+    from lab_arena.collection_quality import admit_built_split
+
+    if not raw.get("split_manifest"):
+        raise ComparisonSplitHold("missing_split_manifest")
+    try:
+        task = build_scenario(builders, scenario_id)
+        return admit_built_split(builders, task, None, raw["split_manifest"])
+    except (ValueError, builders.guard.Refused) as exc:
+        raise ComparisonSplitHold("scenario_not_in_training_partition") from exc
+
+
+def report_split_hold(policy, exc):
+    print(
+        json.dumps(
+            {"batch": policy.batch_id, "status": "comparison_held", "reason": str(exc)}
+        ),
+        flush=True,
+    )
+    return 0
+
+
+def verify_live_panel(raw, policy, approved):
+    schemas = (VERIFIED_PRICE_SCHEMA, VERIFIED_TASK_PRICE_SCHEMA)
+    if "payment_rule" in raw or approved.get("schema") in schemas:
+        family = paid_family(raw.get("payment_rule"))
+        if (
+            approved.get("schema") not in schemas
+            or (approved["schema"] == VERIFIED_PRICE_SCHEMA and family != "P")
+            or approved.get("payment_rule") != raw["payment_rule"]
+            or approved.get("live_batch_id") != policy.batch_id
+            or approved.get("terms_sha256") != raw["terms_sha256"]
+            or approved.get("routes") != {m: raw["routes"][m] for m in raw["budgets_microusd"]}
+            or approved.get("prices") != {family: raw["fixed_quotes_microusd"]}
+            or approved.get("budgets") != {family: raw["budgets_microusd"]}
+            or approved.get("capture_version") != raw["capture_version"]
+            or approved.get("split_manifest_sha256") != judge.digest(raw["split_manifest"])
+            or approved.get("judge_prompt_sha256") != policy.prompt_sha256
+            or comparison_revisions(raw) != (approved.get("harness_commit"), approved.get("builder_commit"))
+        ):
+            raise ValueError("paid workflow differs from the fixed offer")
+        return
+    certificate = raw.get("panel_qualification_sha256")
+    witness = raw.get("route_witness_sha256")
+    priced_id = approved.get("batch_id", "")
+    priced_witness = bool(re.fullmatch(r"rq-[0-9a-f]{64}", str(priced_id)))
+    if (bool(witness) != priced_witness or witness != approved.get("route_witness_sha256")
+            or (witness and raw.get("pricing_pilot") != priced_id)):
+        raise ValueError("generator route differs from the qualified pricing pilot")
+    if (
+        comparison_revisions(raw) != comparison_revisions(approved)
+        or certificate != approved.get("panel_qualification_sha256")
+        or raw.get("claim_protocol", "collection.fresh-claims.v1")
+        != approved.get("claim_protocol", "collection.fresh-claims.v1")
+        or policy.qualification != bool(certificate)
+        or (
+            approved.get("split_manifest_sha256")
+            and (
+                "split_manifest" not in raw
+                or judge.digest(raw["split_manifest"])
+                != approved["split_manifest_sha256"]
+            )
+        )
+    ):
+        raise ValueError("live panel or split differs from approved pilot")
+    return certificate
 
 
 def run_cohort(
@@ -296,16 +593,33 @@ def run_cohort(
     research=None,
     controls=None,
     claim_pack=None,
+    recover_idle_pilot=False,
+    before_claim=None,
 ):
+    if raw.get("route_witness_sha256"):
+        from lab_arena.collection_route_witness import verified_witness
+
+        verified_witness(raw, objects)
+    agent, builder = comparison_revisions(raw)
+    if raw.get("capture_version") and (
+        getattr(sources[0], "source_revision", None),
+        getattr(sources[1], "source_revision", None),
+    ) != (agent, builder):
+        raise ValueError("comparison worker loaded the wrong pinned sources")
     staged = False
     ceiling = dict(raw["budgets_microusd"])
     fees = dict.fromkeys(MODELS, 0)
-    if not judge_key:
+    if not judge_key and not raw.get("payment_rule"):
         raise ValueError("private verifier credential unavailable")
     if not policy.pilot:
-        schedule = database.rpc("collection_reward_schedule_v1", {})
+        schedule = (
+            database.rpc("collection_offer_schedule_v1", {"p_offer": policy.batch_id})
+            if raw.get("payment_rule")
+            else database.rpc("collection_reward_schedule_v1", {})
+        )
         if not schedule or epoch() < schedule["first_epoch"] - 1:
             raise ValueError("payout cutover not ready")
+        verify_live_panel(raw, policy, schedule["pilot_evidence"])
         staged = schedule.get("staged", False)
         if staged and schedule.get("pending"):
             pending = schedule["pending"]
@@ -313,31 +627,39 @@ def run_cohort(
                 finish_launch(database, pending, objects, policy, schedule["pilot_evidence"])
             return 0
         approved = schedule["pilot_evidence"]
-        (family,) = {
-            ("research" if sid.startswith("research-") else sid[0])
-            for sid in raw["scenario_ids"]
-        }
+        if raw.get("payment_rule"):
+            family = paid_family(raw["payment_rule"])
+        else:
+            (family,) = {("research" if sid.startswith("research-") else sid[0]) for sid in raw["scenario_ids"]}
         if (
-            approved["harness_commit"] != CHAMPION_REV
-            or approved["builder_commit"] != POET_REV
+            approved["harness_commit"] != agent
+            or approved["builder_commit"] != builder
             or approved["judge_prompt_sha256"] != policy.prompt_sha256
         ):
             raise ValueError("live arm differs from the measured pilot")
         fees = approved["prices"][family]
         if approved["budgets"][family] != ceiling:
             raise ValueError("live cap differs from pilot")
+    splits = {}
     for sid in raw["scenario_ids"]:
         if sid.startswith("research-"):
             if research is None:
                 raise ValueError("research runner and label evidence required")
         else:
-            build_scenario(sources[1], sid)
+            try:
+                splits[sid] = pack_split(raw, sources[1], sid)
+            except ComparisonSplitHold as exc:
+                return report_split_hold(policy, exc)
     completed = 0
     for _ in range(max_jobs):
-        job = intake.claim(
-            policy.batch_id, raw["scenario_ids"], CHAMPION_REV, fees, ceiling
+        claim = partial(
+            intake.claim, policy.batch_id, raw["scenario_ids"], agent, fees, ceiling,
+            terms_hash=raw.get("terms_sha256", LEGACY_COMPARISON_TERMS_HASH),
         )
+        job, job_prices = claim_at_current_price(claim, pricing, before_claim=before_claim)
         if not job:
+            if recover_idle_pilot and policy.pilot and raw.get("capture_version") and raw.get("split_manifest"):
+                recover_idle_judge(database, objects, transport, raw, policy, prompt, judge_key)
             break
         try:
             if owner_lookup(job["miner_hotkey"]).coldkey != job["owner_coldkey"]:
@@ -347,14 +669,16 @@ def run_cohort(
                 database,
                 transport,
                 job,
-                pricing,
+                job_prices,
                 routes=raw["routes"],
                 judge_key=judge_key,
             )
+            model_broker.panel_qualification = raw.get("panel_qualification_sha256")
+            model_broker.pricing_pilot = raw.get("pricing_pilot")
             a = assignment(job)
             manifest = process_job(
                 job=job,
-                assignment=judge.assign_judges(policy, [a])[a["run_id"]],
+                assignment=a if raw.get("payment_rule") else judge.assign_judges(policy, [a])[a["run_id"]],
                 policy=policy,
                 prompt=prompt,
                 intake=intake,
@@ -366,6 +690,10 @@ def run_cohort(
                 control_packet=controls.bind(job) if controls else None,
                 claim_pack=claim_pack,
                 prepare_launch=staged,
+                **({"payment_rule": raw["payment_rule"]} if "payment_rule" in raw else {}),
+                capture_version=raw.get("capture_version"),
+                split=splits.get(job["scenario_id"]),
+                claim_protocol=raw.get("claim_protocol", "collection.fresh-claims.v1"),
             )
         except Exception as exc:
             # Never print raw model output, arguments, credentials or provider messages.
@@ -411,16 +739,322 @@ def evidence_stores():
     )
 
 
+def stage_failed_pool_continuation(spec, job, *, database, objects, directory, inputs, prompt):
+    """At most one outstanding continuation per ordinary program and one per scenario."""
+    from lab_arena.collection_experiment import load_experiment, pool_program_id
+    from lab_arena.collection_pool_source import funded_source
+    from scripts.collection_review import read_file
+    from scripts.prepare_collection_experiment import (
+        lock_pool_directory,
+        matches_continuation,
+        store_private_json,
+    )
+
+    corrector = spec.raw["correction_model"]
+    scenario = job["scenario_id"]
+    seed = scenario.split("-s")[1]
+    if job["batch_id"] != spec.batch_id or job["model"] == corrector:
+        raise ValueError("invalid student or independent correction model")
+    program = pool_program_id(spec.raw)
+    # Serialize competing trusted workers' decisions on this existing directory.
+    # Source bytes and manifests are hash-addressed; no new queue or mutable job state.
+    with lock_pool_directory(directory):
+        latest = None
+        for path in directory.glob("pool-*.json"):
+            raw = json.loads(read_file(path))
+            if raw.get("auto_from_program") != program:
+                # A manually staged correction can have a different pack ID and
+                # source projection but still resume this same original paid case.
+                if matches_continuation(
+                    raw, inputs, scenario, spec.batch_id, {corrector}
+                ):
+                    return None
+                continue
+            case = raw["cases"][0]["scenario_id"]
+            if case == scenario:
+                return None
+            other = int(case.split("-s")[1])
+            if latest is None or other > latest[0]:
+                latest = other,path.stem
+        if latest:
+            if latest[0] >= int(seed):
+                return None
+            previous = database.rpc("collection_batch_jobs_v1",{"p_batch":latest[1]})
+            if not any(j["status"] in {"accepted","rejected","failed"} for j in previous):
+                return None
+        source = funded_source(
+            database,
+            objects,
+            spec.batch_id,
+            job["job_id"],
+            prompt,
+            classify_grounding=True,
+        )
+        if not (
+            source["rejected_fatal"] or source["failure"].get("unrepaired_grounding")
+        ):
+            return None
+        source_hash = "sha256:" + judge.digest(source)
+        expert = next(a for a in spec.raw["arms"] if a["model"]==corrector)
+        raw = {k:v for k,v in spec.raw.items() if k not in ("successor_seeds","correction_model","series_arm_order")}
+        raw.update(id="continue-"+program[:24],auto_from_program=program,max_slots=1,
+                   cases=[{"scenario_id":scenario,"source_sha256":source_hash}],
+                   arms=[dict(expert,id="correction",role="continuation",repeats=1)],
+                   routes={corrector:spec.routes[corrector]},budget_microusd=expert["budget_microusd"],
+                   question="Can the expert recover from the observed failing action at the same state?")
+        continuation=load_experiment(raw,prompt)
+        store_private_json(inputs/(source_hash[7:]+".json"),source)
+        store_private_json(directory/(continuation.batch_id+".json"),raw)
+        print(json.dumps({"batch":continuation.batch_id,"source_job":job["job_id"],"status":"correction_staged"}),flush=True)
+        return continuation.batch_id
+
+
+def _freeze_pool_successor(parent, directory, prompt, leader):
+    from lab_arena.collection_experiment import load_experiment, pool_program_id
+    from scripts.collection_review import read_file
+    from scripts.prepare_collection_experiment import (
+        lock_pool_directory,
+        store_private_json,
+    )
+
+    family, last = parent.raw["cases"][-1]["scenario_id"].split("-s")
+    seed = int(last) + 1
+    size = len(parent.raw["cases"])
+    cases = [{"scenario_id": f"{family}-s{i}"} for i in range(seed, seed + size)]
+    raw = dict(parent.raw, cases=cases)
+    group = pool_program_id(parent.raw)
+    if leader and leader[0] == raw["id"]:
+        model = leader[1]
+        arms = raw["arms"]
+        if model not in {arm["model"] for arm in arms}:
+            raise ValueError("successor leader must already be in the frozen program")
+        if arms[0]["model"] != model:
+            raw.setdefault("series_arm_order", [arm["id"] for arm in arms])
+            raw["arms"] = sorted(arms, key=lambda arm: arm["model"] != model)
+    successor = load_experiment(raw, prompt)
+    with lock_pool_directory(directory):
+        # Two operators can configure different leaders at the same pack boundary.
+        # Reuse the already-frozen roster before publishing a second batch.
+        for path in directory.glob("pool-*.json"):
+            if path.stem == parent.batch_id:
+                continue
+            try:
+                candidate = json.loads(read_file(path))
+            except (OSError, ValueError):
+                continue  # Reported by the poller's normal manifest validation.
+            if (
+                not isinstance(candidate, dict)
+                or not candidate.get("successor_seeds")
+                or candidate.get("cases") != cases
+                or candidate.get("id") != raw["id"]
+            ):
+                continue
+            existing = load_experiment(candidate, prompt)
+            if existing.batch_id != path.stem:
+                raise ValueError("successor filename differs from its frozen identity")
+            if pool_program_id(candidate) == group:
+                return existing
+        store_private_json(directory / (successor.batch_id + ".json"), raw)
+    return successor
+
+
+def poll_pool_experiments(prompt, directory, database, run, *, successor_leader=None):
+    """Try a disjoint healthy program after a pre-lease refusal, never after an ambiguous claim."""
+    from lab_arena.collection_experiment import load_experiment, pool_program_id
+    from scripts.collection_review import read_file
+    from lab_arena.collection_prices import CatalogError
+
+    def unavailable(name, exc):
+        reason = exc.code if isinstance(exc, CatalogError) else type(exc).__name__
+        print(json.dumps({"batch": name, "status": "pool_unavailable", "reason": reason}),
+              file=sys.stderr, flush=True)
+
+    active = {}
+    failures = False
+    for path in sorted(directory.glob("pool-*.json")):
+        try:
+            raw = json.loads(read_file(path))
+            spec = load_experiment(raw, prompt)
+            if spec.batch_id != path.stem:
+                raise ValueError("pool manifest differs from its frozen identity")
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            unavailable(path.stem, exc)
+            failures = True
+            continue
+        # Old series members remain immutable for exports. Only the most recent
+        # published seed range can receive additional assignments.
+        group = (raw.get("auto_from_program") or "") + "-correction" if raw.get("auto_from_program") else (
+            pool_program_id(raw) if raw.get("successor_seeds") else spec.batch_id
+        )
+        seed = int(raw["cases"][0]["scenario_id"].split("-s")[1])
+        if group in active and seed == active[group][0]:
+            # Hold a conflicting range without denying unrelated funded work.
+            active[group] = (seed, None)
+            unavailable(path.stem, ValueError("conflicting frozen packs"))
+            failures = True
+            continue
+        if group not in active or seed > active[group][0]:
+            active[group] = seed, spec
+    if not active:
+        raise ValueError("active standing pool requires a valid operator experiment")
+    cursor = directory / ".last-pool-program"
+    groups = sorted(k for k, (_, spec) in active.items() if spec is not None)
+    if cursor.exists():
+        previous = read_file(cursor, maximum=128).decode()
+        if previous in groups:
+            index = groups.index(previous) + 1
+            groups = groups[index:] + groups[:index]
+    for group in groups:
+        seed, spec = active[group]
+        attempted = False
+
+        def on_claim():
+            nonlocal attempted
+            attempted = True
+            with NamedTemporaryFile(dir=directory, delete=False) as out:
+                out.write(group.encode())
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(out.name, cursor)
+
+        try:
+            if run(spec.raw, before_claim=on_claim):
+                return 1
+            if attempted:
+                return 0
+            if not spec.raw.get("successor_seeds"):
+                continue
+            jobs = database.rpc("collection_batch_jobs_v1", {"p_batch": spec.batch_id})
+            finished = {j["slot"] for j in jobs if j["status"] in {"accepted", "rejected", "failed"}}
+            if finished != set(range(len(spec.slots))):
+                continue
+            successor = _freeze_pool_successor(spec, directory, prompt, successor_leader)
+            if run(successor.raw, before_claim=on_claim):
+                return 1
+            if attempted:
+                return 0
+        except Exception as exc:
+            if attempted:
+                raise
+            unavailable(spec.batch_id, exc)
+            failures = True
+    if failures:
+        raise ValueError("one or more standing programs could not be polled")
+    return 0
+
+
+def poll_paid_offers(baseline, prompt, directory, run):
+    """Use one existing worker slot across the immutable manifests miners have signed."""
+    from scripts.collection_review import read_file
+
+    base_id = load_batch(baseline, prompt).batch_id
+    if baseline.get("mode") != "live" or "payment_rule" not in baseline:
+        raise ValueError("paid offer polling requires a verified live batch")
+    paths = {p.stem: p for p in directory.glob("dv-*.json")}
+    paths.setdefault(base_id, None)
+    order = sorted(paths)
+    cursor = directory / ".last-claimed-offer"
+    if cursor.exists():
+        previous = read_file(cursor, maximum=128).decode()
+        if previous in paths:
+            cut = order.index(previous) + 1
+            order = order[cut:] + order[:cut]
+
+    failures = []
+    for offer_id in order:
+        attempted = False
+
+        def before_claim():
+            nonlocal attempted
+            # A lost claim response cannot authorize a second dispatch in this poll.
+            attempted = True
+            with NamedTemporaryFile(dir=directory, delete=False) as f:
+                f.write(offer_id.encode())
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(f.name, cursor)
+
+        try:
+            manifest = baseline if paths[offer_id] is None else json.loads(read_file(paths[offer_id]))
+            if (
+                manifest.get("mode") != "live" or "payment_rule" not in manifest
+                or load_batch(manifest, prompt).batch_id != offer_id
+            ):
+                raise ValueError("paid manifest differs from its immutable offer ID")
+            if run(manifest, before_claim=before_claim):
+                return 1
+            if attempted:
+                break
+        except Exception as exc:
+            if attempted:
+                raise
+            failures.append(type(exc).__name__)
+            print(json.dumps({"offer": offer_id, "status": "offer_unavailable", "reason": type(exc).__name__}),
+                  file=sys.stderr, flush=True)
+    if failures:
+        raise ValueError("one or more paid offers could not be polled")
+    return 0
+
+
+def _worker_timer_active():
+    import subprocess
+
+    try:
+        return (
+            subprocess.run(
+                [
+                    "systemctl",
+                    "is-active",
+                    "--quiet",
+                    "leadpoet-collection-pilot.timer",
+                ],
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def poll_funded_burst(
+    limit,
+    poll,
+    *,
+    productive,
+    monotonic=time.monotonic,
+    timer_active=_worker_timer_active,
+):
+    """Reselect funding for each new job. Let an authorized run finish before draining."""
+    deadline = monotonic() + 30 * 60 if productive else None
+    completed = 0
+    while completed < limit:
+        if productive and completed:
+            if monotonic() >= deadline or (completed % 8 == 0 and not timer_active()):
+                break
+        if not poll():
+            break
+        completed += 1
+    return completed
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--environment-file", type=Path, help="Protected Arena gateway environment"
     )
     p.add_argument("--batch", type=Path, required=True)
+    p.add_argument("--offer-directory", type=Path,
+                   help="Private directory of subsequent paid manifests named by their signed offer ID")
     p.add_argument("--prompt", type=Path, required=True)
     p.add_argument("--champion-repo", type=Path)
     p.add_argument("--poet-repo", type=Path)
     p.add_argument("--max-jobs", type=int, default=1)
+    p.add_argument("--productive-burst", action="store_true",
+                   help="Paid service only: admit up to 64 jobs or 30 minutes of new work, and drain on timer stop")
+    p.add_argument("--successor-first-model", nargs=2, metavar=("PROGRAM", "MODEL"),
+                   help="Lead only future renewable packs of this program with an existing assigned model")
     p.add_argument("--research-case-index", type=Path)
     p.add_argument(
         "--research-stdio",
@@ -438,31 +1072,178 @@ def main(argv=None):
         help="Retry unavailable owner judgments for one recorded first live job",
     )
     p.add_argument("--pilot-only", action="store_true", help="Accept only unpaid synthetic qualification jobs")
+    p.add_argument("--experiment-inputs", type=Path, help="Protected hash-addressed student sources and split policy")
+    p.add_argument("--next-correction", type=Path,
+                   help="Optional staged correction pilot to try before the qualification pack")
+    p.add_argument(
+        "--next-reference",
+        type=Path,
+        help="Optional private binding from a settled pilot successor to one frozen complete reference",
+    )
     args = p.parse_args(argv)
+    if args.successor_first_model and (
+        not args.offer_directory
+        or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", args.successor_first_model[0])
+        or args.successor_first_model[1] not in GENERATOR_ROUTES
+    ):
+        p.error(
+            "successor-first-model requires offer-directory, an experiment id and an approved model"
+        )
     if args.environment_file:
         from scripts.run_lab_arena_service import load_scoped_environment
 
         load_scoped_environment(args.environment_file)
-    if not 1 <= args.max_jobs <= 6:
-        p.error("select 1 to 6 jobs per invocation")
-    raw = json.loads(args.batch.read_text())
+    if args.productive_burst and not args.offer_directory:
+        p.error("productive-burst requires offer-directory")
+    job_limit = 64 if args.productive_burst else (8 if args.offer_directory else 6)
+    if not 1 <= args.max_jobs <= job_limit:
+        p.error("invalid job limit for this worker")
+    baseline = json.loads(args.batch.read_text())
+    if args.offer_directory:
+        if (args.preflight or args.pilot_only or args.next_reference or args.next_correction
+                or args.research_stdio or args.rejudge_ready or not args.offer_directory.is_dir()):
+            p.error("offer-directory requires the bounded paid comparison worker")
+        prompt = json.loads(args.prompt.read_text())
+        database, _ = evidence_stores()
+        limit = args.max_jobs
+        args.max_jobs = 1  # Re-select the program and live funds after every actual job.
+        if database.rpc("collection_pool_active_v1", {}) is True:
+            args.experiment_inputs = (
+                args.experiment_inputs
+                or args.offer_directory.parent / "experiment-inputs"
+            )
+            def scan():
+                settled = []
+                handled = poll_pool_experiments(
+                    prompt, args.offer_directory, database,
+                    partial(_run_options, args, p, on_pool_settled=settled.append),
+                    successor_leader=args.successor_first_model,
+                )
+                # A clipped, unpayable output is retained. Resume at the ordinary timer
+                # rather than immediately funding more potentially unusable work.
+                return handled and (not args.productive_burst or settled == ["accepted"])
+
+            poll_funded_burst(limit, scan, productive=args.productive_burst)
+        else:
+            poll_paid_offers(
+                baseline, prompt, args.offer_directory, partial(_run_options, args, p)
+            )
+        return 0
+    if args.next_reference and (
+        args.max_jobs != 1
+        or not args.pilot_only
+        or args.preflight
+        or args.rejudge_ready
+        or args.research_stdio
+        or baseline.get("mode") != "pilot"
+        or args.next_reference == args.batch
+    ):
+        p.error("reference progression requires the bounded one-job pilot worker")
+    if args.next_correction:
+        if (args.max_jobs != 1 or args.preflight or args.rejudge_ready
+                or args.research_stdio or not args.experiment_inputs or args.next_correction == args.batch):
+            p.error("correction-first polling requires one job and distinct private batch files")
+        from lab_arena import collection_intake as funding
+        from lab_arena.collection_experiment import SCHEMA
+        from scripts.collection_review import read_file
+
+        if args.next_correction.exists():
+            base_mode = baseline.get("mode", "pilot")
+            if base_mode == "live" and args.pilot_only:
+                p.error("pilot-only polling cannot run live work")
+            try:
+                funding.correction_terms_hash(base_mode)
+            except funding.IntakeError as exc:
+                if exc.code != "collection_correction_terms_unavailable":
+                    raise
+            else:
+                admission_attempted = False
+
+                def before_claim():
+                    nonlocal admission_attempted
+                    admission_attempted = True
+
+                try:
+                    candidate = json.loads(read_file(args.next_correction))
+                    if candidate.get("schema") != SCHEMA or candidate.get("mode") != base_mode:
+                        raise ValueError("staged correction differs from the approved consent")
+                    funding.require_correction_grant(base_mode, candidate.get("terms_sha256"))
+                    if _run_options(args, p, candidate, before_claim=before_claim):
+                        return 0
+                except Exception as exc:
+                    # A faulty optional pack must not starve the qualification queue.
+                    # Once a claim is sent, its outcome may be ambiguous on disconnect.
+                    if admission_attempted:
+                        raise
+                    print(json.dumps({"status": "correction_held", "reason": type(exc).__name__}),
+                          file=sys.stderr, flush=True)
+    if args.next_reference and args.next_reference.exists():
+        from scripts.collection_reference_followup import reference_for_poll
+        from lab_arena.store import ArenaStoreError
+        from scripts.collection_review import read_file
+
+        try:
+            database, objects = evidence_stores()
+            baseline = reference_for_poll(
+                baseline,
+                json.loads(read_file(args.prompt)),
+                args.next_reference,
+                database,
+                objects,
+            )
+            from scripts.collection_qualification_followup import qualification_for_poll
+
+            if baseline.get("route_witness_sha256"):
+                baseline, controls = qualification_for_poll(
+                    baseline,
+                    json.loads(read_file(args.prompt)),
+                    args.next_reference.parent,
+                    database,
+                    objects,
+                )
+                if controls is not None:
+                    args.control_pack = controls
+        except (ValueError, OSError, KeyError, TypeError, ArenaStoreError) as exc:
+            print(
+                json.dumps(
+                    {"status": "reference_followup_held", "reason": type(exc).__name__}
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+    _run_options(args, p, baseline)
+    return 0
+
+
+def _run_options(args, p, raw, *, before_claim=None, on_pool_settled=None):
+    """Return how many new jobs were executed, for bounded pilot polling."""
     prompt = json.loads(args.prompt.read_text())
-    policy = load_batch(raw, prompt)
+    from lab_arena import collection_experiment as experiments
+    experiment = None
+    if raw.get("schema") == experiments.SCHEMA:
+        if args.research_stdio or args.rejudge_ready or args.claim_pack or args.control_pack or args.research_case_index:
+            p.error("correction experiments require synthetic inputs only")
+        experiment = experiments.load_experiment(raw, prompt)
+        policy = experiment.policy
+        scenarios = [c["scenario_id"] for c in raw["cases"]]
+    else:
+        policy = load_batch(raw, prompt)
+        scenarios = raw["scenario_ids"]
     judge_key = os.getenv("LEADPOET_COLLECTION_JUDGE_KEY") or os.getenv(
         "LAB_ARENA_OPENROUTER_API_KEY"
     )
     if args.rejudge_ready:
         if (
-            args.pilot_only
+            (args.pilot_only and not policy.pilot)
             or args.preflight
             or args.research_stdio
-            or policy.pilot
-            or os.getenv("LAB_ARENA_COLLECTION_MODE") != "live"
+            or os.getenv("LAB_ARENA_COLLECTION_MODE")
+            != ("pilot" if policy.pilot else "live")
             or not live_finney_arena()
             or not judge_key
         ):
             p.error(
-                "owner adjudication requires the original live Finney/71 batch and owner credential"
+                "owner adjudication requires the original Finney/71 mode, batch and owner credential"
             )
         database, objects = evidence_stores()
         job_id, attempt_id = map(str, args.rejudge_ready)
@@ -480,14 +1261,15 @@ def main(argv=None):
             )
         print(json.dumps({"job": job_id, "status": "verified"}))
         return 0
+    standing = bool(experiment and experiment.batch_id.startswith("pool-"))
     if not args.champion_repo or not args.poet_repo:
         p.error("running generators requires --champion-repo and --poet-repo")
     if args.pilot_only and (
-        not policy.pilot or not policy.qualification
-        or any(s.startswith("research-") for s in raw["scenario_ids"])
+        raw["mode"] != "pilot" or not policy.pilot or not policy.qualification
+        or any(s.startswith("research-") for s in scenarios)
     ):
         p.error("the pilot worker requires a synthetic qualification batch")
-    controls = ControlPack(
+    controls = None if experiment else ControlPack(
         raw,
         (
             json.loads(args.control_pack.read_text())
@@ -508,31 +1290,49 @@ def main(argv=None):
             raw["claim_pack_sha256"],
         )
     research_index = None
-    if any(s.startswith("research-") for s in raw["scenario_ids"]):
+    if any(s.startswith("research-") for s in scenarios):
         if not args.research_case_index:
             p.error("supply the committed research case index")
         research_index = json.loads(args.research_case_index.read_text())
         if judge.digest(research_index) != raw["research_index_sha256"] or not {
-            s for s in raw["scenario_ids"] if s.startswith("research-")
+            s for s in scenarios if s.startswith("research-")
         } <= set(research_index):
             raise ValueError("research case index differs from frozen pack")
         if not args.preflight and (not args.research_stdio or args.max_jobs != 1):
             raise ValueError(
                 "research requires one authenticated validator relay per invocation"
             )
-    with workflow_sources(args.champion_repo, args.poet_repo) as sources:
-        for sid in raw["scenario_ids"]:
-            if not sid.startswith("research-"):
-                build_scenario(sources[1], sid)
+    agent, builder = (
+        experiments.source_revisions(raw) if experiment else comparison_revisions(raw)
+    )
+    source_args = (
+        {"corrections": True, "builder_revision": builder}
+        if experiment or "capture_version" in raw
+        else {}
+    )
+    with workflow_sources(args.champion_repo, args.poet_repo, **source_args) as sources:
+        experiment_inputs = experiments.read_inputs(experiment, args.experiment_inputs, sources, prompt=prompt) if experiment else None
+        try:
+            for sid in ([] if experiment else scenarios):
+                if not sid.startswith("research-"):
+                    pack_split(raw, sources[1], sid)
+        except ComparisonSplitHold as exc:
+            if args.preflight:
+                raise
+            return report_split_hold(policy, exc)
         if args.preflight:
             print(
                 json.dumps(
                     {
                         "batch": policy.batch_id,
-                        "models": len(MODELS),
-                        "scenarios": len(raw["scenario_ids"]),
-                        "champion": CHAMPION_REV,
-                        "builder": POET_REV,
+                        "models": (
+                            len({a["model"] for a in raw["arms"]})
+                            if experiment
+                            else len(raw["budgets_microusd"])
+                        ),
+                        "scenarios": len(scenarios),
+                        "champion": agent,
+                        "builder": builder,
                     }
                 )
             )
@@ -565,7 +1365,8 @@ def main(argv=None):
             def open_channel(job):
                 yield sys.stdin.buffer, protocol_out
 
-            research = RemoteResearch(open_channel, cases.load, cases.grade)
+            from lab_arena.collection_research_capture import ResearchGrant
+            research = RemoteResearch(open_channel, cases.load, cases.grade, grant=ResearchGrant.deployed(), objects=objects)
         with ExitStack() as stack:
             stack.callback(client.close)
             # Confirm the finalized genesis and subnet before even an unpaid lease.
@@ -573,31 +1374,52 @@ def main(argv=None):
             transport = stack.enter_context(closing(HttpxProviderTransport()))
             if args.research_stdio:
                 stack.enter_context(redirect_stdout(sys.stderr))
-            completed = run_cohort(
-                raw=raw,
-                policy=policy,
-                prompt=prompt,
-                intake=CollectionIntake(db, cm, mode),
-                database=db,
-                objects=objects,
-                transport=transport,
-                pricing=endpoint_prices(raw["routes"]),
-                epoch=lambda: chain.current_settlement_epoch(client, cutover),
-                sources=sources,
-                owner_lookup=lambda hk: resolve_finalized_owner(client, hk),
-                judge_key=judge_key,
-                max_jobs=args.max_jobs,
-                research=research,
-                controls=controls,
-                claim_pack=claim_pack,
-            )
+            if experiment:
+                if not standing and not judge_key:
+                    raise ValueError("private claim-reader credential unavailable")
+                completed = experiments.run_experiment(
+                    spec=experiment, sources=sources, inputs=experiment_inputs,
+                    intake=CollectionIntake(db, cm, mode), database=db, objects=objects,
+                    transport=transport, pricing=(lambda model: endpoint_prices(experiment.routes,models=[model]))
+                    if standing else prices_for_assignment(experiment.routes, policy),
+                    owner_lookup=lambda hk: resolve_finalized_owner(client, hk), judge_key=judge_key,
+                    max_jobs=args.max_jobs, epoch=lambda: chain.current_settlement_epoch(client, cutover),
+                    before_claim=before_claim, prompt=prompt, on_pool_settled=on_pool_settled,
+                    on_pool_failure=(partial(stage_failed_pool_continuation, database=db, objects=objects,
+                                             directory=args.offer_directory, inputs=args.experiment_inputs, prompt=prompt)
+                                     if standing and args.offer_directory else None),
+                )
+            else:
+                completed = run_cohort(
+                    raw=raw,
+                    policy=policy,
+                    prompt=prompt,
+                    intake=CollectionIntake(db, cm, mode),
+                    database=db,
+                    objects=objects,
+                    transport=transport,
+                    pricing=(
+                        (lambda model: endpoint_prices(raw["routes"], models=[model]))
+                        if "payment_rule" in raw else prices_for_assignment(raw["routes"], policy)
+                    ),
+                    epoch=lambda: chain.current_settlement_epoch(client, cutover),
+                    sources=sources,
+                    owner_lookup=lambda hk: resolve_finalized_owner(client, hk),
+                    judge_key=judge_key,
+                    max_jobs=args.max_jobs,
+                    research=research,
+                    controls=controls,
+                    claim_pack=claim_pack,
+                    recover_idle_pilot=args.pilot_only and args.max_jobs == 1,
+                    before_claim=before_claim,
+                )
             if completed == 0 and not args.research_stdio:
                 print(json.dumps({"batch": policy.batch_id, "status": "idle"}), flush=True)
             if args.research_stdio and completed == 0:
                 from lab_arena.collection_research import send
 
                 send(protocol_out, {"type": "idle"})
-    return 0
+    return completed
 
 
 if __name__ == "__main__":

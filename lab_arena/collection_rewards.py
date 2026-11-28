@@ -129,7 +129,12 @@ def existing_collection_state(row, *, epoch, genesis_hash, signer):
 
 
 class EpochNotCurrent(ValueError):
-    """The validator reached an ordinary finalized epoch boundary while reading the state."""
+    """A collection state was asked for an epoch the chain is no longer settling.
+
+    This is the ordinary epoch-boundary race a validator hits once per tempo, not
+    a fault: the legacy reward path answers it with
+    ``accepted_weight_epoch_not_current`` (409), and the collection path must too.
+    """
 
 
 def _supplier_targets(market_store, chain, scope, basis, burn_hotkey, valuation_source):

@@ -269,6 +269,15 @@ def _harvest_cost(document: Any) -> Optional[int]:
         return None
     return 1 if _get(document, "status") in (200, "200") else None
 
+def _harvest_page_cost(document: Any) -> Optional[int]:
+    elements = _get(document, "elements")
+    if _get(document, "error") or _get(document, "status") not in (200, "200"):
+        return None
+    if not isinstance(elements, list) or not all(isinstance(row, dict) for row in elements):
+        return None
+    return 1
+
+
 _ZB = "https://api.zerobounce.net"
 _HARVEST = "https://api.harvestapi.io"
 _EXA = "https://api.exa.ai"
@@ -315,6 +324,30 @@ _OPERATIONS: Sequence[Operation] = (
               {"urls": Param("str_list", required=True, max_length=500, high=10), "text": Param("bool"),
                "highlights": Param("bool")},
               cost=_usd_field("costDollars", "total"), does="Read the text of up to 10 web pages."),
+    Operation("harvestapi", "get_job", "GET", _HARVEST + "/linkedin/job", UNIT_CALL, 1,
+              {"jobId": Param("str", required=True, max_length=80)}, cost=_harvest_cost,
+              does="Read a LinkedIn job posting by ID."),
+    Operation("harvestapi", "search_jobs", "GET", _HARVEST + "/linkedin/job-search", UNIT_CALL, 1,
+              {"search": _NAME, "location": _NAME, "industryId": Param("str", max_length=500),
+               "sortBy": Param("enum", choices=("relevance", "date")),
+               "postedLimit": Param("enum", choices=("24h", "week", "month")), "page": Param("int", high=40)},
+              cost=_harvest_page_cost, does="Search one page of LinkedIn jobs with date and industry filters."),
+    Operation("harvestapi", "search_posts", "GET", _HARVEST + "/linkedin/post-search", UNIT_CALL, 1,
+              {"search": Param("str", max_length=1000), "companyId": Param("str", vendor_name="company"),
+               "authorsCompany": Param("str"), "postedLimit": Param("enum", choices=("24h", "week", "month")),
+               "sortBy": Param("enum", choices=("relevance", "date")), "page": Param("int", high=100),
+               "contentType": Param("enum", choices=("videos", "images", "live_videos", "documents",
+                                                     "collaborative_articles", "jobs"))},
+              cost=_harvest_page_cost, does="Search one page of posts by phrase, company or author employer."),
+    Operation("harvestapi", "profile_posts", "GET", _HARVEST + "/linkedin/profile-posts", UNIT_CALL, 1,
+              {"profileId": Param("str", required=True, vendor_name="profile"), "page": Param("int", high=100),
+               "paginationToken": Param("str", max_length=1500)},
+              cost=_harvest_page_cost, does="Read one page of posts from a LinkedIn member."),
+    *(Operation("harvestapi", name, "GET", _HARVEST + "/linkedin/" + path, UNIT_CALL, 1,
+                {"post": _URL, "page": Param("int", high=100)}, cost=_harvest_page_cost, does=description)
+      for name, path, description in (
+          ("post_reactions", "post-reactions", "Read one page of reactions to a LinkedIn post."),
+          ("post_comments", "post-comments", "Read one page of comments on a LinkedIn post."))),
     # HarvestAPI: per-request credits. Its prices are not published per
     # endpoint, so launch keeps the two profile reads only.
     Operation("harvestapi", "linkedin_profile", "GET", _HARVEST + "/linkedin/profile", UNIT_CALL, 1,

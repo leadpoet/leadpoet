@@ -514,6 +514,7 @@ class TrajectoryArchive:
         self.stats["model_transcripts"] += bool(row["messages"])
         if (
             row["verified_task_pass"] is not None
+            and row.get("experiment", {}).get("program", {}).get("use") != "pass_rate_only"
             and row["final_turn_present"] and not row["partial"] and not row.get("capture_hold")
             and (row["judgment_status"] != "cannot_judge" or row.get("verified_complete") is True)
         ):

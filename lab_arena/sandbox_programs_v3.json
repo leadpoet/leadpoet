@@ -1,0 +1,133 @@
+[
+  {
+    "schema": "collection.sales-sandbox.v3",
+    "family": "P7",
+    "builder": "b872ed0e1d3b262d236c94565be5ef010404d346",
+    "partition": "sha256:a66013ac94519c7cfba6ea797e00895b96fa0bd840e513a8a5d91a08d9d42935",
+    "grader": "posting",
+    "kind": "train",
+    "patterns": 200,
+    "aliases": {
+      "base": {
+        "partner_credit_exchange": "partner_credit_exchange"
+      },
+      "brief": {
+        "partner_credit_exchange": "allocation_desk"
+      },
+      "review": {
+        "partner_credit_exchange": "registration_book"
+      }
+    },
+    "allowed_variants": [
+      "base",
+      "brief",
+      "review"
+    ],
+    "evidence": {
+      "basis": "existing_approved_native_family",
+      "producer_commit": "b872ed0e1d3b262d236c94565be5ef010404d346",
+      "producer_partition_sha256": "sha256:a66013ac94519c7cfba6ea797e00895b96fa0bd840e513a8a5d91a08d9d42935",
+      "producer_partition_proof_bytes_sha256": "sha256:a46e04f2ac1d47341ddc1caec3e620ce98e9952fcfa82cde4382747ac6fe2df3"
+    },
+    "route_policy": "openrouter.approved_revisions.distillable_zdr_no_fallback.v1"
+  },
+  {
+    "schema": "collection.sales-sandbox.v3",
+    "family": "P8",
+    "builder": "b872ed0e1d3b262d236c94565be5ef010404d346",
+    "partition": "sha256:afa6ab40d1bf1bf97adf0c174c91e3dfe8a8502cb0e010d98716bf3f4506510c",
+    "grader": "qualification",
+    "kind": "train",
+    "patterns": 200,
+    "aliases": {
+      "base": {
+        "archive_search": "archive_search",
+        "archive_open": "archive_open"
+      },
+      "brief": {
+        "archive_search": "find_sources",
+        "archive_open": "read_source"
+      },
+      "review": {
+        "archive_search": "search_filings",
+        "archive_open": "open_filing"
+      }
+    },
+    "allowed_variants": [
+      "base",
+      "brief",
+      "review"
+    ],
+    "evidence": {
+      "basis": "existing_approved_native_family",
+      "producer_commit": "b872ed0e1d3b262d236c94565be5ef010404d346",
+      "producer_partition_sha256": "sha256:afa6ab40d1bf1bf97adf0c174c91e3dfe8a8502cb0e010d98716bf3f4506510c",
+      "producer_partition_proof_bytes_sha256": "sha256:328528a8b24a7e2ee87f0d841dfa67cf6db1750c7792c7c3788dc404d29a0771"
+    },
+    "route_policy": "openrouter.approved_revisions.distillable_zdr_no_fallback.v1"
+  },
+  {
+    "schema": "collection.sales-sandbox.v3",
+    "family": "P9",
+    "builder": "b872ed0e1d3b262d236c94565be5ef010404d346",
+    "partition": "sha256:3d0c61dc6c54a5adb6e93c3ae52d69dfdc5be391cd3fe927ad4425b1b8824c1b",
+    "grader": "outreach",
+    "kind": "train",
+    "patterns": 200,
+    "aliases": {
+      "base": {
+        "audience_release_desk": "audience_release_desk"
+      },
+      "brief": {
+        "audience_release_desk": "audience_permissions"
+      },
+      "review": {
+        "audience_release_desk": "release_register"
+      }
+    },
+    "allowed_variants": [
+      "base",
+      "brief",
+      "review"
+    ],
+    "evidence": {
+      "basis": "existing_approved_native_family",
+      "producer_commit": "b872ed0e1d3b262d236c94565be5ef010404d346",
+      "producer_partition_sha256": "sha256:3d0c61dc6c54a5adb6e93c3ae52d69dfdc5be391cd3fe927ad4425b1b8824c1b",
+      "producer_partition_proof_bytes_sha256": "sha256:8486c308475762544ec34844483ebc6543b9ee78d71cd3c80e45b38becf5c0d6"
+    },
+    "route_policy": "openrouter.approved_revisions.distillable_zdr_no_fallback.v1"
+  },
+  {
+    "schema": "collection.sales-sandbox.v3",
+    "family": "P10",
+    "builder": "b872ed0e1d3b262d236c94565be5ef010404d346",
+    "partition": "sha256:14b92ad4512f7d05b382d7d2276a6a9c0b8072d10598383bfbd834a257f87227",
+    "grader": "outreach",
+    "kind": "train",
+    "patterns": 200,
+    "aliases": {
+      "base": {
+        "sequence_triage_desk": "sequence_triage_desk"
+      },
+      "brief": {
+        "sequence_triage_desk": "sequence_queue"
+      },
+      "review": {
+        "sequence_triage_desk": "contact_sequence"
+      }
+    },
+    "allowed_variants": [
+      "base",
+      "brief",
+      "review"
+    ],
+    "evidence": {
+      "basis": "existing_approved_native_family",
+      "producer_commit": "b872ed0e1d3b262d236c94565be5ef010404d346",
+      "producer_partition_sha256": "sha256:14b92ad4512f7d05b382d7d2276a6a9c0b8072d10598383bfbd834a257f87227",
+      "producer_partition_proof_bytes_sha256": "sha256:2a00e7224035f8eb20b62cd6a7eebc1cdd08b40ac0cbfa0e107a728007bf9a4a"
+    },
+    "route_policy": "openrouter.approved_revisions.distillable_zdr_no_fallback.v1"
+  }
+]

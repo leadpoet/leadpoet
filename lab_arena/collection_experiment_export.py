@@ -293,7 +293,9 @@ def write_dataset(
                 source_ids.append([rid, job.get("artifact_sha256")])
                 if not trained:
                     z.writestr(f"{rid}/job.json", judge._json(job))
+                from lab_arena.collection_programs import run_metadata
                 meta = {
+                    **run_metadata(spec.raw, case["scenario_id"]),
                     "id": spec.raw["id"],
                     "arm": arm["id"],
                     "settings_sha256": spec.settings_hash,
@@ -331,6 +333,10 @@ def write_dataset(
                         else:
                             projected.update(verification_method=POOL_PAYMENT_RULE, verified_complete=False,
                                              verified_task_pass=None, payment_eligible=False, earned_target_microusd=0)
+                    if "program" in meta:
+                        projected["manifest_sha256"] = job.get("artifact_sha256")
+                    if meta.get("program", {}).get("use") == "pass_rate_only":
+                        projected["no_loss_turns"] = list(projected["label_turns"])
                     if pooled and projected["partial"]:
                         projected["no_loss_turns"] = list(projected["label_turns"])
                     if partial_bill:
@@ -494,16 +500,7 @@ def write_dataset(
                     or manifest["scenario_id"] != job["scenario_id"]
                     or (manifest["harness_commit"], manifest["builder_commit"])
                     != source_revisions(spec.raw)
-                    or manifest["experiment"]
-                    != {
-                        "id": spec.raw["id"],
-                        "arm": arm["id"],
-                        "settings_sha256": spec.settings_hash,
-                        "repeat": repeat,
-                        "role": arm["role"],
-                        "capture_reasoning": arm["capture_reasoning"],
-                        "reasoning_effort": arm["reasoning_effort"],
-                    }
+                    or manifest["experiment"] != meta
                 ):
                     raise ValueError("experiment manifest identity mismatch")
                 row = read("generator", manifest["generator"])

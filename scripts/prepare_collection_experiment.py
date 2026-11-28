@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import sys
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
@@ -90,6 +91,8 @@ def prepare_pool(args):
             or not 1 <= args.scenario_count <= MAX_EXPERIMENT_SLOTS
             or len(set(args.model)) != len(args.model)):
         raise ValueError("invalid training seeds or model roster")
+    if args.first_seed + args.scenario_count > 10_000_000:
+        raise ValueError("new training seed bands belong to the registered finite V3 programs")
     cases = [{"scenario_id":f"{args.family}-s{i}"} for i in range(args.first_seed,args.first_seed+args.scenario_count)]
     agent,builder=experiment_revisions(c["scenario_id"] for c in cases)
     with workflow_sources(args.champion_repo,args.poet_repo,corrections=True,builder_revision=builder) as sources:
@@ -101,7 +104,7 @@ def prepare_pool(args):
         "max_slots":len(cases)*args.repeat*len(args.model),"budget_microusd":args.cap_microusd*len(cases)*args.repeat*len(args.model),
         "capture_version":CAPTURE_V2,"terms_sha256":POOL_TERMS_HASH,"split_sha256":_hash(split),"routes":routes,"cases":cases,
         "arms":[{"id":f"expert-{n}","role":"expert","model":m,"repeats":args.repeat,"max_steps":args.max_steps,
-                 "max_tokens":args.max_generated_tokens,"max_run_tokens":args.max_run_tokens,"reasoning_effort":"low",
+                 "max_tokens":args.max_generated_tokens,"max_run_tokens":args.max_run_tokens,"reasoning_effort":args.reasoning_effort,
                  "capture_reasoning":True,"budget_microusd":args.cap_microusd} for n,m in enumerate(args.model,1)]}
     if args.auto_correct_model:
         raw["correction_model"] = args.auto_correct_model
@@ -156,6 +159,16 @@ def prepare_pool(args):
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "reconcile-v3":
+        from scripts.collection_program_schedule import reconcile_cli
+        return reconcile_cli(argv[1:])
+    if argv and argv[0] == "prepare-v3":
+        from scripts.collection_program_schedule import cli
+        return cli(argv[1:])
+    if argv and argv[0] in {"sign-students", "sign-restatements", "admit-sandbox"}:
+        from scripts.collection_program_sources import cli
+        return cli(argv)
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     prepare = sub.add_parser(
@@ -220,6 +233,7 @@ def main(argv=None):
     pool.add_argument("--source-batch",type=Path,help="Original standing manifest for a real failed student")
     pool.add_argument("--source-job",help="Verified completed student job ID; changes the arm into a continuation")
     pool.add_argument("--environment-file",type=Path)
+    pool.add_argument("--reasoning-effort", choices=("low","medium","high"), default="low")
     pool.add_argument("--repeat", type=int, default=4)
     pool.add_argument("--cap-microusd", type=int, required=True)
     pool.add_argument("--max-steps", type=int, default=32)

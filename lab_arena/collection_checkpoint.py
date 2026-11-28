@@ -38,7 +38,9 @@ def digest(value):
 def correction_scenario(builders, source):
     spec = json.loads(source["original"]["trace.json"])
     if not re.fullmatch(r"C\d{2}|K\d{2}|B[1-8]|E[1-7]|P[1-9]|P10", spec["task"]):
-        raise ValueError("unsupported student task")
+        from lab_arena.collection_programs import sandbox
+        if sandbox(spec["task"])["builder"] != builders.source_revision:
+            raise ValueError("unsupported student task")
     if type(spec["seed"]) is not int or not 0 < spec["seed"] <= 99999999:
         raise ValueError("invalid student seed")
     task = builders.build(

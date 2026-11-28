@@ -199,6 +199,10 @@ def pool_fixture(tmp_path, monkeypatch, request):
 
     class Db:
         def rpc(self, name, params):
+            if name == "collection_registered_sandbox_v1":
+                from lab_arena.collection_programs import sandbox, _hash
+                entry=sandbox(params["p_family"])
+                return {"kind":entry["kind"],"registry_sha256":_hash(entry)}
             group = [j for j in env.jobs if j["batch_id"] == params["p_batch"]]
             if name == "collection_batch_jobs_v1":
                 return group
@@ -228,13 +232,15 @@ def pool_fixture(tmp_path, monkeypatch, request):
     env.db = Db()
     env.intake = Intake()
     from lab_arena.collection_workflow import SALES_EVIDENCE_POET_REV
+    from lab_arena.collection_programs import sandbox
+    v3 = getattr(request,"param",None) == "v3"
     research = getattr(request, "param", None) == "P8"
     with workflow_sources(
-        agent, poet, corrections=True, builder_revision=SALES_EVIDENCE_POET_REV if research else OUTREACH_POET_REV
+        agent, poet, corrections=True, builder_revision=sandbox("P7")["builder"] if v3 else SALES_EVIDENCE_POET_REV if research else OUTREACH_POET_REV
     ) as src:
         env.sources = src
-        for family in (("P8",) if research else ("P9", "P10")):
-            split = src[1].training_partition(family)
+        for family in (("P7","P8","P9","P10") if v3 else ("P8",) if research else ("P9", "P10")):
+            split = src[1].training_partition(family,seed=10000000) if v3 else src[1].training_partition(family)
             write_new(env.inputs / (judge.digest(split) + ".json"), split)
         yield env
 

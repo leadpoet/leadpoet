@@ -42,8 +42,7 @@ It is off by default. Every route answers 404 until
    - For a per-call tool, the ask is micro-USD per call.
    - For a vendor-USD tool, the ask is micro-USD per vendor USD. For
      example, `900000` sells at 90% of the vendor's own price.
-   - An ask is at most $0.25 per call, or 100% of the vendor's own price
-     for a vendor-USD tool. Every operation's largest call must owe
+   - The supplier sets the ask as a positive, JSON-safe integer. Every operation's largest call must owe
      something at the ask (`400 ask_too_low`), and the key's daily cap must
      hold 4 of them (`400 ask_too_high_for_cap`).
 3. **Spend Gamma.** A buyer spends Gamma at the tool market's service
@@ -380,7 +379,7 @@ All amounts are integer micro-USD.
 
 ## Storage
 
-All tool-market data is in `scripts/770-tool-market.sql`.
+Migration 770 creates the tool ledger. Migration 771 links supplier earnings to signed emission targets. See [emission reconciliation](gamma-emission-reconciliation.md).
 
 - Every table is append-only, with row-level security on and no table
   grants. The service role reaches the data only through its functions.
@@ -415,9 +414,9 @@ deployment, exactly as lead orders do.
   before scaling.
 - **One hotkey per miner is assumed.** The own-key rule, the daily caps
   and the 30-day registration limit are per hotkey. A miner with several
-  hotkeys can buy from themselves; with the 10% margin that loses money
-  until payouts are wired, so payouts must value what a buyer burns and
-  what a miner earns at the same per-epoch price.
+  hotkeys can buy from themselves. The buyer spends Gamma including the fee.
+  Supplier targets use the ask and the finalized valuation of available emissions.
+  Actual alpha received can differ from that target.
 - **A running vault is trusted until it restarts.** The gateway checks the
   vault's keys against the KMS on each connect, and only an approved build
   gets those keys. Removing an approval on Base does not stop a vault

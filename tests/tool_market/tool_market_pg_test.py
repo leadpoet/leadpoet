@@ -343,7 +343,7 @@ def test_the_catalog_lists_each_tool_its_operations_and_best_price(world):
     assert set(tools) == set(world.config.tools)
     harvest = tools["harvestapi"]
     assert (harvest["best_ask_microusd"], harvest["buyer_pays_microusd"], harvest["max_ask_microusd"]) \
-        == (9_000, 9_900, 250_000)
+        == (9_000, 9_900, 2**53 - 1)
     assert {op["operation"] for op in harvest["operations"]} == {
         "linkedin_profile", "linkedin_company", "search_jobs", "get_job", "search_posts",
         "post_reactions", "post_comments", "profile_posts", "linkedin_profile_email", "search_leads"}
@@ -876,17 +876,16 @@ def test_a_hotkey_registers_one_key_per_tool_every_30_days(world):
                            "envelope": world.vault.seal("hunter", miner, "hu-thirty-day-key")})
 
 
-def test_asks_have_a_ceiling_and_a_buyer_can_cap_what_they_pay(world):
-    miner, key_id = world.miner_key("pricey-key", 200_000)
-    for ask in (250_001, 10_000_000):
-        with pytest.raises(ToolMarketError) as high:
-            world.market.post_ask(world.who(miner), {"key_id": key_id, "ask_microusd": ask})
-        assert high.value.code == "ask_invalid"
-    _, token = world.buyer(budget=500_000)
+def test_supplier_sets_price_and_buyer_controls_spend(world):
+    miner, key_id = world.miner_key("pricey-key", 1_200_000)
+    with pytest.raises(ToolMarketError) as high:
+        world.market.post_ask(world.who(miner), {"key_id": key_id, "ask_microusd": 2**53})
+    assert high.value.code == "ask_invalid"
+    _, token = world.buyer(usd=2, budget=1_500_000)
     with pytest.raises(ToolMarketError) as capped:
-        world.market.call(token, dict(PROFILE, max_ask_microusd=199_999))
+        world.market.call(token, dict(PROFILE, max_ask_microusd=1_199_999))
     assert capped.value.code == "no_supply" and world.vendor.sent == []
-    assert world.market.call(token, dict(PROFILE, max_ask_microusd=200_000))["charge_microusd"] == 220_000
+    assert world.market.call(token, dict(PROFILE, max_ask_microusd=1_200_000))["charge_microusd"] == 1_320_000
     with pytest.raises(ToolMarketError) as bad:
         world.market.call(token, dict(PROFILE, max_ask_microusd=0))
     assert bad.value.code == "max_ask_invalid"

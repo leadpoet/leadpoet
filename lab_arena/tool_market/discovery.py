@@ -46,7 +46,7 @@ def _operation_schema(op: catalog.Operation) -> Dict[str, Any]:
                            "params": {"type": "object", "properties": params, "required": required,
                                       "additionalProperties": False},
                            "max_ask_microusd": {"type": "integer", "minimum": 1,
-                                                "maximum": catalog.MAX_ASK[catalog.TOOLS[op.tool]],
+                                                "maximum": catalog.MAX_EXACT_ASK,
                                                 "description": "Skip keys asking more per unit."},
                            "private": {"type": "boolean",
                                        "description": "Only suppliers that keep the request private."}}}

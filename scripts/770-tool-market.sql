@@ -118,7 +118,7 @@ CREATE TABLE public.tool_market_asks (
   ask_sequence BIGSERIAL PRIMARY KEY,
   operation TEXT CHECK(operation ~ '^[a-z_]{1,40}$'),  -- NULL is the original tool-wide ask
   key_id UUID NOT NULL REFERENCES public.tool_market_keys(key_id),
-  ask_microusd BIGINT CHECK(ask_microusd IS NULL OR ask_microusd BETWEEN 1 AND 1000000),
+  ask_microusd BIGINT CHECK(ask_microusd IS NULL OR ask_microusd BETWEEN 1 AND 9007199254740991),
   posted_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX tool_market_asks_key ON public.tool_market_asks(key_id,operation DESC NULLS LAST,ask_sequence DESC);

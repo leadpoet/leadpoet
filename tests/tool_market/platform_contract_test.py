@@ -145,7 +145,7 @@ def test_platform_ceiling_must_specify_known_approved_operation_and_integer_ask(
         "{",
         json.dumps({alias: 0}),
         json.dumps({alias: True}),
-        json.dumps({alias: 250001}),
+        json.dumps({alias: 2**53}),
     ):
         with pytest.raises(ToolMarketConfigError):
             load_config(dict(env, **{PLATFORM_MAX_ASKS_ENV: bad}))

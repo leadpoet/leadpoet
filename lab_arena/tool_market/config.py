@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from lab_arena.lead_orders.auth import normalize_host
 from lab_arena.lead_orders.config import is_valid_hotkey
 from lab_arena.lead_orders.config import GAMMA_SERVICE_ENV as LEAD_ORDERS_GAMMA_SERVICE_ENV
-from lab_arena.tool_market.catalog import MAX_ASK, TOOLS
+from lab_arena.tool_market.catalog import MAX_EXACT_ASK, TOOLS
 from lab_arena.tool_market import platform
 
 MODE_ENV = "LEADPOET_TOOL_MARKET_MODE"
@@ -97,11 +97,11 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
                                     f"whose ceiling is {VERIFY_MAX_ASK_ENV}")
     verify_limit = env.get(VERIFY_MAX_ASK_ENV, "").strip()
     if verify_limit:
-        if not (verify_limit.isascii() and verify_limit.isdigit() and len(verify_limit) <= 6):
+        if not (verify_limit.isascii() and verify_limit.isdigit() and len(verify_limit) <= len(str(MAX_EXACT_ASK))):
             raise ToolMarketConfigError("%s must be a positive per-call ask" % VERIFY_MAX_ASK_ENV)
         platform_limits["zerobounce_validate"] = int(verify_limit)
     permitted = set(platform.OPERATIONS) | {platform.SHORT_PROFILE, platform.EMAIL_PROFILE}
-    if any(key not in permitted or type(limit) is not int or not 1 <= limit <= MAX_ASK["call"]
+    if any(key not in permitted or type(limit) is not int or not 1 <= limit <= MAX_EXACT_ASK
            for key, limit in platform_limits.items()):
         raise ToolMarketConfigError(f"{PLATFORM_MAX_ASKS_ENV} and {VERIFY_MAX_ASK_ENV} need a supported operation "
                                     "and a positive per-call ask")

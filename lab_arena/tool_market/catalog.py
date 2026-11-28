@@ -33,9 +33,8 @@ from urllib.parse import quote_plus, urlencode
 UNIT_CALL = "call"
 UNIT_VENDOR_USD = "vendor_usd"
 UNIT_SCALE = {UNIT_CALL: 1, UNIT_VENDOR_USD: 1_000_000}
-# The highest ask a miner may post. Per call: above every launch vendor's
-# own list price. Per vendor USD: the vendor's own price.
-MAX_ASK = {UNIT_CALL: 250_000, UNIT_VENDOR_USD: 1_000_000}
+# Largest integer that JSON clients using IEEE-754 doubles can quote exactly.
+MAX_EXACT_ASK = 2**53 - 1
 # The vault refuses a query value longer than this once URL-encoded, and a
 # URL longer than MAX_URL.
 MAX_ENCODED_QUERY_VALUE = 2000
@@ -433,4 +432,4 @@ def operation(tool: Any, name: Any) -> Operation:
     return found
 
 
-__all__ = ["CatalogError", "MAX_ASK", "OPERATIONS", "Operation", "TOOLS", "operation"]
+__all__ = ["CatalogError", "MAX_EXACT_ASK", "OPERATIONS", "Operation", "TOOLS", "operation"]

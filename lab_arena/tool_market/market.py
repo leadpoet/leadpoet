@@ -372,7 +372,7 @@ class ToolMarket:
         scope = book.ask_scope(tool, name)
         if not scope:
             raise ToolMarketError(400, "operation_required")
-        ceiling = catalog.MAX_ASK[catalog.TOOLS[tool]]
+        ceiling = catalog.MAX_EXACT_ASK
         if ask is not None:
             self._require_enabled_tool(key["tool"])
             _int(ask, 1, ceiling, "ask_invalid", max_ask_microusd=ceiling)
@@ -421,7 +421,7 @@ class ToolMarket:
             listed = self.order_book(tool)
             best = listed["asks"][0] if listed["asks"] else None
             tools.append({
-                "tool": tool, "unit": listed["unit"], "max_ask_microusd": catalog.MAX_ASK[listed["unit"]],
+                "tool": tool, "unit": listed["unit"], "max_ask_microusd": catalog.MAX_EXACT_ASK,
                 "request_privacy": listed["request_privacy"],
                 "best_ask_microusd": best and best["ask_microusd"],
                 "buyer_pays_microusd": best and best["buyer_pays_microusd"],
@@ -494,7 +494,7 @@ class ToolMarket:
         tool = body["tool"]
         if not isinstance(tool, str) or tool not in self._config.tools:
             raise ToolMarketError(404, "tool_unavailable")
-        ceiling = catalog.MAX_ASK[catalog.TOOLS[tool]]
+        ceiling = catalog.MAX_EXACT_ASK
         # The most the buyer will let a key ask per unit; the book can move
         # between reading it and calling.
         max_ask = body.get("max_ask_microusd", ceiling)

@@ -323,8 +323,8 @@ an unchanged LinkedIn result set.
 
 ## Retrying after a lost HTTP response
 
-For a native paid call, generate a UUID for `request_id` before sending and
-persist it with the purchase. Reuse it for that logical purchase across
+For a native paid call, generate a lowercase UUID for `request_id` before
+sending and persist it with the purchase (the CLI lowercases one for you). Reuse it for that logical purchase across
 tabs and fresh signatures. The gateway accepts one dispatch sequence per
 buyer and ID, claimed with its first reservation: a call refused before any
 key was reserved (no supply, a tab budget, busy) leaves the ID free. Once it

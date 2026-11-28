@@ -22,6 +22,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
@@ -215,6 +216,10 @@ def _keypair(args: argparse.Namespace) -> Any:
     return Wallet(name=args.wallet_name, hotkey=args.hotkey_name).hotkey
 
 
+def canonical_uuid(text: str) -> str:  # the gateway takes only the lowercase form
+    return str(uuid.UUID(text))
+
+
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(prog="subnet71", description=__doc__.split("\n")[0])
     parser.add_argument("--url", default=os.environ.get("SUBNET71_URL", ""))
@@ -234,7 +239,7 @@ def main(argv: Optional[list] = None) -> int:
     call.add_argument("tool")
     call.add_argument("operation")
     call.add_argument("params", nargs="*")
-    call.add_argument("--request-id", help="buyer-generated UUID; reuse for the same logical purchase")
+    call.add_argument("--request-id", type=canonical_uuid, help="a UUID you keep; reuse it for the same purchase")
     call.add_argument("--max-ask-microusd", type=int, help="maximum miner ask per unit before the fee")
     call.add_argument("--private", action="store_true", help="only suppliers that keep the request private")
     commands.add_parser("mcp", help="run the MCP server on stdio")

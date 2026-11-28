@@ -417,8 +417,9 @@ deployment, exactly as lead orders do.
   counts an accepted allocation once. If an epoch's state is not published
   or its weights do not land, the previous suppliers are paid again.
   Scheduling continues each epoch on its own (only tool-market mode off
-  stops it, and buying with it), so measure the miner alpha received with
-  `scripts/verify_tool_market_emission.py` and reconcile by hand.
+  stops it, and buying with it), so reconcile each distribution's measured
+  miner alpha by hand. `scripts/verify_tool_market_emission.py` checks only
+  a signed state's first distribution, so it cannot see a repeat.
 - **The vendor's answer sets the usage.** Prospeo's free-match rule is
   read from its docs, not a bill; check it against a miner's statement
   before scaling.

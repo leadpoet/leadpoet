@@ -23,7 +23,8 @@ It is off by default. Every route answers 404 until
    - The same vendor key can be listed only once at a time.
    - Only a hotkey registered on the subnet lists, prices or checks keys
      (`403 miner_not_registered`), and a deregistered miner's keys leave
-     the book at once; it can still withdraw its asks. A miner's own tab
+     the book within a minute (the subnet snapshot's cache); it can still
+     withdraw its asks. A miner's own tab
      never buys from their own keys.
    - For security, a hotkey registers at most one key per tool every 30
      days, revoked keys included (`429 key_registration_too_soon` with
@@ -457,9 +458,11 @@ deployment, exactly as lead orders do.
   closes it, and the CLI makes 30-day keys by default; a signed "close my
   keys" route would let a buyer free a lost one.
 - **A balance read is public and needs no funds.** Each costs a few chain
-  reads (a reading row only when the total changed). It runs on 4 threads
-  and shares one chain read with hotkeys that have no credit yet;
-  rate-limit it and signed calls at the edge before opening them widely.
+  reads (a reading row only when the total changed). It shares 4 threads
+  with the catalog and books (which read the subnet snapshot, cached a
+  minute, and answer `503 chain_unavailable` without it) and one chain read
+  with hotkeys that have no credit yet; rate-limit them and signed calls at
+  the edge before opening them widely.
 - **One publisher hotkey.** The services document lists only the current
   service hotkey, and credit counts only spend there. A swap needs both
   listed, and credit read at both, before it happens.

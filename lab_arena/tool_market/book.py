@@ -12,6 +12,18 @@ from typing import Iterable, List, Mapping
 
 from lab_arena.tool_market.catalog import Operation
 
+# Scope of the original provider-wide ask. Future catalog additions require
+# an operation-specific offer. PostgreSQL enforces this list again at reserve.
+GENERAL_ASK_OPERATIONS = {
+    "zerobounce": ("validate",),
+    "prospeo": ("enrich_person",),
+    "findymail": ("find_from_linkedin", "find_from_name"),
+    "hunter": ("email_finder",),
+    "exa": ("search", "contents"),
+    "harvestapi": ("linkedin_profile", "linkedin_company"),
+}
+
+
 def owed_microusd(operation: Operation, units: int, ask_microusd: int) -> int:
     """What the miner earns for ``units`` (``Operation.units`` caps them)."""
 

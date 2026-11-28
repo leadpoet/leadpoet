@@ -40,8 +40,8 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "tool_market_key_v1": (("p_key_id", _U),),
     "tool_market_revoke_key_v1": (("p_key_id", _U), ("p_hotkey", _T), ("p_reason", _T)),
     "tool_market_record_key_event_v1": (("p_key_id", _U), ("p_status", _T), ("p_reason", _T)),
-    "tool_market_post_ask_v1": (("p_key_id", _U), ("p_hotkey", _T), ("p_ask", _B)),
-    "tool_market_book_v1": (("p_tool", _T), ("p_terms_sha256", _T)),
+    "tool_market_post_ask_v1": (("p_key_id", _U), ("p_hotkey", _T), ("p_ask", _B), ("p_operation", _T)),
+    "tool_market_book_v1": (("p_tool", _T), ("p_terms_sha256", _T), ("p_operation", _T)),
     "tool_market_reserve_call_v1": (
         ("p_call_id", _U), ("p_token_hash", _T), ("p_tool", _T), ("p_operation", _T), ("p_key_id", _U),
         ("p_ask", _B), ("p_owed_cap", _B),
@@ -132,12 +132,12 @@ class ToolMarketStore:
     def record_key_event(self, *, key_id: str, status: str, reason: Optional[str] = None) -> None:
         self._rpc("tool_market_record_key_event_v1", p_key_id=key_id, p_status=status, p_reason=reason)
 
-    def post_ask(self, *, key_id: str, hotkey: str, ask_microusd: Optional[int]) -> Dict[str, Any]:
+    def post_ask(self, *, key_id: str, hotkey: str, ask_microusd: Optional[int], operation: Optional[str] = None) -> Dict[str, Any]:
         return self._rpc("tool_market_post_ask_v1", p_key_id=key_id, p_hotkey=hotkey,
-                         p_ask=None if ask_microusd is None else int(ask_microusd))
+                         p_ask=None if ask_microusd is None else int(ask_microusd), p_operation=operation)
 
-    def book(self, *, tool: str, terms_sha256: str) -> List[Dict[str, Any]]:
-        return list(self._rpc("tool_market_book_v1", p_tool=tool, p_terms_sha256=terms_sha256) or [])
+    def book(self, *, tool: str, terms_sha256: str, operation: Optional[str] = None) -> List[Dict[str, Any]]:
+        return list(self._rpc("tool_market_book_v1", p_tool=tool, p_terms_sha256=terms_sha256, p_operation=operation) or [])
 
     def statement(self, hotkey: str) -> Dict[str, Any]:
         return self._rpc("tool_market_statement_v1", p_hotkey=hotkey)

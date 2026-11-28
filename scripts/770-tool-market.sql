@@ -116,11 +116,12 @@ CREATE INDEX tool_market_key_events_key ON public.tool_market_key_events(key_id,
 -- The latest ask is the key's price; a NULL ask withdraws it.
 CREATE TABLE public.tool_market_asks (
   ask_sequence BIGSERIAL PRIMARY KEY,
+  operation TEXT CHECK(operation ~ '^[a-z_]{1,40}$'),  -- NULL is the original tool-wide ask
   key_id UUID NOT NULL REFERENCES public.tool_market_keys(key_id),
   ask_microusd BIGINT CHECK(ask_microusd IS NULL OR ask_microusd BETWEEN 1 AND 1000000),
   posted_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
-CREATE INDEX tool_market_asks_key ON public.tool_market_asks(key_id,ask_sequence DESC);
+CREATE INDEX tool_market_asks_key ON public.tool_market_asks(key_id,operation DESC NULLS LAST,ask_sequence DESC);
 
 -- A buyer's budget, held against their Gamma balance while open. A tab is
 -- open until it is closed or expires; then only what its calls committed
@@ -517,7 +518,7 @@ BEGIN
 END;
 $event770$;
 
-CREATE FUNCTION public.tool_market_post_ask_v1(p_key_id UUID,p_hotkey TEXT,p_ask BIGINT)
+CREATE FUNCTION public.tool_market_post_ask_v1(p_key_id UUID,p_hotkey TEXT,p_ask BIGINT,p_operation TEXT DEFAULT NULL)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $ask770$
 DECLARE seq BIGINT;
 BEGIN
@@ -526,22 +527,36 @@ BEGIN
   OR NOT public.tool_market__key_active_v1(p_key_id) THEN
   RETURN jsonb_build_object('status','not_found');
  END IF;
- INSERT INTO public.tool_market_asks(key_id,ask_microusd) VALUES(p_key_id,p_ask) RETURNING ask_sequence INTO seq;
+ INSERT INTO public.tool_market_asks(key_id,operation,ask_microusd) VALUES(p_key_id,p_operation,p_ask) RETURNING ask_sequence INTO seq;
  RETURN jsonb_build_object('status',CASE WHEN p_ask IS NULL THEN 'withdrawn' ELSE 'posted' END,'ask_sequence',seq);
 END;
 $ask770$;
+
+-- A signed general offer covers only the original operations. A narrower
+-- offer, even a withdrawal, always takes precedence. Read it both when
+-- quoting and under the key lock immediately before reservation.
+CREATE FUNCTION public.tool_market__effective_ask_v1(p_key_id UUID,p_tool TEXT,p_operation TEXT)
+RETURNS public.tool_market_asks LANGUAGE sql STABLE SET search_path=pg_catalog,public AS $effective770$
+ SELECT a.* FROM public.tool_market_asks a WHERE a.key_id=p_key_id
+  AND (a.operation=p_operation OR (a.operation IS NULL AND
+   (p_operation IS NULL OR (p_tool,p_operation) IN (
+    ('zerobounce','validate'),('prospeo','enrich_person'),('findymail','find_from_linkedin'),
+    ('findymail','find_from_name'),('hunter','email_finder'),('exa','search'),('exa','contents'),
+    ('harvestapi','linkedin_profile'),('harvestapi','linkedin_company')))))
+ ORDER BY a.operation DESC NULLS LAST, a.ask_sequence DESC LIMIT 1;
+$effective770$;
 
 -- The tool's tradeable supply. A key trades while it is listed, its miner
 -- accepted the current terms, its latest ask is a price, its latest event
 -- is valid or unchecked, and its last 24 h are under its daily cap. The
 -- caller ranks it (``book.rank``) and skips a key without room for a call.
-CREATE FUNCTION public.tool_market_book_v1(p_tool TEXT,p_terms_sha256 TEXT)
+CREATE FUNCTION public.tool_market_book_v1(p_tool TEXT,p_terms_sha256 TEXT,p_operation TEXT DEFAULT NULL)
 RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $book770$
  -- MATERIALIZED, so each lookup runs once per key, and the 24 h scan only
  -- for keys with a price and good health.
  WITH latest AS MATERIALIZED (
   SELECT k.key_id,k.miner_hotkey,k.envelope,k.daily_cap_microusd,
-   (SELECT a FROM public.tool_market_asks a WHERE a.key_id=k.key_id ORDER BY a.ask_sequence DESC LIMIT 1) ask,
+   public.tool_market__effective_ask_v1(k.key_id,p_tool,p_operation) ask,
    (SELECT e.status FROM public.tool_market_key_events e WHERE e.key_id=k.key_id ORDER BY e.event_id DESC LIMIT 1) health
   FROM public.tool_market_keys k
   WHERE k.tool=p_tool AND public.tool_market__key_active_v1(k.key_id)
@@ -593,8 +608,7 @@ BEGIN
   RETURN jsonb_build_object('status','uncertain_limit');
  END IF;
  PERFORM public.tool_market__lock_v1('key',p_key_id::TEXT);
- SELECT ask_microusd INTO current_ask FROM public.tool_market_asks WHERE key_id=p_key_id
-  ORDER BY ask_sequence DESC LIMIT 1;
+ SELECT a.ask_microusd INTO current_ask FROM public.tool_market__effective_ask_v1(p_key_id,p_tool,p_operation) a;
  IF NOT public.tool_market__key_active_v1(p_key_id) OR current_ask IS DISTINCT FROM p_ask
   OR NOT coalesce((SELECT e.status IN ('valid','unchecked') FROM public.tool_market_key_events e
       WHERE e.key_id=p_key_id ORDER BY e.event_id DESC LIMIT 1),FALSE) THEN
@@ -652,8 +666,10 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,pu
  SELECT jsonb_build_object('keys',coalesce(jsonb_agg(jsonb_build_object(
    'key_id',k.key_id,'tool',k.tool,'key_fingerprint',k.key_fingerprint,
    'active',public.tool_market__key_active_v1(k.key_id),'daily_cap_microusd',k.daily_cap_microusd,
-   'ask_microusd',(SELECT a.ask_microusd FROM public.tool_market_asks a WHERE a.key_id=k.key_id
-     ORDER BY a.ask_sequence DESC LIMIT 1),
+   'ask_microusd',(public.tool_market__effective_ask_v1(k.key_id,k.tool,NULL)).ask_microusd,
+   'operation_asks',coalesce((SELECT jsonb_object_agg(o.operation,o.ask_microusd) FROM
+     (SELECT DISTINCT ON (a.operation) a.operation,a.ask_microusd FROM public.tool_market_asks a
+      WHERE a.key_id=k.key_id AND a.operation IS NOT NULL ORDER BY a.operation,a.ask_sequence DESC) o),'{}'::jsonb),
    'health',(SELECT jsonb_build_object('status',e.status,'reason',e.reason,'at',e.recorded_at)
      FROM public.tool_market_key_events e WHERE e.key_id=k.key_id ORDER BY e.event_id DESC LIMIT 1),
    'calls',u.calls,'uncertain_calls',u.uncertain,'owed_microusd',u.owed)

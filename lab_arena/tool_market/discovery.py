@@ -81,7 +81,9 @@ def openapi(config: ToolMarketConfig) -> Dict[str, Any]:
                 "responses": {"200": {"description": "The catalog."}}}},
             "/tool-market/books/{tool}": {"get": {
                 "summary": "One tool's asks, cheapest first.",
-                "parameters": [{"name": "tool", "in": "path", "required": True, "schema": {"type": "string"}}],
+                "parameters": [{"name": "tool", "in": "path", "required": True, "schema": {"type": "string"}},
+                               {"name": "operation", "in": "query", "required": False, "schema": {"type": "string"},
+                                "description": "Quote this SKU, including its eligible general asks."}],
                 "responses": {"200": {"description": "The book."}, "404": error}}},
             "/tool-market/gamma/balance": {"get": {
                 "summary": "A hotkey's balance in USD, as decimal strings; zeros for a hotkey that never spent.",

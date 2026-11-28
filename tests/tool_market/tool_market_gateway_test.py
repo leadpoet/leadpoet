@@ -53,7 +53,7 @@ class FakeMarket:
         self.seen.append(("usage", identity.hotkey, after, limit))
         return {"calls": [], "watermark": after}
 
-    def order_book(self, tool):
+    def order_book(self, tool, operation=None):
         return {"tool": tool, "asks": []}
 
     def gamma_balance(self, hotkey):

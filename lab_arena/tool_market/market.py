@@ -338,24 +338,31 @@ class ToolMarket:
     def post_ask(self, identity: BuyerIdentity, body: Mapping[str, Any]) -> Dict[str, Any]:
         """Set a key's price per unit, or withdraw it with ``ask_microusd: null``."""
 
-        if set(body) != {"key_id", "ask_microusd"}:
+        if set(body) - {"operation"} != {"key_id", "ask_microusd"}:
             raise ToolMarketError(400, "request_invalid")
         ask = body["ask_microusd"]
         key = self._own_key(identity, body["key_id"])
-        ceiling = catalog.MAX_ASK[catalog.TOOLS[key["tool"]]]
+        tool = key["tool"]
+        name = body.get("operation")
+        if "operation" in body and (not isinstance(name, str) or (tool, name) not in catalog.OPERATIONS):
+            raise ToolMarketError(400, "operation_unknown")
+        scope = [name] if name is not None else book.GENERAL_ASK_OPERATIONS.get(tool, ())
+        if not scope:
+            raise ToolMarketError(400, "operation_required")
+        ceiling = catalog.MAX_ASK[catalog.TOOLS[tool]]
         if ask is not None:
             self._require_supplier(key["tool"], identity.hotkey)
             _int(ask, 1, ceiling, "ask_invalid", max_ask_microusd=ceiling)
             # Each operation's largest call owes something, so every call
             # reserves, and a key's cap holds 4 of them, so each buyer's
             # quarter of it (unknown usage and calls in flight) fits one.
-            caps = [book.owed_microusd(op, op.max_units, ask)
-                    for op in catalog.OPERATIONS.values() if op.tool == key["tool"]]
+            operations = [catalog.OPERATIONS[tool, n] for n in scope]
+            caps = [book.owed_microusd(op, op.max_units, ask) for op in operations]
             if min(caps) < 1:
                 raise ToolMarketError(400, "ask_too_low")
             if 4 * max(caps) > key["daily_cap_microusd"]:
                 raise ToolMarketError(400, "ask_too_high_for_cap")
-        result = self._store.post_ask(key_id=key["key_id"], hotkey=identity.hotkey, ask_microusd=ask)
+        result = self._store.post_ask(key_id=key["key_id"], hotkey=identity.hotkey, ask_microusd=ask, operation=name)
         if result["status"] == "not_found":
             raise ToolMarketError(404, "key_unknown")
         return result
@@ -364,15 +371,18 @@ class ToolMarket:
         return self._store.statement(hotkey)
 
     # Public book ------------------------------------------------------------
-    def order_book(self, tool: Any) -> Dict[str, Any]:
+    def order_book(self, tool: Any, operation: Optional[str] = None) -> Dict[str, Any]:
         """Asks for one tool, cheapest first, with what a buyer pays per unit.
         A key with no room left today for any call is not listed."""
 
         if tool not in self._config.tools:
             raise ToolMarketError(404, "tool_unavailable")
-        ops = [op for op in catalog.OPERATIONS.values() if op.tool == tool]
-        asks = [a for a in self._supply(tool)
-                if min(book.owed_microusd(op, op.max_units, a.ask_microusd) for op in ops) <= a.remaining_microusd]
+        if operation is not None and (tool, operation) not in catalog.OPERATIONS:
+            raise ToolMarketError(404, "operation_unknown")
+        scope = (operation,) if operation is not None else book.GENERAL_ASK_OPERATIONS.get(tool, ())
+        ops = [catalog.OPERATIONS[tool, name] for name in scope]
+        asks = [a for a in self._supply(tool, operation)
+                if any(book.owed_microusd(op, op.max_units, a.ask_microusd) <= a.remaining_microusd for op in ops)]
         return {"tool": tool, "unit": catalog.TOOLS[tool],
                 "operations": sorted(op.name for op in ops),
                 "request_privacy": catalog.REQUEST_PRIVACY[tool],
@@ -393,6 +403,7 @@ class ToolMarket:
                 "best_ask_microusd": best and best["ask_microusd"],
                 "buyer_pays_microusd": best and best["buyer_pays_microusd"],
                 "operations": [{"operation": op.name, "does": op.does, "max_units": op.max_units,
+                                "book": f"/tool-market/books/{tool}?operation={op.name}",
                                 "params": {name: dict(p.schema(), required=p.required)
                                            for name, p in op.params.items()}}
                                for (t, _), op in sorted(catalog.OPERATIONS.items()) if t == tool]})
@@ -663,16 +674,16 @@ class ToolMarket:
         """The book's asks, best first, that a reserve for this call could take
         (never the buyer's own keys), each with the most the call could owe on it."""
 
-        for ask in self._supply(tool):
+        for ask in self._supply(tool, op.name):
             owed_cap = book.owed_microusd(op, op.max_units, ask.ask_microusd)
             if ask.ask_microusd <= max_ask and (not private or self._private(tool, ask)) \
                     and owed_cap <= ask.remaining_microusd and ask.miner_hotkey != buyer:
                 yield ask, owed_cap
 
-    def _supply(self, tool: str) -> List[book.Ask]:
+    def _supply(self, tool: str, operation: Optional[str] = None) -> List[book.Ask]:
         """The book's asks from approved suppliers, best first."""
 
-        rows = self._store.book(tool=tool, terms_sha256=self._config.terms_sha256)
+        rows = self._store.book(tool=tool, terms_sha256=self._config.terms_sha256, operation=operation)
         return book.rank(book.Ask.from_row(row) for row in rows if self._config.may_supply(tool, row["miner_hotkey"]))
 
     def _check(self, tool: str, envelope: str) -> Mapping[str, Any]:

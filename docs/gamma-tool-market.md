@@ -48,6 +48,13 @@ calculation](gamma-tool-market-economics.md).
      hotkey and tool, for a minute (`429 check_too_soon`).
 2. **Post an ask.** `POST /tool-market/asks` sets what the miner earns per
    unit. `ask_microusd: null` withdraws the ask.
+   - Include `operation` to price one SKU, e.g. `{"key_id":"…","operation":"get_job","ask_microusd":500}`.
+     Read that exact market at `GET /tool-market/books/harvestapi?operation=get_job`.
+     Omitting `operation` sets the original tool-wide price. For Harvest that covers only
+     `linkedin_profile` and `linkedin_company`. Each additional SKU needs an explicit signed ask.
+   - A SKU-specific price or withdrawal overrides its general price. A general withdrawal
+     removes the general offer only. Revoke the key to stop every operation. Statements show
+     both the general price and all SKU overrides (including null withdrawals).
    - For a per-call tool, the ask is micro-USD per call.
    - For a vendor-USD tool, the ask is micro-USD per vendor USD. For
      example, `900000` sells at 90% of the vendor's own price.
@@ -220,11 +227,15 @@ incumbent plan, a cap of 1,817 leaves the fee-inclusive price below $0.002:
 
 - Exact Harvest company URL or universal name maps to the direct lookup. The
   site's short profile request preserves `main=true`. Its full profile has a
-  separate ceiling. Email-enriched profiles and fuzzy company-name searches
-  need their own contract and supplier pricing.
+  separate ceiling. When `findEmail=true`, the market selects the separate
+  `linkedin_profile_email` offer and `harvestapi_get_profile.findEmail` buyer ceiling.
+  A returned, valid profile is one priced lookup even if no email is present.
+  Fuzzy company-name search is outside this direct lookup.
 - Harvest job and post reads, filtered searches, reactions, comments and
-  profile posts accept the parameters listed in the market catalog. More
-  expensive Sales Navigator lead search is outside these profile-key asks.
+  profile posts accept the parameters listed in the market catalog. Sales Navigator lead search requires the separate
+  `search_leads` offer and `harvestapi_search_leads` buyer ceiling. Each
+  delivered native page, including an empty page, counts as one priced
+  lookup. Market units do not establish what the vendor debited the miner.
 - Findymail name/domain and business-profile lookup, Hunter email finder and
   email-only Prospeo enrichment use the native provider contract. Explicit
   `enrich_mobile: false` keeps Prospeo's default; a mobile request is refused.

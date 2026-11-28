@@ -203,8 +203,8 @@ async def tool_catalog(request: Request) -> Response:
 
 
 @router.get("/tool-market/books/{tool}")
-async def order_book(tool: str, request: Request) -> Response:
-    return await _handle(request, lambda m, who, body: m.order_book(tool), signed=False, public=True)
+async def order_book(tool: str, request: Request, operation: Optional[str] = None) -> Response:
+    return await _handle(request, lambda m, who, body: m.order_book(tool, operation), signed=False, public=True)
 
 
 @router.get("/tool-market/gamma/balance")

@@ -159,10 +159,12 @@ and [signed requests](https://www.bittensor.com/docs/guides/signed-requests) gui
   subnet registration block (`NetworkRegisteredAt`). If the subnet is
   dissolved and registered again, reads fail closed until ops reconcile, so
   cleared totals never wipe or double credit. A total that goes backwards is
-  refused (`503 gamma_unavailable`). Each process reads at most two
-  balances from the chain at once; past that, a balance read answers
-  `503 gamma_unavailable` at once, so a flood of fresh hotkeys cannot queue
-  paid calls behind the chain client's lock.
+  refused (`503 gamma_unavailable`). A tab or signed call reads the chain
+  only when the stored balance falls short. Each process reads at most two
+  balances from the chain at once for tabs and calls, plus one for the
+  public balance read; past that, a read answers `503 gamma_unavailable` at
+  once, so a flood of fresh hotkeys cannot queue paid calls behind the chain
+  client's lock, and public reads cannot hold the reads paid flows need.
 
 To publish it (ops, once per service hotkey):
 
@@ -419,7 +421,8 @@ deployment, exactly as lead orders do.
   keys" route would let a buyer free a lost one.
 - **A balance read is public and needs no funds.** Each costs a few chain
   reads (a reading row only when the total changed). It runs on 4 threads
-  of its own; rate-limit it at the edge before opening it widely.
+  and one chain read of its own; rate-limit it at the edge before opening
+  it widely.
 - **One publisher hotkey.** The services document lists only the current
   service hotkey, and credit counts only spend there. A swap needs both
   listed, and credit read at both, before it happens.

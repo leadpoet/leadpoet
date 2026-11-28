@@ -11,6 +11,8 @@ from __future__ import annotations
 import dataclasses
 import json
 import random
+import threading
+import time
 import uuid
 
 import pytest
@@ -161,7 +163,9 @@ class World:
 
     def accept(self, hk, role):
         body = {"role": role, "terms_version": "v1", "terms_sha256": self.terms}
-        self.market.accept_terms(self.who(hk), body, json.dumps(body).encode())
+        signed = json.dumps(body).encode()
+        self.market.accept_terms(self.who(hk), body, signed)
+        return signed
 
     def miner_key(self, secret, ask, *, tool="harvestapi", cap=10 * USD, miner=None):
         miner = miner or hotkey()
@@ -441,8 +445,11 @@ def test_tabs_need_terms_balance_and_budget(world):
         raise ArenaChainError("finalized head unavailable")
 
     read, world.gamma.read = world.gamma.read, chain_down
+    # The stored balance still opens a tab; past it, unread Gamma may cover it: retry, not 402.
+    world.store.close_tab(market_module.token_hash(
+        world.market.open_tab(world.who(broke), {"budget_microusd": 1_000, "seconds": 600})["token"]))
     with pytest.raises(ToolMarketError) as down:  # any chain error, not only a Gamma read
-        world.market.open_tab(world.who(broke), {"budget_microusd": 1_000, "seconds": 600})
+        world.market.open_tab(world.who(broke), {"budget_microusd": 1_001, "seconds": 600})
     assert (down.value.status, down.value.code) == (503, "gamma_unavailable")
     world.gamma.read = read
     # One call reserves $0.011; a $0.015 budget allows one, not two.
@@ -779,11 +786,11 @@ def test_a_recheck_the_vault_cannot_answer_says_so_and_leaves_the_key(world, mon
 
 def test_a_terms_acceptance_keeps_the_body_as_signed(world, admin):
     buyer = hotkey()
-    world.accept(buyer, "buyer")
+    sent = world.accept(buyer, "buyer")
     admin.execute("SELECT signed_body,signature,host,signed_at FROM public.tool_market_terms WHERE hotkey=%s",
                   (buyer,))
     signed_body, signature, host, signed_at = admin.fetchone()
-    assert json.loads(signed_body) == {"role": "buyer", "terms_version": "v1", "terms_sha256": world.terms}
+    assert signed_body == sent.decode()  # the exact bytes, so the signature can be checked again
     assert (signature, host, signed_at) == ("ab" * 64, "gw.example", 1)
 
 
@@ -963,18 +970,42 @@ def test_concurrent_signed_calls_each_hold_only_their_keys_need(world):
     assert inner[0]["charge_microusd"] == 11_000
 
 
-def test_balance_reads_past_the_limit_answer_at_once_without_the_chain(world):
-    reads = []
-    world.gamma.read = lambda hk, head=None: reads.append(hk)
-    for _ in range(market_module.CHAIN_READS):
-        world.market._chain_reads.acquire()
+def test_public_balance_reads_past_their_limit_answer_at_once_and_leave_paid_reads_free(world):
+    attacker, buyer = hotkey(), hotkey()
+    world.gamma.units[buyer] = 10**9
+    world.accept(buyer, "buyer")
+    read, held, release = world.gamma.read, [], threading.Event()
+
+    def slow(hk, head=None):
+        if hk == attacker:
+            held.append(hk)
+            release.wait(10)
+        return read(hk, head)
+
+    world.gamma.read = slow
+    answers = []
+
+    def public_read():
+        try:
+            answers.append(world.market.gamma_balance(attacker))
+        except ToolMarketError as error:
+            answers.append(error.code)
+
+    readers = [threading.Thread(target=public_read) for _ in range(market_module.CHAIN_READS + 1)]
+    for reader in readers:
+        reader.start()
     try:
-        with pytest.raises(ToolMarketError) as busy:
-            world.market.gamma_balance(hotkey())
-        assert (busy.value.status, busy.value.code) == (503, "gamma_unavailable") and reads == []
+        for _ in range(500):  # every reader is held on the chain or has been refused
+            if len(held) + len(answers) == len(readers):
+                break
+            time.sleep(0.01)
+        assert answers == ["gamma_unavailable"] * (len(readers) - len(held))
+        # The public reads hold the chain; a buyer's first tab still reads its Gamma.
+        assert world.market.open_tab(world.who(buyer), {"budget_microusd": 1_000, "seconds": 600})["status"] == "opened"
     finally:
-        for _ in range(market_module.CHAIN_READS):
-            world.market._chain_reads.release()
+        release.set()
+        for reader in readers:
+            reader.join()
 
 
 def test_a_signed_call_the_stored_balance_covers_reads_no_chain(world):
@@ -1077,6 +1108,7 @@ def test_a_settlement_whose_answer_is_lost_is_read_back_or_named(world, monkeypa
 def test_a_tab_whose_opening_answer_is_lost_still_hands_over_its_token(world, monkeypatch):
     buyer = hotkey()
     world.gamma.units[buyer] = 10**9
+    world.market.gamma_balance(buyer)  # stored, so the first open commits
     world.accept(buyer, "buyer")
     open_tab = world.store.open_tab
 

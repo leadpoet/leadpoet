@@ -49,10 +49,13 @@ RECHECK_SPACING_SECONDS = 60
 # Gamma balance reads in flight in this process. Each is several chain
 # requests under the chain client's one lock, which every paid call's epoch
 # read also takes; anyone can ask for one (a fresh hotkey, the public
-# balance), so past this many the answer is 503 at once.
+# balance), so past this many the answer is 503 at once. The public read
+# has its own slot, so it cannot hold the ones tabs and calls top up with.
 CHAIN_READS = 2
-# An envelope (4,096 characters), the attestation and the other fields.
-MAX_SIGNED_BODY_BYTES = 8192  # a terms or register body, kept as signed
+PUBLIC_CHAIN_READS = 1
+# The largest body kept as signed: a register body (a 4,096-character
+# envelope, the attestation, the other fields); a terms body is far smaller.
+MAX_SIGNED_BODY_BYTES = 8192
 MAX_USAGE_PAGE = 500
 CALL_TIMEOUT_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -141,6 +144,7 @@ class ToolMarket:
         self._in_flight: Dict[str, int] = {}
         self._lock = threading.Lock()
         self._chain_reads = threading.BoundedSemaphore(CHAIN_READS)
+        self._public_chain_reads = threading.BoundedSemaphore(PUBLIC_CHAIN_READS)
 
     # Terms and balance ------------------------------------------------------
     def accept_terms(self, identity: BuyerIdentity, body: Mapping[str, Any], signed_body: bytes) -> Dict[str, Any]:
@@ -161,17 +165,18 @@ class ToolMarket:
     def use_nonce(self, hotkey: str, signature_hash: str, signed_at: int) -> bool:
         return self._store.use_nonce(hotkey=hotkey, signature_hash=signature_hash, signed_at=signed_at)
 
-    def balance(self, hotkey: str) -> Dict[str, Any]:
+    def balance(self, hotkey: str, *, public: bool = False) -> Dict[str, Any]:
         """Read the buyer's Gamma spend to this service and return their balance."""
 
-        if not self._chain_reads.acquire(blocking=False):
+        slots = self._public_chain_reads if public else self._chain_reads
+        if not slots.acquire(blocking=False):
             raise ToolMarketError(503, "gamma_unavailable")
         try:
             reading = self._gamma.read(hotkey)
         except ArenaChainError:  # a Gamma read or the finalized head
             raise ToolMarketError(503, "gamma_unavailable") from None
         finally:
-            self._chain_reads.release()
+            slots.release()
         result = self._store.record_gamma_reading(
             hotkey=hotkey, block_number=reading.block_number, block_hash=reading.block_hash,
             spent_units=reading.spent_units, available=reading.available)
@@ -185,7 +190,7 @@ class ToolMarket:
 
         if not isinstance(hotkey, str) or not is_valid_hotkey(hotkey):
             raise ToolMarketError(400, "invalid_hotkey")
-        found = self.balance(hotkey)
+        found = self.balance(hotkey, public=True)
         credited = max(int(found.get("credit_microusd") or 0), 0)
         remaining = min(max(int(found.get("balance_microusd") or 0), 0), credited)
         return {"hotkey": hotkey, "credited_usd": _usd(credited), "used_usd": _usd(credited - remaining),
@@ -199,17 +204,23 @@ class ToolMarket:
             raise ToolMarketError(400, "request_invalid")
         budget = _int(body["budget_microusd"], 1, MAX_TAB_MICROUSD, "budget_invalid")
         seconds = _int(body["seconds"], MIN_TAB_SECONDS, MAX_TAB_SECONDS, "seconds_invalid")
-        self.balance(identity.hotkey)
         token = self._new_token()
-        try:
-            result = self._store.open_tab(tab_id=self._new_id(), hotkey=identity.hotkey, token_hash=token_hash(token),
-                                          budget_microusd=budget, seconds=seconds,
-                                          terms_sha256=self._config.terms_sha256)
-        except ArenaStoreError:
-            # It may have committed, or commit within the store's 30 s statement
-            # timeout: the token lets the buyer find the tab and close it, so no
-            # tab only a lost token could close holds the budget until it expires.
-            raise ToolMarketError(503, "store_unavailable", token=token) from None
+
+        def open_once() -> Dict[str, Any]:
+            try:
+                return self._store.open_tab(tab_id=self._new_id(), hotkey=identity.hotkey,
+                                            token_hash=token_hash(token), budget_microusd=budget, seconds=seconds,
+                                            terms_sha256=self._config.terms_sha256)
+            except ArenaStoreError:
+                # It may have committed, or commit within the store's 30 s statement
+                # timeout: the token lets the buyer find the tab and close it, so no
+                # tab only a lost token could close holds the budget until it expires.
+                raise ToolMarketError(503, "store_unavailable", token=token) from None
+
+        result = open_once()  # the stored balance first: a busy chain cannot stop it
+        if result["status"] == "insufficient_balance":
+            self.balance(identity.hotkey)  # credit Gamma spent since; an unread chain is its 503
+            result = open_once()
         if result["status"] == "terms_required":
             raise ToolMarketError(403, "terms_required")
         if result["status"] == "insufficient_balance":

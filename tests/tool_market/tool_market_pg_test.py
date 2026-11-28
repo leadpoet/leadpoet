@@ -349,7 +349,9 @@ def test_the_catalog_lists_each_tool_its_operations_and_best_price(world):
     harvest = tools["harvestapi"]
     assert (harvest["best_ask_microusd"], harvest["buyer_pays_microusd"], harvest["max_ask_microusd"]) \
         == (9_000, 9_900, 250_000)
-    assert {op["operation"] for op in harvest["operations"]} == {"linkedin_profile", "linkedin_company"}
+    assert {op["operation"] for op in harvest["operations"]} == {
+        "linkedin_profile", "linkedin_company", "search_jobs", "get_job", "search_posts",
+        "post_reactions", "post_comments", "profile_posts"}
     assert tools["exa"]["best_ask_microusd"] is None  # nobody sells it yet
 
 

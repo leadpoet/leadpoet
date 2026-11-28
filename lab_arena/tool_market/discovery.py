@@ -27,7 +27,7 @@ def services_document(config: ToolMarketConfig) -> Dict[str, Any]:
         "description": "Pay-per-call GTM data tools (email checks, people and company lookups, web search) "
                        "on vendor keys that miners supply. Each call costs its supplier's ask plus 10%.",
         "publishers": [{"netuid": NETUID, "hotkey": config.gamma_service}],
-        "services": [{"type": "openapi", "endpoint": base + "/tool-market/openapi.json",
+        "services": [{"type": "openapi", "endpoint": base,
                       "spec": base + "/tool-market/openapi.json"}],
         "payments": [{"type": "gamma", "signature": "btauth/1", "balance": base + "/tool-market/gamma/balance"}],
         "pricing": base + "/tool-market/catalog",

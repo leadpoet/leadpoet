@@ -15,7 +15,6 @@ def test_real_factory_cannot_sell_or_solicit_spend_without_supplier_settlement(m
     config = ToolMarketConfig(mode="live", tools=frozenset({"zerobounce"}), gamma_service=buyer,
                               public_base_url="https://market.example", platform_max_asks={"zerobounce_validate": 5_000})
     store = Mock()
-    store.open_tab.return_value = {"status": "opened", "tab_id": "existing"}
     store.tab.return_value = {"open": True}
     store.close_tab.return_value = {"open": False}
     store.book.return_value = []

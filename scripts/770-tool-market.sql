@@ -583,11 +583,11 @@ $book770$;
 -- page of it; until one has, page one may fail over to any key. Tabs rotate;
 -- the authenticated buyer is the stable owner of the request.
 CREATE FUNCTION public.tool_market_session_key_v1(p_buyer TEXT,p_digest TEXT)
-RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $session770$
- SELECT jsonb_build_object('key_id',(SELECT c.key_id FROM public.tool_market_calls c
+RETURNS UUID LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $session770$
+ SELECT c.key_id FROM public.tool_market_calls c
  JOIN public.tool_market_tabs t USING(tab_id) JOIN public.tool_market_call_settlements s USING(call_id)
  WHERE c.session_digest=p_digest AND t.hotkey=p_buyer AND s.status='settled'
-   AND s.http_status BETWEEN 200 AND 299 AND s.units>0 ORDER BY s.settled_at,c.sequence LIMIT 1))
+   AND s.http_status BETWEEN 200 AND 299 AND s.units>0 ORDER BY s.settled_at,c.sequence LIMIT 1
 $session770$;
 
 -- Hold one call's reserve against its tab, at the key's current ask.
@@ -618,7 +618,7 @@ BEGIN
   IF p_tool<>'harvestapi' OR p_operation<>'search_leads' OR p_session !~ '^[0-9a-f]{64}$' OR p_first IS NULL THEN
    RAISE EXCEPTION 'invalid supplier session';
   END IF;
-  SELECT (public.tool_market_session_key_v1(tab.hotkey,p_session)->>'key_id')::uuid INTO session_key;
+  session_key:=public.tool_market_session_key_v1(tab.hotkey,p_session);
   IF session_key IS NOT NULL AND session_key<>p_key_id THEN RETURN jsonb_build_object('status','session_key_changed'); END IF;
   IF NOT p_first AND session_key IS NULL THEN RETURN jsonb_build_object('status','session_page_one_required'); END IF;
  END IF;

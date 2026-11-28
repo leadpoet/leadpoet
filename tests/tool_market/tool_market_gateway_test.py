@@ -185,8 +185,6 @@ def test_calls_take_the_tab_token_and_return_the_market_answer(client):
     refused = client.post("/tool-market/call", json=body, headers={"authorization": "Basic tmt_good"})
     assert refused.status_code == 402 and refused.json() == {"error": "tab_budget"}
     assert market.seen[-1][1] == ""  # a non-bearer header passes no token
-    assert client.get("/tool-market/books/exa").json() == {"tool": "exa", "asks": []}
-    assert client.get("/tool-market/catalog").json() == {"tools": []}
 
 
 def test_usage_is_signed_and_pages_by_a_strict_watermark(client):

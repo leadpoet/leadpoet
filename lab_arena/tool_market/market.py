@@ -312,9 +312,7 @@ class ToolMarket:
         # One vendor probe per hotkey and tool a minute, unless it ends in a
         # listing, so re-posting a refused key cannot loop vendor checks.
         probe = "register:%s:%s" % (identity.hotkey, tool)
-        with self._slot("check:" + identity.hotkey, 1, "check_in_flight"):
-            if not self._recheck_due(probe):
-                raise ToolMarketError(429, "check_too_soon", retry_after_seconds=RECHECK_SPACING_SECONDS)
+        with self._vendor_check(identity.hotkey, probe):
             checked = self._check(tool, envelope)
         if checked.get("status") not in ("valid", "unchecked"):
             raise ToolMarketError(422, str(checked.get("reason") or "key_invalid"))
@@ -333,6 +331,15 @@ class ToolMarket:
             self._rechecked.pop(probe, None)
         return dict(result, health=checked["status"])
 
+    @contextmanager
+    def _vendor_check(self, hotkey: str, name: str):
+        """One vendor check in flight per miner, and at most one a minute per ``name``."""
+
+        with self._slot("check:" + hotkey, 1, "check_in_flight"):
+            if not self._recheck_due(name):
+                raise ToolMarketError(429, "check_too_soon", retry_after_seconds=RECHECK_SPACING_SECONDS)
+            yield
+
     def check_key(self, identity: BuyerIdentity, key_id: Any) -> Dict[str, Any]:
         """Check a key again, e.g. after topping up a key that ran out.
 
@@ -344,9 +351,7 @@ class ToolMarket:
         self._require_supplier(key["tool"], identity.hotkey)
         if vault_tools.TOOLS[key["tool"]].balance_url is None:
             raise ToolMarketError(409, "key_cannot_be_checked")
-        with self._slot("check:" + identity.hotkey, 1, "check_in_flight"):
-            if not self._recheck_due(key["key_id"]):
-                raise ToolMarketError(429, "check_too_soon", retry_after_seconds=RECHECK_SPACING_SECONDS)
+        with self._vendor_check(identity.hotkey, key["key_id"]):
             checked = self._recheck(key["key_id"], key["tool"], key["envelope"])
         return {"key_id": key["key_id"], "tradeable": checked["status"] != "invalid"}
 

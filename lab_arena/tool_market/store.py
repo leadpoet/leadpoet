@@ -149,7 +149,8 @@ class ToolMarketStore:
 
     # Calls ------------------------------------------------------------------
     def session_key(self, buyer: str, digest: str) -> Optional[str]:
-        return self._rpc("tool_market_session_key_v1", p_buyer=buyer, p_digest=digest)["key_id"]
+        key = self._rpc("tool_market_session_key_v1", p_buyer=buyer, p_digest=digest)
+        return None if key is None else str(key)
 
     def reserve_call(self, *, call_id: str, token_hash: str, tool: str, operation: str, key_id: str,
                      ask_microusd: int, owed_cap_microusd: int, session: Optional[str] = None, first_page: bool = True,

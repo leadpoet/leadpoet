@@ -40,6 +40,25 @@ class HeldRoute(Exception):
         self.cause = cause
 
 
+def retry_after_seconds(header):
+    if not isinstance(header, str) or len(header) > 128:
+        return 0
+    try:
+        seconds = (
+            int(header)
+            if header.isascii() and header.isdecimal()
+            else int(
+                (
+                    parsedate_to_datetime(header) - datetime.now(timezone.utc)
+                ).total_seconds()
+            )
+            + 1
+        )
+    except (ValueError, TypeError, OverflowError):
+        return 0
+    return min(86400, max(0, seconds))
+
+
 class GovernedIntake(CollectionIntake):
     def __init__(self, database, credentials, epoch, routes, current_epoch):
         super().__init__(database, credentials, "live")
@@ -69,29 +88,20 @@ class GovernedIntake(CollectionIntake):
             return endpoint_prices(self.routes, models=[model])
         except CatalogError as exc:
             # With no preflight, there is no provider POST or ambiguous lease.
-            self._rpc("route_backoff", model=model, route=self.routes[model], wait=0)
+            self._rpc(
+                "route_backoff",
+                model=model,
+                route=self.routes[model],
+                wait=retry_after_seconds(exc.retry_after),
+            )
             raise HeldRoute(model, exc) from exc
 
     def respect_retry_after(self, model, header):
-        if not isinstance(header, str):
-            return
-        try:
-            seconds = (
-                int(header)
-                if header.isdecimal()
-                else int(
-                    (
-                        parsedate_to_datetime(header) - datetime.now(timezone.utc)
-                    ).total_seconds()
-                )
-                + 1
-            )
-        except (ValueError, TypeError, OverflowError):
-            return
+        seconds = retry_after_seconds(header)
         if seconds > 0:
             self._rpc(
                 "route_backoff",
                 model=model,
                 route=self.routes[model],
-                wait=min(seconds, 86400),
+                wait=seconds,
             )

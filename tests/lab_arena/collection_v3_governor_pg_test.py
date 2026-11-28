@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 import time
 from uuid import uuid4
 
@@ -67,9 +68,7 @@ def claim(
     )
 
 
-@pytest.fixture
-def gov(pool):
-    migrate(pool)
+def install_governor(pool):
     sql = (
         Path(__file__).resolve().parents[2]
         / "scripts"
@@ -78,6 +77,12 @@ def gov(pool):
     with pool.driver.connect(**pool.dsn) as conn, conn.cursor() as c:
         c.execute("SET ROLE rate_test_migrator")
         c.execute(sql.read_text())
+
+
+@pytest.fixture
+def gov(pool):
+    migrate(pool)
+    install_governor(pool)
     pool.activate()
     pool.register(0, 0, 1_000_000, alter={"terms_sha256": NEW_TERMS})
     return pool
@@ -159,10 +164,15 @@ def test_lanes_require_real_settled_overlap_at_each_prior_tier(gov):
             p.sql(
                 "select public.collection_set_worker_lanes_v1(%s)", (new,), owner=True
             )
-        with ThreadPoolExecutor(max_workers=min(24, old)) as threads:
-            jobs = list(
-                threads.map(lambda _: claim(p, str(old), token=tk), range(old + 3))
-            )
+        gate = Barrier(old)
+
+        def synchronized_claim(index):
+            if index < old:
+                gate.wait(timeout=15)
+            return claim(p, str(old), token=tk)
+
+        with ThreadPoolExecutor(max_workers=old) as threads:
+            jobs = list(threads.map(synchronized_claim, range(old + 3)))
         picked = [j for j in jobs if j]
         assert len(picked) == old and len({j["slot"] for j in picked}) == old
         for job in picked:
@@ -246,3 +256,122 @@ def test_cost_priority_skips_expensive_slots_without_discarding_them(gov):
         and restored["model"] == A
         and restored["registration_id"] == funded[0]
     )
+
+
+def test_only_original_native_billing_releases_historical_hold(gov):
+    p = gov
+    capacity(p)
+    token = "sha256:" + digest("native-hold")
+    j = claim(p, "unresolved", token=token)
+    assert p.reserve(j, token, "waiting", 60) == "reserved"
+    p.record(j, token, "waiting", None, "gen-late-native", status=429)
+    assert p.reserve(j, token, "never-posted", 20) == "route_backoff"
+    p.rpc("finish", j["job_id"], token, "failed", Json({}), None, 201)
+
+    def pending():
+        return p.sql(
+            "select count(*) from public.collection_unsettled_standing_calls where job_id=%s",
+            (j["job_id"],),
+            owner=True,
+        )
+
+    assert pending() == 1 and p.rpc("epoch_liability", 202) == 90
+    p.rpc(
+        "settle_generation",
+        j["job_id"],
+        "waiting",
+        "gen-late-native",
+        digest("waitingresponse"),
+        digest("native-lookup"),
+        10,
+    )
+    assert (
+        pending() == 0
+        and p.rpc("epoch_liability", 202) == 0
+        and p.rpc("epoch_liability", 201) == 15
+    )
+
+
+def test_worker_uses_exact_governed_rpc_and_epoch_on_price_race(gov):
+    from lab_arena.collection_governor import GovernedIntake
+    from lab_arena.collection_prices import claim_at_current_price
+    from lab_arena.collection_experiment import load_experiment
+    from lab_arena.store import FUNCTION_SIGNATURES
+    from tests.lab_arena.collection_pool_worker_test import pool_raw, PROMPT
+
+    p = gov
+    capacity(p)
+
+    # Same named arguments and JSON casts as the deployed PostgREST worker.
+    class Native:
+        def rpc(self, name, args):
+            assert name.startswith("collection_") and name.endswith("_v1")
+            fields = FUNCTION_SIGNATURES[name]
+            assert args.keys() == {k for k, _ in fields}
+            return p.rpc(
+                name[len("collection_") : -3],
+                *[Json(args[k]) if t == "jsonb" else args[k] for k, t in fields],
+            )
+
+    raw = pool_raw(model=A, repeats=1)
+    raw["routes"] = {A: ROUTES[A]}
+    pack = load_experiment(raw, PROMPT)
+    current = [201]
+    intake = GovernedIntake(Native(), None, 201, pack.routes, lambda: current[0])
+
+    def lease(*, expected_model):
+        return intake.claim_pool(pack, p.harness, expected_model=expected_model)
+
+    def quote(m):
+        assert m == A
+        current[0] = 202
+        return {A: 55}
+
+    assert claim_at_current_price(lease, quote)[0] is None
+    assert p.rpc("batch_jobs", pack.batch_id) == []
+    current[0] = 201
+    job, pricing = claim_at_current_price(lease, lambda model: {model: 55})
+    assert (
+        job["model"] == A
+        and job["slot"] == 0
+        and job["reward_rate_bps"] == 15000
+        and job["lease_token"]
+        and pricing == {A: 55}
+    )
+    assert p.rpc("pool_pack_state", pack.batch_id, 1) == "running"
+
+
+def test_cutover_preserves_real_old_assignments_quotes_digests_and_missing_bill(pool):
+    p = pool
+    migrate(p)
+    p.activate()
+    p.register(1, 1, 100_000, alter={"terms_sha256": NEW_TERMS})
+    token = "sha256:" + digest("legacy-token")
+    original = p.claim("funded-before-773", budget=100, token=token)
+    p.reserve(original, token, "settled", 60)
+    p.record(original, token, "settled", 50, "gen-original")
+    p.finish(original, token, epoch=201)
+    missing = p.claim("unknown-before-773", budget=100, token=token)
+    p.reserve(missing, token, "unreturned", 70)
+    p.rpc("finish", missing["job_id"], token, "failed", Json({}), None, 201)
+    inflight = p.claim("still-running-before-773", budget=100, token=token)
+    original_rows = p.rpc("batch_jobs", original["batch_id"])
+    quoted = p.rpc("reward_quotes", 202)
+    install_governor(p)
+    assert original_rows == p.rpc(
+        "batch_jobs", original["batch_id"]
+    ) and quoted == p.rpc("reward_quotes", 202)
+    assert (
+        p.claim(
+            "still-running-before-773", budget=100, job=inflight["job_id"], token=token
+        )["job_id"]
+        == inflight["job_id"]
+    )
+    assert p.claim("old-worker-must-not-bypass") is None
+    capacity(p, amount=1000)
+    assert p.rpc("epoch_liability", 201) == 75 + 105 + 150
+    assert p.rpc("epoch_liability", 202) == 105 + 150
+    p.reserve(inflight, token, "actual", 90)
+    p.record(inflight, token, "actual", 20, "gen-old-lease")
+    p.finish(inflight, token, epoch=201)
+    assert p.rpc("epoch_liability", 201) == 75 + 105 + 30

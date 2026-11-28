@@ -184,3 +184,69 @@ def test_release_template_enables_only_governed_service_and_30_second_backoff():
         "OnUnitInactiveSec=5min"
         in (repo / "leadpoet-collection-pilot.timer").read_text()
     )
+
+
+def test_catalog_and_provider_retry_after_extend_only_one_pinned_route(monkeypatch):
+    sent = []
+    db = SimpleNamespace(rpc=lambda op, args: sent.append((op, args)))
+    client = gov.GovernedIntake(db, None, 200, {EXPERT: "coreweave/fp8"}, lambda: 200)
+    err = CatalogError("provider_catalog_throttled", "private")
+    monkeypatch.setattr(
+        gov, "endpoint_prices", lambda *a, **k: (_ for _ in ()).throw(err)
+    )
+    with pytest.raises(gov.HeldRoute) as caught:
+        client.prices(EXPERT)
+    assert caught.value.model == EXPERT and caught.value.cause is err
+    client.respect_retry_after(EXPERT, "125")
+    client.respect_retry_after(EXPERT, "not a delay")
+    assert sent == [
+        (
+            "collection_route_backoff_v1",
+            {"p_model": EXPERT, "p_route": "coreweave/fp8", "p_wait": v},
+        )
+        for v in [0, 125]
+    ]
+
+
+def test_empty_funding_never_runs_providers_or_processes(tmp_path, monkeypatch):
+    cfg = tmp_path / "prompt.json"
+    cfg.write_text("{}")
+    spec = pool_raw(repeats=1)
+    path = tmp_path / (load_experiment(spec, PROMPT).batch_id + ".json")
+    store_private_json(path, spec)
+    seen = []
+
+    def rpc(op, params):
+        seen.append(op)
+        if op == "collection_pool_active_v1":
+            return True
+        if op == "collection_pool_fundable_v1":
+            return 99999
+        pytest.fail("unfunded worker tried to read additional services")
+
+    monkeypatch.setattr(
+        worker, "evidence_stores", lambda: (SimpleNamespace(rpc=rpc), None)
+    )
+    monkeypatch.setattr(
+        worker,
+        "run_governed_lanes",
+        lambda *a: pytest.fail("started a worker without signed capacity"),
+    )
+    assert (
+        worker.main(
+            [
+                "--batch",
+                str(cfg),
+                "--prompt",
+                str(cfg),
+                "--offer-directory",
+                str(tmp_path),
+                "--productive-burst",
+                "--max-jobs",
+                "64",
+                "--governed-workers",
+            ]
+        )
+        == 0
+    )
+    assert seen == ["collection_pool_active_v1", "collection_pool_fundable_v1"]

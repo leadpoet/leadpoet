@@ -28,16 +28,43 @@ CREATE TABLE public.collection_governed_jobs (
 CREATE INDEX collection_governed_epoch ON public.collection_governed_jobs(budget_epoch);
 CREATE INDEX collection_governed_finished ON public.collection_governed_jobs(finished_epoch) WHERE finished_epoch IS NOT NULL;
 CREATE INDEX collection_governed_peak ON public.collection_governed_jobs(tier,concurrent_claims);
+-- Index unresolved original reservations independently of the immutable receipt/charge rows.
+-- This avoids an anti-join over every historical provider call before every new claim.
+CREATE TABLE public.collection_unsettled_standing_calls (
+ job_id uuid NOT NULL, request_id text NOT NULL, PRIMARY KEY(job_id,request_id),
+ FOREIGN KEY(job_id,request_id) REFERENCES public.collection_calls(job_id,request_id)
+);
 CREATE TABLE public.collection_route_backoff (
  model text NOT NULL, route text NOT NULL, unavailable_until timestamptz NOT NULL,
  observed_at timestamptz NOT NULL, delay_seconds integer NOT NULL, PRIMARY KEY(model,route)
 );
 DO $$ DECLARE t text; BEGIN FOREACH t IN ARRAY ARRAY['collection_worker_limit','collection_epoch_capacity',
- 'collection_governed_jobs','collection_route_backoff'] LOOP
+ 'collection_governed_jobs','collection_unsettled_standing_calls','collection_route_backoff'] LOOP
  EXECUTE format('ALTER TABLE public.%I OWNER TO lab_arena_owner',t);
  EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY',t);
  EXECUTE format('REVOKE ALL ON public.%I FROM PUBLIC,anon,authenticated,service_role,lab_arena_service',t);
 END LOOP; END $$;
+
+CREATE FUNCTION public.collection_index_pending_bill_v1() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+BEGIN
+ IF TG_TABLE_NAME='collection_calls' THEN
+  IF EXISTS(SELECT FROM public.collection_jobs WHERE job_id=NEW.job_id AND mode='live' AND batch_id LIKE 'pool-%') THEN
+   INSERT INTO public.collection_unsettled_standing_calls VALUES(NEW.job_id,NEW.request_id);
+  END IF;
+ ELSE
+  DELETE FROM public.collection_unsettled_standing_calls WHERE (job_id,request_id)=(NEW.job_id,NEW.request_id);
+ END IF;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER collection_index_reserved_bill AFTER INSERT ON public.collection_calls
+ FOR EACH ROW WHEN(NEW.key_id IS NOT NULL) EXECUTE FUNCTION public.collection_index_pending_bill_v1();
+CREATE TRIGGER collection_index_known_bill AFTER INSERT OR UPDATE OF cost_microusd ON public.collection_call_receipts
+ FOR EACH ROW WHEN(NEW.cost_microusd IS NOT NULL) EXECUTE FUNCTION public.collection_index_pending_bill_v1();
+INSERT INTO public.collection_unsettled_standing_calls
+ SELECT c.job_id,c.request_id FROM public.collection_calls c JOIN public.collection_jobs j USING(job_id)
+ LEFT JOIN public.collection_call_receipts r USING(job_id,request_id)
+ WHERE j.batch_id LIKE 'pool-%' AND j.mode='live' AND c.key_id IS NOT NULL AND r.cost_microusd IS NULL;
 
 CREATE FUNCTION public.collection_worker_lanes_v1() RETURNS integer
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
@@ -106,7 +133,8 @@ DECLARE old public.collection_epoch_capacity; stamp timestamptz:=clock_timestamp
  INSERT INTO public.collection_epoch_capacity(epoch,boundary,block_hash,target_limit_microusd,valuation,validated_at)
  VALUES(p_epoch,p_boundary,p_hash,limit_usd,p_valuation,stamp)
  ON CONFLICT(epoch) DO UPDATE SET target_limit_microusd=least(collection_epoch_capacity.target_limit_microusd,EXCLUDED.target_limit_microusd),
- valuation=EXCLUDED.valuation,validated_at=EXCLUDED.validated_at;
+ valuation=CASE WHEN EXCLUDED.target_limit_microusd<collection_epoch_capacity.target_limit_microusd
+                THEN EXCLUDED.valuation ELSE collection_epoch_capacity.valuation END,validated_at=EXCLUDED.validated_at;
  RETURN true;
 END $$;
 
@@ -117,27 +145,26 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
  WITH relevant(id) AS (
   SELECT j.job_id FROM public.collection_jobs j WHERE j.mode='live' AND (j.accepted_epoch=p_epoch OR j.status IN ('running','ready'))
   UNION SELECT a.job_id FROM public.collection_governed_jobs a WHERE a.budget_epoch=p_epoch OR a.finished_epoch=p_epoch
-  UNION SELECT c.job_id FROM public.collection_calls c LEFT JOIN public.collection_call_receipts r USING(job_id,request_id)
-    JOIN public.collection_jobs j ON j.job_id=c.job_id
-    WHERE r.cost_microusd IS NULL AND j.mode='live' AND j.batch_id LIKE 'pool-%' AND c.key_id IS NOT NULL
+  UNION SELECT job_id FROM public.collection_unsettled_standing_calls
  ), amounts AS (
   SELECT j.*,a.budget_epoch,a.finished_epoch,coalesce(b.spent,0) spent,coalesce(b.uncertain,0) uncertain
    FROM relevant x JOIN public.collection_jobs j ON j.job_id=x.id LEFT JOIN public.collection_governed_jobs a USING(job_id)
    LEFT JOIN LATERAL(SELECT sum(coalesce(r.cost_microusd,c.reserved_microusd)) spent,
     sum(c.reserved_microusd) FILTER(WHERE r.cost_microusd IS NULL) uncertain
     FROM public.collection_calls c LEFT JOIN public.collection_call_receipts r USING(job_id,request_id)
-    WHERE c.job_id=x.id AND c.key_id IS NOT NULL) b ON true
+    WHERE j.status<>'accepted' AND c.job_id=x.id AND c.key_id IS NOT NULL) b ON true
  ) SELECT coalesce(sum(CASE
     WHEN accepted_epoch=p_epoch THEN price_microusd
-    WHEN status IN ('running','ready') THEN greatest(price_microusd,ceil(greatest(budget_microusd,spent)*coalesce(reward_rate_bps,15000)::numeric/10000))
-    WHEN status<>'accepted' AND (budget_epoch=p_epoch OR finished_epoch=p_epoch) THEN ceil(spent*coalesce(reward_rate_bps,15000)::numeric/10000)
-    ELSE ceil(uncertain*coalesce(reward_rate_bps,15000)::numeric/10000) END),0)::bigint FROM amounts
+    WHEN status IN ('running','ready') THEN greatest(price_microusd,ceil(greatest(budget_microusd,spent)*
+     coalesce(reward_rate_bps,CASE WHEN batch_id LIKE 'pool-%' THEN 12500 ELSE 15000 END)::numeric/10000))
+    WHEN status<>'accepted' AND (budget_epoch=p_epoch OR finished_epoch=p_epoch) THEN ceil(spent*coalesce(reward_rate_bps,12500)::numeric/10000)
+    ELSE ceil(uncertain*coalesce(reward_rate_bps,12500)::numeric/10000) END),0)::bigint FROM amounts
 $$;
 CREATE FUNCTION public.collection_pool_fundable_v1(p_priority integer DEFAULT NULL) RETURNS bigint
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
  SELECT coalesce(max(public.collection_pool_available_v1(k.key_id,NULL)),0)
  FROM public.collection_registrations r JOIN public.collection_keys k USING(registration_id)
- WHERE r.mode='live' AND k.provider='openrouter' AND r.revoked_at IS NULL AND k.revoked_at IS NULL
+ WHERE r.mode='live' AND k.provider='openrouter' AND k.miner_hotkey=r.miner_hotkey AND r.revoked_at IS NULL AND k.revoked_at IS NULL
  AND r.consent#>>'{body,task_scope}'='sales_sandbox'
  AND (p_priority IS NULL OR (r.consent#>>'{body,priority}')::integer=p_priority)
  AND NOT EXISTS(SELECT FROM public.collection_calls c JOIN public.collection_call_receipts b USING(job_id,request_id)
@@ -154,8 +181,8 @@ DECLARE stamp timestamptz:=clock_timestamp(); delay integer; BEGIN
  INSERT INTO public.collection_route_backoff AS h(model,route,unavailable_until,observed_at,delay_seconds)
  VALUES(p_model,p_route,stamp+greatest(30,p_wait)*interval '1 second',stamp,greatest(30,p_wait))
  ON CONFLICT(model,route) DO UPDATE SET
-   delay_seconds=greatest(p_wait,CASE WHEN h.observed_at<stamp-interval '15 minutes' THEN 30 ELSE least(h.delay_seconds*2,900) END),
-   unavailable_until=greatest(h.unavailable_until,stamp+greatest(p_wait,CASE WHEN h.observed_at<stamp-interval '15 minutes' THEN 30 ELSE least(h.delay_seconds*2,900) END)*interval '1 second'),
+   delay_seconds=greatest(p_wait,CASE WHEN p_wait>0 AND h.unavailable_until>stamp THEN h.delay_seconds WHEN h.observed_at<stamp-interval '15 minutes' THEN 30 ELSE least(h.delay_seconds*2,900) END),
+   unavailable_until=greatest(h.unavailable_until,stamp+greatest(p_wait,CASE WHEN p_wait>0 AND h.unavailable_until>stamp THEN h.delay_seconds WHEN h.observed_at<stamp-interval '15 minutes' THEN 30 ELSE least(h.delay_seconds*2,900) END)*interval '1 second'),
    observed_at=stamp
  RETURNING unavailable_until INTO stamp;
  RETURN stamp;
@@ -255,11 +282,12 @@ DO $$ DECLARE f regprocedure; BEGIN
  'public.collection_epoch_liability_v1(bigint)'::regprocedure,
  'public.collection_pool_fundable_v1(integer)'::regprocedure,
  'public.collection_route_backoff_v1(text,text,integer)'::regprocedure,
+ 'public.collection_index_pending_bill_v1()'::regprocedure,
  'public.collection_note_route_throttle_v1()'::regprocedure,
  'public.collection_set_worker_lanes_v1(integer)'::regprocedure] LOOP
   EXECUTE format('ALTER FUNCTION %s OWNER TO lab_arena_owner',f);
   EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC,anon,authenticated,service_role,lab_arena_service',f);
-  IF f NOT IN ('public.collection_set_worker_lanes_v1(integer)'::regprocedure,'public.collection_note_route_throttle_v1()'::regprocedure)
+  IF f NOT IN ('public.collection_set_worker_lanes_v1(integer)'::regprocedure,'public.collection_note_route_throttle_v1()'::regprocedure,'public.collection_index_pending_bill_v1()'::regprocedure)
   THEN EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO lab_arena_service',f); END IF;
  END LOOP;
  IF NOT (SELECT had_create FROM pg_temp.governor_acl) THEN REVOKE CREATE ON SCHEMA public FROM lab_arena_owner; END IF;

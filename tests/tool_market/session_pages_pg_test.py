@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from tests.tool_market.tool_market_pg_test import database, store, world, ok
+from lab_arena.tool_market import catalog
 from lab_arena.tool_market.market import ToolMarketError
 
 
@@ -36,6 +37,20 @@ def test_lead_search_session_stays_on_first_supplier_after_price_change(world):
     upstream_ids = [parse_qs(urlsplit(x[2]).query)["sessionId"][0] for x in world.vendor.sent]
     assert upstream_ids[0] == upstream_ids[1] != upstream_ids[2]
     assert session not in upstream_ids
+
+
+def test_a_session_rewrite_past_the_url_limit_is_refused_before_any_key(world, monkeypatch):
+    miner, key = world.miner_key("session-long", 10)
+    world.market.post_ask(world.who(miner), dict(key_id=key, operation="search_leads", ask_microusd=5000))
+    _, tab = world.buyer()
+    params = {"currentJobTitles": "Owner", "sessionId": "a", "page": 1}
+    url, _, _ = catalog.operation("harvestapi", "search_leads").build(params)
+    monkeypatch.setattr(catalog, "MAX_URL", len(url))  # the buyer's URL fits; its rewrite does not
+    with pytest.raises(ToolMarketError) as refused:
+        world.market.call(tab, {"tool": "harvestapi", "operation": "search_leads", "params": params,
+                                "request_id": str(uuid4())})
+    assert (refused.value.status, refused.value.code) == (400, "param_invalid")
+    assert "request_id_used" not in refused.value.detail and world.vendor.sent == []
 
 
 def test_page_one_fails_over_and_the_session_pins_to_the_key_that_served_it(world):

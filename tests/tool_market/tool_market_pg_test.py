@@ -989,6 +989,23 @@ def test_fresh_hotkeys_cannot_hold_the_chain_reads_credited_buyers_top_up_with(w
         world.market._uncredited_chain_reads.release()
 
 
+def test_a_signed_call_whose_tab_open_answer_is_lost_holds_no_balance(world, monkeypatch):
+    world.miner_key("lost-open-key", 10_000)
+    buyer = hotkey()
+    world.gamma.units[buyer] = 10**9
+    assert world.market.gamma_balance(buyer)["remaining_usd"] == "1.000000"  # stored, so the first open commits
+    opened = world.market._store.open_tab
+
+    def lost(**tab):
+        opened(**tab)
+        raise ArenaStoreUnavailable("answer lost")
+
+    monkeypatch.setattr(world.market._store, "open_tab", lost)
+    with pytest.raises(ArenaStoreUnavailable):
+        world.market.call("", PROFILE, world.who(buyer))
+    assert world.market.gamma_balance(buyer)["remaining_usd"] == "1.000000"  # its tab was closed
+
+
 def test_a_signed_call_the_stored_balance_covers_reads_no_chain(world):
     world.miner_key("stored-key", 10_000)  # 11,000 a call, under the 275,000 a profile call may cost
     buyer = hotkey()

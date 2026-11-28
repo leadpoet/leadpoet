@@ -7,7 +7,7 @@ buyer's hotkey spent to the market's Gamma service on netuid 71
 (`GammaSpent`). Each call selects an eligible key from the price-ranked book, subject to health, privacy, price and budget limits. The attested vault and the vendor execute the request.
 
 It is off by default. Every route answers 404 until
-`LEADPOET_TOOL_MARKET_MODE=live`. Registered miners enroll by signing the provider-use attestation.
+`LEADPOET_TOOL_MARKET_MODE=live`.
 `LEADPOET_TOOL_MARKET_TOOLS_OFF` turns single tools off, for example
 `exa,hunter`.
 
@@ -416,9 +416,7 @@ deployment, exactly as lead orders do.
   before scaling.
 - **One hotkey per miner is assumed.** The own-key rule, the daily caps
   and the 30-day registration limit are per hotkey. A miner with several
-  hotkeys can buy from themselves. The buyer spends Gamma including the fee.
-  Supplier targets use the ask and the finalized valuation of available emissions.
-  Actual alpha received can differ from that target.
+  hotkeys can buy from themselves.
 - **A running vault is trusted until it restarts.** The gateway checks the
   vault's keys against the KMS on each connect, and only an approved build
   gets those keys. Removing an approval on Base does not stop a vault
@@ -466,21 +464,12 @@ deployment, exactly as lead orders do.
 - **One publisher hotkey.** The services document lists only the current
   service hotkey, and credit counts only spend there. A swap needs both
   listed, and credit read at both, before it happens.
-- **A re-registered subnet stops credit.** The standard counts each
-  registration's totals from zero; this market stops reading instead, and
-  ops reconcile by hand. Rare, and it never over-credits.
 - **Only sr25519 hotkeys sign.** A btauth request with `X-Bittensor-Crypto`
   set is refused.
-- **A signed call accepts the terms by being sent.** It needs no terms
-  step; the services document states the terms it accepts. An API key
-  still needs the signed terms.
 - **Anyone can fill the vault's connections.** It serves at most 128 at
   once, and one that sends nothing holds its slot for 10 s, so a stranger
   can keep every call at `503 no_supply` (nothing is charged). Limit the
   vault port to the gateway's egress, leaving only `/v1/identity` public.
-- **HarvestAPI prices are unconfirmed.** Its per-endpoint prices are not
-  published, so a tool-wide ask covers only the profile and company reads;
-  every other SKU is priced by its own operation ask.
 - **No vault receipts for miners.** Calls do not yet keep the vault's
   signed receipts, so miners cannot check Leadpoet's reports against the
   vault. Lead orders keep them; this lane can add them the same way.

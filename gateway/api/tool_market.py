@@ -1,8 +1,7 @@
 """Subnet 71 tool-market routes (docs/gamma-tool-market.md). Off by default.
 
 While ``LEADPOET_TOOL_MARKET_MODE`` is ``off`` (the default) every route
-answers 404 and nothing is built. The routes touch no Arena or lead-order
-state.
+answers 404 and nothing is built. The routes write no lead-order state.
 
 * Signed routes: btauth/1, Bittensor's signed requests, with the Gamma
   service hotkey as receiver (``lab_arena.tool_market.btauth``), or the

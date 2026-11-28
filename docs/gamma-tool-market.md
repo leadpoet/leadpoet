@@ -415,9 +415,10 @@ deployment, exactly as lead orders do.
 - **A missed epoch repeats the last supplier targets.** The chain keeps
   paying each validator's last weights until new ones land, but the ledger
   counts an accepted allocation once. If an epoch's state is not published
-  or its weights do not land, the previous suppliers are paid again;
-  reconcile against the distributions' measured miner alpha before
-  scheduling more.
+  or its weights do not land, the previous suppliers are paid again.
+  Scheduling continues each epoch on its own (only tool-market mode off
+  stops it, and buying with it), so measure the miner alpha received with
+  `scripts/verify_tool_market_emission.py` and reconcile by hand.
 - **The vendor's answer sets the usage.** Prospeo's free-match rule is
   read from its docs, not a bill; check it against a miner's statement
   before scaling.

@@ -466,14 +466,13 @@ def test_denial_codes_export_only_the_literal_prefix() -> None:
     )
 
 
-def test_literal_service_denial_codes_remain_exportable() -> None:
-    allowed = set(_frozen_literal(_read(BOOTSTRAP), "ARENA_DENIAL_CODES"))
-    tree = ast.parse(_read("lab_arena/service.py"))
-    required = {"contract", "arena_store_unavailable"}
-    for node in ast.walk(tree):
+def _literal_refusal_codes(path: str, raiser: str) -> set:
+    """Collect the literal refusal codes a module raises under ``raiser``."""
+    codes = set()
+    for node in ast.walk(ast.parse(_read(path))):
         if not isinstance(node, ast.Call):
             continue
-        if not isinstance(node.func, ast.Name) or node.func.id != "ServiceError":
+        if not isinstance(node.func, ast.Name) or node.func.id != raiser:
             continue
         if not node.args:
             continue
@@ -483,5 +482,17 @@ def test_literal_service_denial_codes_remain_exportable() -> None:
         if isinstance(first, ast.Constant) and isinstance(first.value, str):
             prefix = first.value.split(":", 1)[0]
             if re.fullmatch(r"[a-z][a-z0-9_]{0,47}", prefix):
-                required.add(prefix)
-    assert required <= allowed
+                codes.add(prefix)
+    return codes
+
+
+def test_literal_service_denial_codes_remain_exportable() -> None:
+    allowed = set(_frozen_literal(_read(BOOTSTRAP), "ARENA_DENIAL_CODES"))
+    required = {"contract", "arena_store_unavailable"}
+    required |= _literal_refusal_codes("lab_arena/service.py", "ServiceError")
+    # ``collection_terms`` and ``handle_collection_request`` re-raise an
+    # ``IntakeError`` as ``ServiceError(exc.code, exc.status)``. The code is a
+    # variable there, so walking service.py alone cannot see it and the whole
+    # collection refusal vocabulary exported as the no-denial mark.
+    required |= _literal_refusal_codes("lab_arena/collection_intake.py", "IntakeError")
+    assert required <= allowed, sorted(required - allowed)

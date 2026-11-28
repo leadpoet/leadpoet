@@ -552,19 +552,20 @@ class ToolMarket:
                                         seconds=CALL_TAB_SECONDS, terms_sha256=None)
 
         needs = [book.charge_microusd(owed_cap) for _, owed_cap in asks]
-        opened, unread = open_for(max(needs)), None
-        if opened["status"] == "insufficient_balance":
-            have = int(opened["balance"].get("balance_microusd") or 0)
-            try:  # credit Gamma spent since the last reading
-                have = int(self.balance(hotkey, opened["balance"]).get("balance_microusd") or 0)
-            except ToolMarketError as error:
-                unread = error  # the chain is busy or down: the stored balance still counts
-            if min(needs) <= have:
-                opened = open_for(min(max(needs), have))
-        if opened["status"] != "opened":
-            # Unread new Gamma may cover it: say retry, not spend more.
-            raise unread or ToolMarketError(402, "insufficient_balance")
-        try:
+        unread = None
+        try:  # closed however it ends, also when an open's answer was lost
+            opened = open_for(max(needs))
+            if opened["status"] == "insufficient_balance":
+                have = int(opened["balance"].get("balance_microusd") or 0)
+                try:  # credit Gamma spent since the last reading
+                    have = int(self.balance(hotkey, opened["balance"]).get("balance_microusd") or 0)
+                except ToolMarketError as error:
+                    unread = error  # the chain is busy or down: the stored balance still counts
+                if min(needs) <= have:
+                    opened = open_for(min(max(needs), have))
+            if opened["status"] != "opened":
+                # Unread new Gamma may cover it: say retry, not spend more.
+                raise unread or ToolMarketError(402, "insufficient_balance")
             return self._buy(op, tab, hotkey, asks, session, request, arrived, request_id)
         except ToolMarketError as error:
             if error.code == "tab_budget":  # the tab is this call's share of the balance
@@ -608,7 +609,10 @@ class ToolMarket:
         pinned = self._store.session_key(hotkey, digest)
         if not first and pinned is None:
             raise ToolMarketError(409, "session_page_one_required")
-        return urlunsplit(parts._replace(query=urlencode(params))), Session(digest, first, pinned)
+        url = urlunsplit(parts._replace(query=urlencode(params)))
+        if len(url) > catalog.MAX_URL:  # the digest can be longer than the buyer's ID
+            raise ToolMarketError(400, "param_invalid")
+        return url, Session(digest, first, pinned)
 
     def _buy(self, op: catalog.Operation, tab: str, hotkey: str, asks: List[Tuple[book.Ask, int]],
              session: Session, request: Tuple[str, Mapping[str, str], bytes], arrived: float,

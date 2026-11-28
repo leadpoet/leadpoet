@@ -54,6 +54,9 @@ setup(
         "console_scripts": [
             "leadpoet=lab_arena.miner_cli:main",
             "leadpoet-validate=lab_arena.validator:main",
+            # Subnet 71 names; the leadpoet commands stay for installed scripts.
+            "subnet71=lab_arena.miner_cli:main",
+            "subnet71-validate=lab_arena.validator:main",
         ]
     },
     classifiers=[

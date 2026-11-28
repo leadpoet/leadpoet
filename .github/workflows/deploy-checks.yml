@@ -305,7 +305,7 @@ jobs:
           context: .
           file: gateway/Dockerfile
           push: false
-          tags: leadpoet-gateway:${{ github.sha }}
+          tags: subnet71-gateway:${{ github.sha }}
           build-args: |
             BUILD_ID=${{ github.run_id }}
             GITHUB_SHA=${{ github.sha }}
@@ -317,6 +317,6 @@ jobs:
           context: .
           file: lab_arena/judge/Dockerfile
           push: false
-          tags: leadpoet-arena-judge:${{ github.sha }}
+          tags: subnet71-arena-judge:${{ github.sha }}
           build-args: |
             LEADPOET_BUILD_COMMIT=${{ github.sha }}

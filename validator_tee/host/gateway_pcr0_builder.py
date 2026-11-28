@@ -263,7 +263,7 @@ def _build_once(
     if build_identity.get("role") != role:
         raise GatewayPCR0BuildError("gateway role build identity mismatch")
 
-    image = "leadpoet-gateway-verify:%s-%s-%s" % (role, commit[:12], index)
+    image = "subnet71-gateway-verify:%s-%s-%s" % (role, commit[:12], index)
     raw_image = image + "-raw"
     _run(["docker", "rmi", "-f", image, raw_image], check=False, timeout=120)
     build_env = dict(os.environ)

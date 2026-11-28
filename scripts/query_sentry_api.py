@@ -28,15 +28,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from leadpoet_canonical.env_names import env_get
 from leadpoet_observability.sentry_scrubbing import REDACTED, scrub_text
 
 
 API_BASE_URL = "https://sentry.io/api/0"
-API_TOKEN_ENV = "LEADPOET_SENTRY_API_TOKEN"
-DSN_ENV = "LEADPOET_SENTRY_DSN"
-ORGANIZATION_ENV = "LEADPOET_SENTRY_ORGANIZATION"
-PROJECT_ENV = "LEADPOET_SENTRY_PROJECT"
-SSH_KEY_ENV = "LEADPOET_SENTRY_SSH_KEY"
+API_TOKEN_ENV = "SUBNET71_SENTRY_API_TOKEN"
+DSN_ENV = "SUBNET71_SENTRY_DSN"
+ORGANIZATION_ENV = "SUBNET71_SENTRY_ORGANIZATION"
+PROJECT_ENV = "SUBNET71_SENTRY_PROJECT"
+SSH_KEY_ENV = "SUBNET71_SENTRY_SSH_KEY"
 DEFAULT_SSH_KEY = Path.home() / "Downloads" / "leadpoet-2026-07-28.pem"
 MAX_RESPONSE_BYTES = 1_048_576
 MAX_ITEMS = 100
@@ -87,11 +88,14 @@ import subprocess
 import sys
 
 WANTED = (
-    "LEADPOET_SENTRY_API_TOKEN",
-    "LEADPOET_SENTRY_DSN",
-    "LEADPOET_SENTRY_ORGANIZATION",
-    "LEADPOET_SENTRY_PROJECT",
+    "SUBNET71_SENTRY_API_TOKEN",
+    "SUBNET71_SENTRY_DSN",
+    "SUBNET71_SENTRY_ORGANIZATION",
+    "SUBNET71_SENTRY_PROJECT",
 )
+# Secrets written before the Subnet 71 rename use the old names; send both
+# for one release (see leadpoet_canonical/env_names.py).
+WANTED += tuple("LEADPOET_" + key[len("SUBNET71_"):] for key in WANTED)
 
 
 def parse_secret(raw):
@@ -142,7 +146,7 @@ result = subprocess.run(
 if result.returncode != 0:
     raise SystemExit(21)
 values = parse_secret(result.stdout)
-print(json.dumps({key: values.get(key, "") for key in WANTED}, separators=(",", ":")))
+print(json.dumps({key: values[key] for key in WANTED if key in values}, separators=(",", ":")))
 '''
 
 
@@ -184,14 +188,14 @@ def _parse_dsn_identity(
 
 
 def _credentials_from_values(values: Mapping[str, Any]) -> Credentials:
-    token = str(values.get(API_TOKEN_ENV) or "").strip()
-    dsn = str(values.get(DSN_ENV) or "").strip()
+    token = str(env_get(values, API_TOKEN_ENV) or "").strip()
+    dsn = str(env_get(values, DSN_ENV) or "").strip()
     if len(token) < 16 or any(character.isspace() for character in token):
         raise SentryQueryError("api_token_unavailable")
     organization, project = _parse_dsn_identity(
         dsn,
-        str(values.get(ORGANIZATION_ENV) or ""),
-        str(values.get(PROJECT_ENV) or ""),
+        str(env_get(values, ORGANIZATION_ENV) or ""),
+        str(env_get(values, PROJECT_ENV) or ""),
     )
     return Credentials(token=token, organization=organization, project=project)
 
@@ -281,7 +285,7 @@ def _request_json(
         headers={
             "Accept": "application/json",
             "Authorization": "Bearer " + credentials.token,
-            "User-Agent": "leadpoet-codex-sentry-reader/1",
+            "User-Agent": "subnet71-codex-sentry-reader/1",
         },
     )
     opener = urllib.request.build_opener(_NoRedirect())
@@ -442,7 +446,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ssh-key",
         type=Path,
-        default=Path(os.getenv(SSH_KEY_ENV) or DEFAULT_SSH_KEY),
+        default=Path(env_get(None, SSH_KEY_ENV) or DEFAULT_SSH_KEY),
     )
     parser.add_argument("--limit", type=int, default=25)
     parser.add_argument(

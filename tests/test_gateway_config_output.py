@@ -17,7 +17,7 @@ def test_gateway_config_precedence_is_process_then_cache_then_dotenv(
     ambient_value,
     expected_value,
 ):
-    env_name = "LEADPOET_TEST_CONFIG_PRECEDENCE"
+    env_name = "TEST_CONFIG_PRECEDENCE"
     gateway_env = tmp_path / "gateway.env"
     gateway_env.write_text(f"{env_name}=canonical-cache\n", encoding="utf-8")
     (tmp_path / ".env").write_text(f"{env_name}=stale-dotenv\n", encoding="utf-8")
@@ -52,7 +52,7 @@ def test_fallback_env_diagnostic_does_not_contaminate_stdout(
     monkeypatch,
     capsys,
 ):
-    env_name = "LEADPOET_TEST_FALLBACK_STDERR"
+    env_name = "TEST_FALLBACK_STDERR"
     monkeypatch.delenv(env_name, raising=False)
     env_file = tmp_path / "gateway.env"
     env_file.write_text(f"{env_name}=loaded\n", encoding="utf-8")
@@ -74,17 +74,17 @@ def test_gateway_env_loader_skips_static_aws_keys_for_instance_role(
         "AWS_ACCESS_KEY_ID=stale-access\n"
         "AWS_SECRET_ACCESS_KEY=stale-secret\n"
         "AWS_PROFILE=stale-profile\n"
-        "LEADPOET_TEST_SAFE_VALUE=kept\n",
+        "TEST_SAFE_VALUE=kept\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("LEADPOET_AWS_INSTANCE_ROLE_ONLY", "true")
-    monkeypatch.delenv("LEADPOET_TEST_SAFE_VALUE", raising=False)
+    monkeypatch.delenv("TEST_SAFE_VALUE", raising=False)
     for key in config._AWS_STATIC_CREDENTIAL_KEYS:
         monkeypatch.delenv(key, raising=False)
 
     config._load_gateway_env_file(env_file)
 
-    assert config.os.environ["LEADPOET_TEST_SAFE_VALUE"] == "kept"
+    assert config.os.environ["TEST_SAFE_VALUE"] == "kept"
     assert not (config._AWS_STATIC_CREDENTIAL_KEYS & set(config.os.environ))
 
 

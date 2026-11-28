@@ -305,7 +305,7 @@ python3 scripts/configure_lab_arena_production.py --miner-credentials-only \
 ```
 
 For an authorized apply, use the same command with `--apply` and
-`LEADPOET_LAB_ARENA_PRODUCTION_APPLY=1`. An empty key-ID argument disables new
+`LAB_ARENA_PRODUCTION_APPLY=1`. An empty key-ID argument disables new
 admission for the staged deployment. It does not delete stored ciphertexts.
 Do not give KMS access to submitted code. No new production dependency is
 required.

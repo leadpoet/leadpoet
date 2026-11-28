@@ -15,6 +15,7 @@ from contextlib import closing, contextmanager, redirect_stdout, ExitStack
 from pathlib import Path
 from uuid import UUID, uuid5
 
+from leadpoet_canonical.env_names import env_get
 from lab_arena import chain, collection_judge as judge
 from lab_arena.broker import HttpxProviderTransport
 from lab_arena.collection_prices import claim_at_current_price, endpoint_prices, prices_for_assignment
@@ -1229,7 +1230,7 @@ def _run_options(args, p, raw, *, before_claim=None, on_pool_settled=None):
     else:
         policy = load_batch(raw, prompt)
         scenarios = raw["scenario_ids"]
-    judge_key = os.getenv("LEADPOET_COLLECTION_JUDGE_KEY") or os.getenv(
+    judge_key = env_get(None, "COLLECTION_JUDGE_KEY") or os.getenv(
         "LAB_ARENA_OPENROUTER_API_KEY"
     )
     if args.rejudge_ready:

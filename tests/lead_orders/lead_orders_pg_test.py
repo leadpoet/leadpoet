@@ -188,7 +188,7 @@ def broker_for(store, transport, *, registrar=None, epoch=None, miner_transport=
     return LeadOrderBroker(
         store=store, policy=POLICY, transport=transport, registrar=registrar,
         miner_transport=miner_transport or (transport if registrar else None),
-        leadpoet_secrets={"openrouter": SECRET, "deepline": SECRET},
+        owner_secrets={"openrouter": SECRET, "deepline": SECRET},
         price_table=lambda: PRICE_TABLE, current_epoch=epoch or Epoch(),
     )
 
@@ -285,7 +285,7 @@ def test_staff_order_worked_example_charges_ten_leads_and_signs_receipt(store):
     assert done["charge_microusd"] == money.charge_microusd(POLICY, hold_microusd=2 * USD, delivered=10, spend_microusd=USD)
     public = service.public_receipt(placed["order_id"])
     receipt = public["receipt"]
-    assert receipt["spend_microusd"] == USD and receipt["rewards_microusd"] == {}  # staff: Leadpoet keys, no rewards
+    assert receipt["spend_microusd"] == USD and receipt["rewards_microusd"] == {}  # staff: the subnet's own keys, no rewards
     receipts.verify_receipt(receipt, calls=public["calls"], public_key_der=SIGNER.public_key_der,
                             expected_public_key_hash=SIGNER.public_key_hash)
     assert all("authorization" not in json.dumps(row) for row in public["calls"])
@@ -438,7 +438,7 @@ def test_live_orders_need_confirmed_buyer_gamma_and_balance(store, owner):
         service.place_order(buyer, {"leads": 10, **ORDER})
     assert missing.value.code == "gamma_unavailable"
     gamma.available = True
-    gamma.units[buyer] = 3 * 10**9  # $3 of Gamma spent to Leadpoet
+    gamma.units[buyer] = 3 * 10**9  # $3 of Gamma spent to the Subnet 71 service
     with pytest.raises(LeadOrderServiceError) as lowbal:
         service.place_order(buyer, {"leads": 20, **ORDER})
     assert lowbal.value.code == "insufficient_balance"
@@ -502,7 +502,7 @@ def test_live_ranks_miner_keys_fails_over_and_owes_rewards(store, owner):
     revoke_all_keys(store)
 
 
-def test_shadow_runs_on_leadpoet_keys_and_publishes_what_if_rewards_only(store):
+def test_shadow_runs_on_owner_keys_and_publishes_what_if_rewards_only(store):
     # Old behaviour: a shadow order spent registered miner keys and owed
     # rewards, which moved the live ranking. Now it never touches them.
     revoke_all_keys(store)
@@ -666,7 +666,7 @@ def test_rewards_and_receipt_use_the_orders_policy_version_not_the_current_one(s
     revoke_all_keys(store)
 
 
-def test_staff_order_spends_only_leadpoet_keys_after_the_gateway_moves_to_shadow(store):
+def test_staff_order_spends_only_owner_keys_after_the_gateway_moves_to_shadow(store):
     revoke_all_keys(store)
     staff, miner = hotkey(), hotkey()
     registrar = FakeRegistrar({})
@@ -680,7 +680,7 @@ def test_staff_order_spends_only_leadpoet_keys_after_the_gateway_moves_to_shadow
     registrar.secrets = {key["key_id"]: "z" * 40}
     transport = FakeTransport([openrouter_ok("0.100000")])
     broker_for(store, transport, registrar=registrar, epoch=epoch).call(token, chat())
-    assert transport.sent[0]["headers"]["authorization"] == "Bearer " + SECRET  # Leadpoet's key
+    assert transport.sent[0]["headers"]["authorization"] == "Bearer " + SECRET  # the subnet's own key
     assert {c["miner_hotkey"] for c in store.calls(order_id)} == {None}
     shadow_service.finish(order_id, {"status": "failed"})
     revoke_all_keys(store)
@@ -883,14 +883,14 @@ def test_keys_need_signed_current_miner_terms_and_outdated_acceptances_are_skipp
     registrar.secrets = {key["key_id"]: "t" * 40}
     # The text changes but the version label does not: the key stays
     # registered but is skipped until its miner signs the new text, so the
-    # order runs on Leadpoet's key.
+    # order runs on the subnet's own key.
     v2_doc = sign_policy(SIGNER, dict(DEFAULT_POLICY_BODY, version=3, miner_terms_sha256="1" * 64))
     v2 = load_policy(v2_doc, public_key_der=SIGNER.public_key_der, expected_public_key_hash=SIGNER.public_key_hash)
     live_service.place_order(buyer, {"leads": 10, **ORDER})
     token, order_id = claim(live_service)
     transport = FakeTransport([openrouter_ok("0.000100"), openrouter_ok("0.000100")])
     broker_v2 = LeadOrderBroker(store=store, policy=v2, transport=transport, registrar=registrar, miner_transport=transport,
-                                leadpoet_secrets={"openrouter": SECRET, "deepline": SECRET},
+                                owner_secrets={"openrouter": SECRET, "deepline": SECRET},
                                 price_table=lambda: PRICE_TABLE, current_epoch=epoch)
     broker_v2.call(token, chat())
     assert transport.sent[0]["headers"]["authorization"] == "Bearer " + SECRET
@@ -1470,7 +1470,7 @@ def test_openrouter_settlement_uses_paid_result_after_catalog_expires(store):
         return PRICE_TABLE
 
     broker = LeadOrderBroker(store=store, policy=POLICY, transport=FakeTransport([openrouter_ok("0.01")]),
-                             registrar=None, leadpoet_secrets={"openrouter": SECRET},
+                             registrar=None, owner_secrets={"openrouter": SECRET},
                              price_table=price_table, current_epoch=epoch)
     assert broker.call(token, dear_chat()).status == 200
     row, = store.calls(order_id)
@@ -1539,11 +1539,11 @@ def test_vault_receipts_are_kept_for_calls_and_read_backs_and_shown_only_to_thei
         VaultTransportError("provider_unreachable", forwarded=True, vault_receipt=vault_receipt(miner, 2, fp),
                             openrouter_generation_id="gen-vault-1"),
     ])
-    leadpoet_transport = FakeTransport([])
-    broker = broker_for(store, leadpoet_transport, registrar=registrar, epoch=epoch, miner_transport=miner_transport)
+    owner_transport = FakeTransport([])
+    broker = broker_for(store, owner_transport, registrar=registrar, epoch=epoch, miner_transport=miner_transport)
     assert broker.call(token, dear_chat()).status == 200
     assert broker.call(token, dear_chat()).status == 502
-    assert not leadpoet_transport.sent  # miner keys never take the direct path
+    assert not owner_transport.sent  # miner keys never take the direct path
     assert miner_transport.sent[0]["headers"]["authorization"] == "Bearer lov1.test-envelope"
     first, lost = store.calls(order_id)
     assert lost["status"] == "uncertain"  # the vault forwarded it: the cost is read back, not assumed

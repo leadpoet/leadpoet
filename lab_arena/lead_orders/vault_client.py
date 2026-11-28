@@ -3,7 +3,7 @@
 Miner keys never reach the gateway. It stores each miner's sealed envelope
 and uses it as the request's credential: ``VaultTransport`` sends the request
 to the vault, which swaps the envelope for the key, forwards it to the
-provider, and returns the answer with a signed receipt. Leadpoet's own keys
+provider, and returns the answer with a signed receipt. The subnet's own keys
 keep the direct transport.
 
 The client talks only to a TLS session the vault itself ends: it pins the

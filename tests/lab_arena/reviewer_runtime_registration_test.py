@@ -82,7 +82,7 @@ def test_child_plan_imports_without_creating_bytecode(tmp_path):
 
 def test_apply_requires_operator_intent_before_credential_read(monkeypatch):
     setup_args(monkeypatch, apply=True)
-    monkeypatch.delenv("LEADPOET_ARENA_REVIEWER_RUNTIME_APPLY", raising=False)
+    monkeypatch.delenv("ARENA_REVIEWER_RUNTIME_APPLY", raising=False)
     monkeypatch.setattr(command, "load_scoped_environment", lambda _: pytest.fail("credential read"))
     with pytest.raises(ValueError, match="operator"):
         command.main()
@@ -91,7 +91,7 @@ def test_apply_requires_operator_intent_before_credential_read(monkeypatch):
 @pytest.mark.parametrize("mismatch", [False, True])
 def test_apply_exact_registration_readback_and_transport_cleanup(monkeypatch, mismatch):
     setup_args(monkeypatch, apply=True)
-    monkeypatch.setenv("LEADPOET_ARENA_REVIEWER_RUNTIME_APPLY", "1")
+    monkeypatch.setenv("ARENA_REVIEWER_RUNTIME_APPLY", "1")
     monkeypatch.setenv("LAB_ARENA_SUPABASE_URL", "https://store.example")
     monkeypatch.setenv("LAB_ARENA_SERVICE_KEY", "sb_secret_test")
     monkeypatch.setattr(command, "load_scoped_environment", lambda _: None)
@@ -123,7 +123,7 @@ def test_apply_uses_real_postgrest_rpc_and_closes_transport(
     monkeypatch, capsys, http_status,
 ):
     setup_args(monkeypatch, apply=True)
-    monkeypatch.setenv("LEADPOET_ARENA_REVIEWER_RUNTIME_APPLY", "1")
+    monkeypatch.setenv("ARENA_REVIEWER_RUNTIME_APPLY", "1")
     monkeypatch.setenv("LAB_ARENA_SUPABASE_URL", "https://store.example")
     monkeypatch.setenv("LAB_ARENA_SERVICE_KEY", "sb_secret_test")
     monkeypatch.setattr(command, "load_scoped_environment", lambda _: None)

@@ -261,7 +261,7 @@ def test_private_permit_consumption_rejects_replay_wrong_generation_and_nonce(mo
     # Existing helper owns the private-file checks; exercise its actual CLI action.
     import tempfile
     import shutil
-    directory = Path(tempfile.mkdtemp(prefix="leadpoet-pair-test.", dir="/tmp"))
+    directory = Path(tempfile.mkdtemp(prefix="subnet71-pair-test.", dir="/tmp"))
     path = directory/"leadpoet-permit.json"
     args = Namespace(candidate=SHA, invocation=INV, scope="all", nonce="c"*64,
                      authority_commit=SHA, expected_generation=7, path=path)
@@ -326,7 +326,7 @@ def test_actual_canonical_validator_permit_gate_before_stop(tmp_path, bad):
     text = (Path(__file__).parents[1]/'validator_restart.sh').read_text()
     start = text.index('if [ -n "${VALIDATOR_PAIR_PERMIT:-}" ]; then')
     end = text.index('\n# Only now drain', start)
-    root = Path(tempfile.mkdtemp(prefix='leadpoet-gate-test.', dir='/tmp'))
+    root = Path(tempfile.mkdtemp(prefix='subnet71-gate-test.', dir='/tmp'))
     path = root/'leadpoet-permit.json'
     args = Namespace(candidate=SHA, invocation=INV, scope='all', nonce='c'*64,
                      authority_commit=SHA, expected_generation=7, path=path)

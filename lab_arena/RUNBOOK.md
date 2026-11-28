@@ -826,7 +826,7 @@ published digest with `--verify-image`. On the reviewed gateway release, run
 `scripts/register_arena_reviewer_runtime.py` with `--grading-image`,
 `--runtime-image`, and the protected `--environment-file`. Its default is a
 read-only plan; activation requires `--apply` and
-`LEADPOET_ARENA_REVIEWER_RUNTIME_APPLY=1`. Do not update a frozen round or
+`ARENA_REVIEWER_RUNTIME_APPLY=1`. Do not update a frozen round or
 replace the default grader with an older round's runtime image. Rollback uses
 the same registration command to select the original grading image for future
 leases; existing leases and accepted work stay intact.

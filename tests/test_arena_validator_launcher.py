@@ -25,9 +25,9 @@ def test_environment_is_data_and_overrides_ambient_settings(tmp_path, monkeypatc
 def test_ingest_only_sentry_settings_survive_private_snapshot(
     tmp_path, monkeypatch, secondary_proxy
 ):
-    from leadpoet_observability.sentry_bootstrap import INGEST_ENVIRONMENT_KEYS
+    from leadpoet_observability.sentry_bootstrap import INGEST_ENVIRONMENT_NAMES
 
-    settings = dict(zip(INGEST_ENVIRONMENT_KEYS, (
+    settings = dict(zip(INGEST_ENVIRONMENT_NAMES, (
         "1", "https://fixture@example.invalid/1", "production", "a" * 40,
     )))
     content = "".join(f"{key}={shlex.quote(value)}\n" for key, value in settings.items())
@@ -47,12 +47,12 @@ def test_ingest_only_sentry_settings_survive_private_snapshot(
 
 
 @pytest.mark.parametrize("body", [
-    "LEADPOET_WEIGHT_MODE=legacy\n",
+    "WEIGHT_MODE=legacy\n",
     "ENCLAVE_CID=8\n",
     "PATH=/tmp\n",
-    "LEADPOET_SENTRY_API_TOKEN=fixture-private\n",
-    "LEADPOET_SENTRY_MESSAGE_MODE=scrub\n",
-    "LEADPOET_SENTRY_OTHER=fixture-private\n",
+    "SUBNET71_SENTRY_API_TOKEN=fixture-private\n",
+    "SUBNET71_SENTRY_MESSAGE_MODE=scrub\n",
+    "SUBNET71_SENTRY_OTHER=fixture-private\n",
     "OPENROUTER_API_KEY=fixture-private\n",
     "LAB_ARENA_API_BASE_URL=one\nLAB_ARENA_API_BASE_URL=two\n",
     "LAB_ARENA_SECRET=private value\n",

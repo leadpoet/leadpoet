@@ -12,6 +12,8 @@ import re
 import sys
 from pathlib import Path
 
+from leadpoet_canonical.env_names import env_get
+
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _AWS_STATIC_CREDENTIAL_KEYS = {
     "AWS_ACCESS_KEY_ID",
@@ -82,7 +84,7 @@ if _instance_role_only():
     for _aws_env_key in _AWS_STATIC_CREDENTIAL_KEYS:
         os.environ.pop(_aws_env_key, None)
 
-if os.getenv("AWS_PROFILE") and os.getenv("LEADPOET_AWS_PROFILE_OVERRIDES_ENV_KEYS", "true").lower() == "true":
+if os.getenv("AWS_PROFILE") and env_get(None, "SUBNET71_AWS_PROFILE_OVERRIDES_ENV_KEYS", "true").lower() == "true":
     # Local/testnet operators often use a named AWS profile while .env still
     # contains older static keys. Boto3 gives env keys precedence over profiles,
     # so clear static AWS creds when an explicit profile is selected.

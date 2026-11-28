@@ -23,7 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-TOKEN_ENV_NAME = "LEADPOET_SENTRY_API_TOKEN"
+TOKEN_ENV_NAME = "SUBNET71_SENTRY_API_TOKEN"
 NAME = TOKEN_ENV_NAME
 TOKEN_RE = re.compile(r"^sntryu_[A-Za-z0-9_-]{32,}$")
 MAX_TIMEOUT_SECONDS = 45.0

@@ -6,13 +6,14 @@ from contextlib import contextmanager
 from datetime import date, datetime, time, timezone
 import os
 from typing import Iterator
+from leadpoet_canonical.env_names import env_get
 
 
-EVALUATION_DATE_ENV = "LEADPOET_COMPETITION_EVALUATION_DATE"
+EVALUATION_DATE_ENV = "COMPETITION_EVALUATION_DATE"
 
 
 def evaluation_date() -> date:
-    value = str(os.getenv(EVALUATION_DATE_ENV) or "").strip()
+    value = str(env_get(None, EVALUATION_DATE_ENV) or "").strip()
     if value:
         try:
             return date.fromisoformat(value)

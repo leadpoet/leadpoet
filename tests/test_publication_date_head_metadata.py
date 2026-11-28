@@ -173,7 +173,7 @@ def _score(monkeypatch, fetched_url=URL, status='supported', claimed_date=PUBLIC
     }))
     judge = AsyncMock(return_value=_provider(status))
     monkeypatch.setattr(intent, '_call_openrouter', judge)
-    monkeypatch.setenv('LEADPOET_COMPETITION_EVALUATION_DATE', '2026-10-24')
+    monkeypatch.setenv('COMPETITION_EVALUATION_DATE', '2026-10-24')
     signal = IntentSignal(source='news', description=QUOTE, url=URL,
                           date=claimed_date, snippet=QUOTE, matched_icp_signal=0)
     icp = ICPPrompt(icp_id='head-publication-alias', prompt='Advertising vendors with new products',

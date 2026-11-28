@@ -276,7 +276,7 @@ print(json.dumps(response.json()))
                      "VALIDATOR_PAIR_AUTHORITY_COMMIT=" + self.args.commit])
         env = env.replace("'VALIDATOR_PAIR_PERMIT=$permit'", 'VALIDATOR_PAIR_PERMIT="$permit"')
         command = ("set -euo pipefail; cd " + shell([VALIDATOR_ROOT]) + "; git fetch --no-tags origin main; "
-                   "umask 077; permit=$(mktemp /tmp/leadpoet-pair-permit.XXXXXX.json); "
+                   "umask 077; permit=$(mktemp /tmp/subnet71-pair-permit.XXXXXX.json); "
                    "trap 'rm -f -- \"$permit\"' EXIT; "
                    + shell([GATEWAY_PYTHON.replace("venv311", "arena-validator-venv311"), "-B", "-c", install])
                    + ' "$permit"; git show ' + self.args.commit + ":validator_restart.sh | " + env + " bash")

@@ -159,8 +159,8 @@ def test_configurator_keeps_token_in_local_sdk_memory_without_subprocess(monkeyp
 
 
 @pytest.mark.parametrize(("initial", "expected_format"), [
-    ("export LEADPOET_SENTRY_ENABLED=1\nexport LEADPOET_SENTRY_API_TOKEN=old-value\nexport SAFE_VALUE=present\n", "dotenv"),
-    (json.dumps({"LEADPOET_SENTRY_ENABLED": "1", "LEADPOET_SENTRY_API_TOKEN": "old-value", "SAFE_VALUE": "present"}), "json"),
+    ("export SUBNET71_SENTRY_ENABLED=1\nexport SUBNET71_SENTRY_API_TOKEN=old-value\nexport SAFE_VALUE=present\n", "dotenv"),
+    (json.dumps({"SUBNET71_SENTRY_ENABLED": "1", "SUBNET71_SENTRY_API_TOKEN": "old-value", "SAFE_VALUE": "present"}), "json"),
 ])
 def test_local_configurator_preserves_document_format_and_verifies_readback(initial, expected_format):
     client = _SentryMemoryClient(initial)
@@ -439,8 +439,8 @@ def test_repository_guides_match_and_sentry_runbook_keeps_safe_access_workflow()
         (
             "gw_restart.sh",
             'python3 - "$SECRET_TMP" "$GATEWAY_ENV_FILE"',
-            "export LEADPOET_SENTRY_ENABLED=1\n"
-            "export LEADPOET_SENTRY_API_TOKEN='" + FAKE_TOKEN + "'\n"
+            "export SUBNET71_SENTRY_ENABLED=1\n"
+            "export SUBNET71_SENTRY_API_TOKEN='" + FAKE_TOKEN + "'\n"
             "export SAFE_VALUE=present\n",
         ),
     ],

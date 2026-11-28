@@ -54,7 +54,7 @@ def test_new_verifier_runtime_annotations_evaluate_on_python39() -> None:
 
 
 def test_taxonomy_exact_parent_and_subindustry_accepts() -> None:
-    ok, detail = taxonomy.leadpoet_taxonomy_match("Software", "Software", "SaaS")
+    ok, detail = taxonomy.taxonomy_match("Software", "Software", "SaaS")
     assert ok is True
     assert detail["candidate_parent_consistent"] is True
 
@@ -62,14 +62,14 @@ def test_taxonomy_exact_parent_and_subindustry_accepts() -> None:
 def test_taxonomy_conflicting_parent_rejects() -> None:
     # A candidate labeled with a different canonical parent must be rejected,
     # not fuzzy-passed (the lab's old gate would have passed this through).
-    ok, _ = taxonomy.leadpoet_taxonomy_match("Software", "Manufacturing", "")
+    ok, _ = taxonomy.taxonomy_match("Software", "Manufacturing", "")
     assert ok is False
 
 
 def test_taxonomy_unknown_provider_label_delegates() -> None:
     # Provider-specific labels outside the taxonomy return None so bounded
     # semantic concepts (not string luck) decide.
-    ok, _ = taxonomy.leadpoet_taxonomy_match(
+    ok, _ = taxonomy.taxonomy_match(
         "Software", "Computer Software Vendors", ""
     )
     assert ok is None

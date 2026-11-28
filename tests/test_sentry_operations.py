@@ -160,7 +160,7 @@ def test_operation_log_is_single_line_joinable_and_private_fields_are_dropped(
     assert "\n" not in message
     assert secret not in message
     assert "private ICP text" not in message
-    prefix = "leadpoet_operation_event "
+    prefix = "operation_event "
     assert message.startswith(prefix)
     payload = json.loads(message[len(prefix) :])
     assert payload["event_type"] == "stage"
@@ -460,7 +460,7 @@ def test_completed_restart_with_slow_passive_wait_is_nonterminal(
         ),
     )
     monkeypatch.setenv(
-        "LEADPOET_SENTRY_RESTART_STAGE_DEADLINE_SECONDS",
+        "SUBNET71_SENTRY_RESTART_STAGE_DEADLINE_SECONDS",
         str(deadline_seconds),
     )
     breadcrumbs, distributions, terminal_events = (
@@ -524,7 +524,7 @@ def test_failed_restart_ledger_gap_requires_timeout_evidence(
             },
         ),
     )
-    monkeypatch.setenv("LEADPOET_SENTRY_RESTART_STAGE_DEADLINE_SECONDS", "900")
+    monkeypatch.setenv("SUBNET71_SENTRY_RESTART_STAGE_DEADLINE_SECONDS", "900")
     evidence_paths = []
     if evidence_text is not None:
         evidence = tmp_path / "restart.log"
@@ -586,7 +586,7 @@ def test_slow_passive_wait_does_not_relabel_later_failure(tmp_path, monkeypatch)
         ),
     )
     monkeypatch.setenv(
-        "LEADPOET_SENTRY_RESTART_STAGE_DEADLINE_SECONDS",
+        "SUBNET71_SENTRY_RESTART_STAGE_DEADLINE_SECONDS",
         str(deadline_seconds),
     )
     _, _, terminal_events = _collect_restart_summary_telemetry(monkeypatch)

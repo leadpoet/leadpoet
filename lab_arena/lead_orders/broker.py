@@ -7,7 +7,7 @@ the one-order token it got at claim. For every call the broker:
 2. reserves the call's worst-case cost against the order's spend ceiling
    *before* sending (402 ``spend_ceiling`` once the next call would pass it);
 3. sends with the best-ranked key (live orders: miner keys by settled spend,
-   Leadpoet last; staff and shadow orders: Leadpoet's keys only), skipping a
+   the subnet's own key last; staff and shadow orders: the subnet's own keys only), skipping a
    miner key whose own daily cap the call would pass;
 4. settles the reservation at the provider-reported cost, one ledger row per
    call, with the provider's request id (OpenRouter generation id, Deepline
@@ -227,7 +227,7 @@ class LeadOrderBroker:
         policy: LeadOrderPolicy,
         transport: ProviderTransport,
         registrar: Optional[lead_keys.MinerKeyRegistrar],
-        leadpoet_secrets: Mapping[str, str],
+        owner_secrets: Mapping[str, str],
         price_table: Callable[[], Mapping[str, Any]],
         current_epoch: Callable[[], int],
         miner_transport: Optional[ProviderTransport] = None,
@@ -240,9 +240,9 @@ class LeadOrderBroker:
             raise ValueError("miner keys need the vault transport")
         self._miner_transport = miner_transport
         self._registrar = registrar
-        self._leadpoet_secrets = {k: v for k, v in leadpoet_secrets.items() if v}
-        self._leadpoet_keys = lead_keys.leadpoet_keys(
-            self._leadpoet_secrets.get("openrouter", ""), self._leadpoet_secrets.get("deepline", "")
+        self._owner_secrets = {k: v for k, v in owner_secrets.items() if v}
+        self._owner_keys = lead_keys.owner_keys(
+            self._owner_secrets.get("openrouter", ""), self._owner_secrets.get("deepline", "")
         )
         self._price_table = price_table
         self._current_epoch = current_epoch
@@ -577,7 +577,7 @@ class LeadOrderBroker:
         provider = request.provider
         epoch = int(self._current_epoch())
         # Decided per order, from the mode it was placed in: only live orders
-        # spend miner keys. Staff and shadow orders run on Leadpoet's keys
+        # spend miner keys. Staff and shadow orders run on the subnet's own keys
         # (shadow computes what-if rewards), so they never spend a miner's
         # money without repaying it and never move the live ranking.
         use_miner_keys = order.get("mode") == "live" and self._registrar is not None
@@ -592,16 +592,16 @@ class LeadOrderBroker:
                     ciphertext_b64=row["ciphertext_b64"],
                 ))
         ranked = lead_keys.rank_keys(
-            provider, miner_keys, self._leadpoet_keys.get(provider),
+            provider, miner_keys, self._owner_keys.get(provider),
             settled_spend_by_key=self._store.key_spend(since_epoch=window_start) if miner_keys else {},
             use_miner_keys=use_miner_keys,
             exhausted=self._store.exhausted_keys(order_id),
         )
         for key in ranked:
             try:
-                # The key itself for Leadpoet's keys; the sealed envelope, which
+                # The key itself for the subnet's own keys; the sealed envelope, which
                 # only the vault opens, for a miner's.
-                credential = self._leadpoet_secrets[provider] if key.is_leadpoet else self._registrar.credential(key)
+                credential = self._owner_secrets[provider] if key.is_owner else self._registrar.credential(key)
             except lead_keys.LeadOrderKeyError as exc:
                 if exc.retryable:
                     raise LeadOrderBrokerError(503, exc.code) from None
@@ -625,7 +625,7 @@ class LeadOrderBroker:
             error: Optional[ProviderTransportError] = None
             try:
                 url, headers = arena_broker.inject_credential(outbound, credential)
-                transport = self._transport if key.is_leadpoet else self._miner_transport
+                transport = self._transport if key.is_owner else self._miner_transport
                 response = transport.send(
                     method=outbound.target.method, url=url, headers=headers, body=outbound.body,
                     timeout_seconds=(JEV_TIMEOUT_SECONDS if provider == "openrouter"
@@ -634,7 +634,7 @@ class LeadOrderBroker:
                 )
             except ProviderTransportError as exc:
                 error = exc
-                if not key.is_leadpoet:
+                if not key.is_owner:
                     # A safe vault code, such as vault_caller_unauthorized.
                     _LOG.warning("lead-order vault call failed: call %s, %s", call_id, exc)
             finally:

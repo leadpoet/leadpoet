@@ -253,7 +253,7 @@ def test_just_ice_tea_review_flows_through_real_verifier_and_scorers_once(
     monkeypatch.setattr(three_stage, "_call_openrouter", provider)
     monkeypatch.setattr(three_stage, "_fetch_sd_then_exa", fetch)
     monkeypatch.setattr(lead_scorer, "_verify_company_fit", AsyncMock(return_value=fit))
-    monkeypatch.setenv("LEADPOET_COMPETITION_EVALUATION_DATE", "2026-09-24")
+    monkeypatch.setenv("COMPETITION_EVALUATION_DATE", "2026-09-24")
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
 
     company = {

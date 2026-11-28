@@ -18,6 +18,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
+from leadpoet_canonical.env_names import legacy_name
 
 
 _SENTRY_REQUIREMENT_RE = re.compile(
@@ -91,19 +92,19 @@ def _runtime_key(lock_path: Path, base_python: Path) -> str:
 def _validation_environment(repo_root: Path) -> Mapping[str, str]:
     environment = dict(os.environ)
     for key in tuple(environment):
-        if key.startswith("SENTRY_") or key.startswith("LEADPOET_SENTRY_"):
+        if key.startswith(("SENTRY_", "SUBNET71_SENTRY_", legacy_name("SENTRY_"))):
             environment.pop(key, None)
     environment.update(
         {
             "PYTHONPATH": str(repo_root),
-            "LEADPOET_SENTRY_ENABLED": "1",
-            "LEADPOET_SENTRY_DSN": (
+            "SUBNET71_SENTRY_ENABLED": "1",
+            "SUBNET71_SENTRY_DSN": (
                 "https://00000000000000000000000000000000@example.invalid/1"
             ),
-            "LEADPOET_SENTRY_ENVIRONMENT": "host-runtime-preflight",
-            "LEADPOET_SENTRY_RELEASE": "0" * 40,
-            "LEADPOET_SENTRY_TRACES_SAMPLE_RATE": "0",
-            "LEADPOET_SENTRY_MESSAGE_MODE": "redact-all",
+            "SUBNET71_SENTRY_ENVIRONMENT": "host-runtime-preflight",
+            "SUBNET71_SENTRY_RELEASE": "0" * 40,
+            "SUBNET71_SENTRY_TRACES_SAMPLE_RATE": "0",
+            "SUBNET71_SENTRY_MESSAGE_MODE": "redact-all",
         }
     )
     return environment

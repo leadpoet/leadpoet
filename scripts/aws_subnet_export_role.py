@@ -117,7 +117,7 @@ def query(sql, *, read_only=True):
                       data=json.dumps({"query": sql, "read_only": read_only}).encode(),
                       headers={"Authorization": "Bearer " + access_token(),
                                "Content-Type": "application/json", "Accept": "application/json",
-                               "User-Agent": "leadpoet-aws-export-role/1"}, method="POST")
+                               "User-Agent": "subnet71-aws-export-role/1"}, method="POST")
     try:
         with urlopen(request, timeout=120) as response:
             value = json.loads(response.read())

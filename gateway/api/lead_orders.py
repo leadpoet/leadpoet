@@ -1,6 +1,6 @@
 """Gamma lead-order routes (docs/gamma-lead-orders.md). Off by default.
 
-While ``LEADPOET_LEAD_ORDERS_MODE`` is ``off`` (the default) every route
+While ``LEAD_ORDERS_MODE`` is ``off`` (the default) every route
 answers 404 and nothing is built: no store, chain, KMS or provider client.
 The routes touch no Arena state, reward or weight.
 

@@ -24,14 +24,15 @@ from pathlib import Path
 import time
 from typing import Any, Mapping, Optional
 from urllib.parse import urlparse
+from leadpoet_canonical.env_names import env_get
 
 
 EPOCH_SCHEME = "bittensor.subnet_epoch_index.v1"
 CUTOVER_SCHEMA_VERSION = "leadpoet.subnet_epoch_cutover.v1"
 SNAPSHOT_SCHEMA_VERSION = "leadpoet.subnet_epoch_snapshot.v1"
 VALIDATOR_SHARED_EPOCH_SCHEMA_VERSION = "leadpoet.validator_shared_epoch.v4"
-CUTOVER_JSON_ENV = "LEADPOET_SUBNET_EPOCH_CUTOVER_JSON"
-CUTOVER_PATH_ENV = "LEADPOET_SUBNET_EPOCH_CUTOVER_PATH"
+CUTOVER_JSON_ENV = "SUBNET_EPOCH_CUTOVER_JSON"
+CUTOVER_PATH_ENV = "SUBNET_EPOCH_CUTOVER_PATH"
 # The activated SN71 settlement mapping is public, immutable chain data.
 # Source checkouts and installed wheels ship the same file so validators can
 # construct the official epoch authority without operator-side provisioning.
@@ -146,9 +147,9 @@ def ensure_cutover_manifest_configured(
     """
 
     target = os.environ if environ is None else environ
-    if str(target.get(CUTOVER_JSON_ENV, "") or "").strip():
+    if str(env_get(target, CUTOVER_JSON_ENV, "") or "").strip():
         return
-    if str(target.get(CUTOVER_PATH_ENV, "") or "").strip():
+    if str(env_get(target, CUTOVER_PATH_ENV, "") or "").strip():
         return
     target[CUTOVER_PATH_ENV] = str(DEFAULT_SN71_CUTOVER_MANIFEST_PATH)
 
@@ -164,8 +165,8 @@ def load_subnet_epoch_cutover(
     """
 
     source = os.environ if environ is None else environ
-    raw = str(source.get(CUTOVER_JSON_ENV, "") or "").strip()
-    path = str(source.get(CUTOVER_PATH_ENV, "") or "").strip()
+    raw = str(env_get(source, CUTOVER_JSON_ENV, "") or "").strip()
+    path = str(env_get(source, CUTOVER_PATH_ENV, "") or "").strip()
     if raw and path:
         raise SubnetEpochError(
             f"set only one of {CUTOVER_JSON_ENV} or {CUTOVER_PATH_ENV}"

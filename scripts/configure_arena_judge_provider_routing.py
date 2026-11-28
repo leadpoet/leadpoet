@@ -20,7 +20,7 @@ import sys
 sys.dont_write_bytecode = True
 
 RPC = 'public.lab_arena_set_judge_provider_routing_v1'
-APPLY_ENV = 'LEADPOET_ARENA_JUDGE_ROUTING_APPLY'
+APPLY_ENV = 'ARENA_JUDGE_ROUTING_APPLY'
 REQUEST_FIELDS = {'round_id', 'expected_configuration', 'routing', 'request_id', 'actor_ref'}
 CONNECTION_FIELDS = {'host', 'hostaddr', 'port', 'dbname', 'user', 'password',
                      'sslmode', 'sslrootcert', 'sslcert', 'sslkey'}

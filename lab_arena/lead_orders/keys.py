@@ -1,8 +1,8 @@
 """Provider key registry, ranking and failover rules for lead orders.
 
 Miner keys are sealed to the lead-order key vault (``lead_order_vault``) on
-the miner's own machine. Leadpoet stores only the envelope and sends it to
-the vault as each request's credential; it never sees the key. Leadpoet's
+the miner's own machine. The subnet operator stores only the envelope and sends it to
+the vault as each request's credential; it never sees the key. The subnet's
 own keys come from the environment and are always last.
 """
 
@@ -20,7 +20,7 @@ from lab_arena.lead_orders.vault_client import VaultClient, VaultUnavailable
 from lead_order_vault import envelope as vault_envelope
 
 PROVIDERS = ("openrouter", "deepline")
-LEADPOET_KEY_PREFIX = "leadpoet-"
+OWNER_KEY_PREFIX = "leadpoet-"
 SUBMISSION_ID_PREFIX = "lead-order:"
 
 FAILOVER_UNAUTHORIZED = "unauthorized"
@@ -44,7 +44,7 @@ class LeadOrderKeyError(RuntimeError):
 
 @dataclass(frozen=True)
 class ProviderKey:
-    """One usable key. ``miner_hotkey`` is ``None`` for Leadpoet's own key."""
+    """One usable key. ``miner_hotkey`` is ``None`` for the subnet's own key."""
 
     key_id: str
     provider: str
@@ -54,7 +54,7 @@ class ProviderKey:
     ciphertext_b64: Optional[str] = None
 
     @property
-    def is_leadpoet(self) -> bool:
+    def is_owner(self) -> bool:
         return self.miner_hotkey is None
 
     @property
@@ -80,14 +80,14 @@ def submission_id_for(key_id: str) -> str:
     return SUBMISSION_ID_PREFIX + key_id
 
 
-def leadpoet_keys(openrouter_key: str, deepline_key: str) -> Dict[str, ProviderKey]:
-    """Leadpoet's keys from configuration; a provider without a key has none."""
+def owner_keys(openrouter_key: str, deepline_key: str) -> Dict[str, ProviderKey]:
+    """The subnet's own keys from configuration; a provider without a key has none."""
 
     out: Dict[str, ProviderKey] = {}
     for provider, secret in (("openrouter", openrouter_key), ("deepline", deepline_key)):
         if secret:
             out[provider] = ProviderKey(
-                key_id=LEADPOET_KEY_PREFIX + provider,
+                key_id=OWNER_KEY_PREFIX + provider,
                 provider=provider,
                 miner_hotkey=None,
                 registered_sequence=0,
@@ -100,7 +100,7 @@ class MinerKeyRegistrar:
     """Register miner keys sealed to the lead-order key vault.
 
     The miner seals the key on their own machine (``lead_order_vault.cli
-    seal``). Leadpoet stores the envelope, which only the vault can open, and
+    seal``). The subnet operator stores the envelope, which only the vault can open, and
     the vault checks the key with its provider before it is accepted.
     """
 
@@ -161,7 +161,7 @@ class MinerKeyRegistrar:
     def credential(key: ProviderKey) -> str:
         """The envelope the broker sends as the request's credential."""
 
-        if key.is_leadpoet or key.miner_hotkey is None or key.ciphertext_b64 is None:
+        if key.is_owner or key.miner_hotkey is None or key.ciphertext_b64 is None:
             raise LeadOrderKeyError("miner_credentials_unavailable")
         if sealed_to(key.ciphertext_b64) is None:
             # Stored before the vault: the miner must seal it again.
@@ -181,7 +181,7 @@ def sealed_to(stored: Optional[str]) -> Optional[str]:
 def rank_keys(
     provider: str,
     miner_keys: Iterable[ProviderKey],
-    leadpoet_key: Optional[ProviderKey],
+    owner_key: Optional[ProviderKey],
     *,
     settled_spend_by_key: Mapping[str, int],
     use_miner_keys: bool,
@@ -190,18 +190,18 @@ def rank_keys(
     """The order the broker tries keys in for one provider.
 
     Miner keys rank by USD spend settled over the ranking window, highest
-    first; ties and new keys by registration order. Leadpoet's key is last.
+    first; ties and new keys by registration order. The subnet's own key is last.
     Keys this order already failed over from are skipped.
     """
 
     skip = set(exhausted)
     ranked: List[ProviderKey] = []
     if use_miner_keys:
-        candidates = [k for k in miner_keys if k.provider == provider and not k.is_leadpoet and k.key_id not in skip]
+        candidates = [k for k in miner_keys if k.provider == provider and not k.is_owner and k.key_id not in skip]
         candidates.sort(key=lambda k: (-int(settled_spend_by_key.get(k.key_id, 0)), k.registered_sequence, k.key_id))
         ranked.extend(candidates)
-    if leadpoet_key is not None and leadpoet_key.provider == provider and leadpoet_key.key_id not in skip:
-        ranked.append(leadpoet_key)
+    if owner_key is not None and owner_key.provider == provider and owner_key.key_id not in skip:
+        ranked.append(owner_key)
     return ranked
 
 
@@ -250,7 +250,7 @@ __all__ = [
     "credential_fingerprint",
     "failover_reason",
     "json_document",
-    "leadpoet_keys",
+    "owner_keys",
     "rank_keys",
     "sealed_to",
     "submission_id_for",

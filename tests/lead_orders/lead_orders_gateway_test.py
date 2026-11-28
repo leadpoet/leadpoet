@@ -120,7 +120,7 @@ ORDER = {"seller": {"product": "p"}, "search": {"signal": "hiring"}, "leads": 10
 
 
 def test_every_route_is_404_when_the_mode_is_off(client, monkeypatch):
-    monkeypatch.delenv("LEADPOET_LEAD_ORDERS_MODE", raising=False)
+    monkeypatch.delenv("LEAD_ORDERS_MODE", raising=False)
     routes.configure()
     for method, path in (("POST", "/lead-orders"), ("GET", "/lead-orders/balance"),
                          ("GET", "/lead-orders/" + "0" * 8),
@@ -137,7 +137,7 @@ def test_every_route_is_404_when_the_mode_is_off(client, monkeypatch):
 
 
 def test_misconfigured_mode_answers_503_without_detail(client, monkeypatch):
-    monkeypatch.setenv("LEADPOET_LEAD_ORDERS_MODE", "live")
+    monkeypatch.setenv("LEAD_ORDERS_MODE", "live")
     routes.configure()
     response = client.post("/internal/lead-orders/claim")
     assert response.status_code == 503 and response.json() == {"error": "lead_orders_misconfigured"}

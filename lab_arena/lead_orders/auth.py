@@ -55,7 +55,7 @@ def normalize_host(host: str) -> str:
 def signed_message(method: str, host: str, path: str, timestamp: str, body: bytes) -> str:
     """METHOD, host, path, timestamp and body sha256, one per line.
 
-    The host is this gateway's public host (``LEADPOET_LEAD_ORDERS_PUBLIC_BASE_URL``),
+    The host is this gateway's public host (``LEAD_ORDERS_PUBLIC_BASE_URL``),
     never the request's Host header, so a signature made for one deployment
     cannot be replayed against another. Default ports are dropped
     (``normalize_host``). Arena signing does not use this.

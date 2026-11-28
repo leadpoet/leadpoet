@@ -91,6 +91,8 @@ def test_wheel_dependencies_match_requirements(distributions, origin):
     assert metadata["Requires-Python"] == ">=3.11"
     assert "leadpoet = lab_arena.miner_cli:main" in entry_points
     assert "leadpoet-validate = lab_arena.validator:main" in entry_points
+    assert "subnet71 = lab_arena.miner_cli:main" in entry_points
+    assert "subnet71-validate = lab_arena.validator:main" in entry_points
     assert "neurons." not in entry_points
 
 

@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+from leadpoet_canonical.env_names import env_get
 from lab_arena import collection_intake as funding, collection_judge as judge
 from lab_arena.collection_correction_tariff import (
     SCHEMA,
@@ -76,12 +77,12 @@ def main(argv=None):
         "receipt": load(args.review),
         "approval": load(args.qualification),
         "reviewer_key": read_file(
-            Path(os.environ["LEADPOET_COLLECTION_REVIEW_PUBLIC_KEY_FILE"]),
+            Path((env_get(None, "COLLECTION_REVIEW_PUBLIC_KEY_FILE") or os.environ["COLLECTION_REVIEW_PUBLIC_KEY_FILE"])),
             maximum=8192,
             private=False,
         ),
         "approver_key": read_file(
-            Path(os.environ["LEADPOET_COLLECTION_QUALIFICATION_PUBLIC_KEY_FILE"]),
+            Path((env_get(None, "COLLECTION_QUALIFICATION_PUBLIC_KEY_FILE") or os.environ["COLLECTION_QUALIFICATION_PUBLIC_KEY_FILE"])),
             maximum=8192,
             private=False,
         ),

@@ -26,7 +26,7 @@ python3 -m scripts.configure_lab_arena_production --validator-credential-kms-gua
 The default profile is explicitly `leadpoet-lab`. It can inspect this guard but
 cannot change IAM. For an explicitly authorized policy change, select the
 existing administrative authority with `--aws-profile leadpoet-admin`, `--apply`,
-and `LEADPOET_LAB_ARENA_PRODUCTION_APPLY=1`. Reuse its valid cached credentials.
+and `LAB_ARENA_PRODUCTION_APPLY=1`. Reuse its valid cached credentials.
 An already-correct policy causes no IAM write. Root authentication and AWS CLI
 credential export are not supported by this helper.
 
@@ -56,7 +56,7 @@ For example, inspect a scoped configuration without changing it:
 python3 -m scripts.configure_lab_arena_production --openrouter-max-concurrency 4 --check --allowed-account 493765492819 --aws-profile leadpoet-lab
 ```
 
-`--apply` still requires `LEADPOET_LAB_ARENA_PRODUCTION_APPLY=1`. Full gateway and
+`--apply` still requires `LAB_ARENA_PRODUCTION_APPLY=1`. Full gateway and
 validator configuration checks both documents before its first write, rechecks
 the version and document immediately before each write, and verifies readback.
 A partial-apply error reports how many targets completed; inspect version stages

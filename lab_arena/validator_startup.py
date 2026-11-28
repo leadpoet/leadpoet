@@ -19,7 +19,9 @@ from typing import Mapping, Sequence
 SUDO_CHECK_TIMEOUT_SECONDS = 5
 _CONFIG_NAME = re.compile(
     r"(?:LAB_ARENA_[A-Z0-9_]+|QUALIFICATION_WEBSHARE_PROXY_[1-9][0-9]*|"
-    r"LEADPOET_SUBNET_EPOCH_CUTOVER_(?:JSON|PATH))\Z"
+    # LEADPOET_ is the pre-rename spelling, accepted for one release
+    # (see leadpoet_canonical/env_names.py).
+    r"(?:LEADPOET_)?SUBNET_EPOCH_CUTOVER_(?:JSON|PATH))\Z"
 )
 _ROOT_PROBE = "import os; raise SystemExit(0 if os.geteuid() == 0 else 1)"
 
@@ -33,6 +35,7 @@ def _absolute_path(value: str) -> str:
 def rootful_startup_command(args, argv: Sequence[str], environment: Mapping[str, str]):
     """Freeze user-relative paths before sudo changes HOME or environment."""
     from lab_arena.validator_proxy_environment import validator_proxy_environment
+    from leadpoet_canonical.env_names import env_pop, legacy_name
     from leadpoet_observability.sentry_bootstrap import INGEST_ENVIRONMENT_KEYS
 
     # A root process must not re-read a user-owned proxy file under a different
@@ -47,10 +50,11 @@ def rootful_startup_command(args, argv: Sequence[str], environment: Mapping[str,
     child_environment["LAB_ARENA_VALIDATOR_STATE_DIR"] = _absolute_path(
         environment.get("LAB_ARENA_VALIDATOR_STATE_DIR", "/var/lib/leadpoet/arena-validator")
     )
-    cutover = child_environment.get("LEADPOET_SUBNET_EPOCH_CUTOVER_PATH")
-    if cutover:
-        child_environment["LEADPOET_SUBNET_EPOCH_CUTOVER_PATH"] = _absolute_path(cutover)
-    child_environment.pop("LEADPOET_SENTRY_API_TOKEN", None)
+    for name in ("SUBNET_EPOCH_CUTOVER_PATH", legacy_name("SUBNET_EPOCH_CUTOVER_PATH")):
+        cutover = child_environment.get(name)
+        if cutover:
+            child_environment[name] = _absolute_path(cutover)
+    env_pop(child_environment, "SUBNET71_SENTRY_API_TOKEN")
     names = sorted(name for name in child_environment
                    if _CONFIG_NAME.fullmatch(name) or name in INGEST_ENVIRONMENT_KEYS)
     command = [

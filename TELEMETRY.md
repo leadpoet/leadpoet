@@ -261,7 +261,7 @@ retention / no-training / deletion terms should be agreed in writing.
 
 Error capture (crashes and ERROR-level logs) is a separate, equally
 fail-closed integration with the same philosophy — namespaced
-`LEADPOET_SENTRY_*` variables, explicit options, host processes only, never
+`SUBNET71_SENTRY_*` variables, explicit options, host processes only, never
 the enclaves, and a scrubber that keeps trajectory/training data, prompts,
 benchmarks, and contact data out of every event. See
 [`docs/sentry_error_monitoring.md`](docs/sentry_error_monitoring.md) and

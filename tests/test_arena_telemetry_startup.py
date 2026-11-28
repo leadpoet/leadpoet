@@ -12,13 +12,13 @@ def test_scoped_environment_imports_only_sentry_ingest_settings(
 ):
     import json
     import os
-    from leadpoet_observability.sentry_bootstrap import INGEST_ENVIRONMENT_KEYS
+    from leadpoet_observability.sentry_bootstrap import INGEST_ENVIRONMENT_NAMES
 
-    values = dict(zip(INGEST_ENVIRONMENT_KEYS, (
+    values = dict(zip(INGEST_ENVIRONMENT_NAMES, (
         "1", "https://fixture@example.invalid/1", "production", "a" * 40,
     )))
-    forbidden = {"LEADPOET_SENTRY_API_TOKEN": "fixture-read-token",
-                 "LEADPOET_SENTRY_MESSAGE_MODE": "scrub",
+    forbidden = {"SUBNET71_SENTRY_API_TOKEN": "fixture-read-token",
+                 "SUBNET71_SENTRY_MESSAGE_MODE": "scrub",
                  "OPENROUTER_API_KEY": "fixture-provider-key"}
     values.update(forbidden)
     path = tmp_path / "gateway.env"
@@ -28,10 +28,10 @@ def test_scoped_environment_imports_only_sentry_ingest_settings(
         # Track absence as well as replacement when the loader writes os.environ.
         monkeypatch.setenv(key, "fixture-before-load")
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("LEADPOET_SENTRY_ENABLED", "0")
+    monkeypatch.setenv("SUBNET71_SENTRY_ENABLED", "0")
     launcher.load_scoped_environment(path)
-    assert os.environ["LEADPOET_SENTRY_ENABLED"] == "0"
-    for key in INGEST_ENVIRONMENT_KEYS[1:]:
+    assert os.environ["SUBNET71_SENTRY_ENABLED"] == "0"
+    for key in INGEST_ENVIRONMENT_NAMES[1:]:
         assert os.environ[key] == values[key]
     assert not any(key in os.environ for key in forbidden)
 

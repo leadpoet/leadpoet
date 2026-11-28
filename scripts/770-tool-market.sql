@@ -1,5 +1,5 @@
 -- Gamma tool market (docs/gamma-tool-market.md). Off by default: nothing
--- calls these functions unless LEADPOET_TOOL_MARKET_MODE is live. Miners
+-- calls these functions unless TOOL_MARKET_MODE is live. Miners
 -- list vendor keys sealed to the key vault with a price per unit; buyers open
 -- a tab against their Gamma balance and each call goes to the cheapest
 -- eligible key. Every table is append-only (no UPDATE, DELETE or TRUNCATE):

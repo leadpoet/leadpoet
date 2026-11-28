@@ -244,7 +244,7 @@ assert entrypoint.main(["--driver-only"]) == 0
 assert not any(t.name in {"lab-arena-driver", "lab-arena-code-review"} for t in threading.enumerate())
 print("ARENA_TEST_WORKERS_STOPPED")
 """
-    env = dict(os.environ, LAB_ARENA_MODE="live", GATEWAY_OTEL_ENABLED="0", LEADPOET_SENTRY_ENABLED="0")
+    env = dict(os.environ, LAB_ARENA_MODE="live", GATEWAY_OTEL_ENABLED="0", SUBNET71_SENTRY_ENABLED="0")
     result = subprocess.run(
         [sys.executable, "-u", "-c", code], capture_output=True,
         text=True, env=env, timeout=10,

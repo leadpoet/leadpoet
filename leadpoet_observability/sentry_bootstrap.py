@@ -2,8 +2,8 @@
 
 Same contract style as ``gateway/observability/otel_bootstrap.py``:
 
-- Complete no-op unless ``LEADPOET_SENTRY_ENABLED`` is truthy AND
-  ``LEADPOET_SENTRY_DSN`` is set. Only namespaced ``LEADPOET_SENTRY_*``
+- Complete no-op unless ``SUBNET71_SENTRY_ENABLED`` is truthy AND
+  ``SUBNET71_SENTRY_DSN`` is set. Only namespaced ``SUBNET71_SENTRY_*``
   variables are read; ambient ``SENTRY_*`` variables are never consulted —
   every option is passed to the SDK explicitly.
 - Wiring failures are swallowed (class name logged, never values): error
@@ -46,20 +46,26 @@ import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from . import sentry_scrubbing
+from leadpoet_canonical.env_names import env_get, legacy_name
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
-ENABLED_ENV = "LEADPOET_SENTRY_ENABLED"
-DSN_ENV = "LEADPOET_SENTRY_DSN"
-ENVIRONMENT_ENV = "LEADPOET_SENTRY_ENVIRONMENT"
-RELEASE_ENV = "LEADPOET_SENTRY_RELEASE"
-EXTRA_PROTECTED_ENV = "LEADPOET_SENTRY_EXTRA_PROTECTED_MODULES"
-MESSAGE_MODE_ENV = "LEADPOET_SENTRY_MESSAGE_MODE"  # "scrub" (default) | "redact-all"
-TRACES_SAMPLE_RATE_ENV = "LEADPOET_SENTRY_TRACES_SAMPLE_RATE"
+ENABLED_ENV = "SUBNET71_SENTRY_ENABLED"
+DSN_ENV = "SUBNET71_SENTRY_DSN"
+ENVIRONMENT_ENV = "SUBNET71_SENTRY_ENVIRONMENT"
+RELEASE_ENV = "SUBNET71_SENTRY_RELEASE"
+EXTRA_PROTECTED_ENV = "SUBNET71_SENTRY_EXTRA_PROTECTED_MODULES"
+MESSAGE_MODE_ENV = "SUBNET71_SENTRY_MESSAGE_MODE"  # "scrub" (default) | "redact-all"
+TRACES_SAMPLE_RATE_ENV = "SUBNET71_SENTRY_TRACES_SAMPLE_RATE"
 
 # The only non-Arena settings accepted by the private Arena launchers. The
 # operator's read-only Sentry API token is deliberately not runtime config.
-INGEST_ENVIRONMENT_KEYS = (ENABLED_ENV, DSN_ENV, ENVIRONMENT_ENV, RELEASE_ENV)
+INGEST_ENVIRONMENT_NAMES = (ENABLED_ENV, DSN_ENV, ENVIRONMENT_ENV, RELEASE_ENV)
+# Environment allowlists: the names above plus, for one release, their
+# pre-rename spellings.
+INGEST_ENVIRONMENT_KEYS = INGEST_ENVIRONMENT_NAMES + tuple(
+    legacy_name(name) for name in INGEST_ENVIRONMENT_NAMES
+)
 _ARENA_COMPONENTS = frozenset({"arena-service", "arena-validator"})
 
 _DEFAULT_TRACES_SAMPLE_RATE = 0.01
@@ -97,8 +103,8 @@ def _safe_print(line: str) -> None:
 
 def sentry_enabled() -> bool:
     return (
-        os.getenv(ENABLED_ENV, "").strip().lower() in _TRUTHY
-        and bool(os.getenv(DSN_ENV, "").strip())
+        env_get(None, ENABLED_ENV, "").strip().lower() in _TRUTHY
+        and bool(env_get(None, DSN_ENV, "").strip())
     )
 
 
@@ -107,18 +113,18 @@ def _extra_protected_prefixes() -> Tuple[str, ...]:
 
     The environment can only widen redaction, never narrow the built-in set.
     """
-    raw = os.getenv(EXTRA_PROTECTED_ENV, "")
+    raw = env_get(None, EXTRA_PROTECTED_ENV, "")
     return tuple(part.strip() for part in raw.split(",") if part.strip())
 
 
 def _redact_all() -> bool:
-    return os.getenv(MESSAGE_MODE_ENV, "").strip().lower() == "redact-all"
+    return env_get(None, MESSAGE_MODE_ENV, "").strip().lower() == "redact-all"
 
 
 def _trace_sample_rate() -> float:
     """Return a bounded success-trace rate; malformed values fail to default."""
 
-    raw = os.getenv(TRACES_SAMPLE_RATE_ENV, "").strip()
+    raw = env_get(None, TRACES_SAMPLE_RATE_ENV, "").strip()
     try:
         value = _DEFAULT_TRACES_SAMPLE_RATE if not raw else float(raw)
     except (TypeError, ValueError):
@@ -177,7 +183,7 @@ def _release_identity(component: Optional[str] = None) -> Optional[str]:
 
         candidate = SOURCE_METADATA.get("validator_source_commit", "")
         return candidate if _looks_like_sha(candidate) else None
-    configured = os.getenv(RELEASE_ENV, "").strip()
+    configured = env_get(None, RELEASE_ENV, "").strip()
     if configured:
         return configured
     for name in _BUILD_SHA_ENV_NAMES:
@@ -405,7 +411,7 @@ def _build_before_send(
         except BaseException as exc:
             # Fail closed: an event we cannot fully scrub is never sent.
             _safe_print(
-                "leadpoet_sentry_scrub_failed error=%s" % type(exc).__name__
+                "sentry_scrub_failed error=%s" % type(exc).__name__
             )
             return None
 
@@ -440,7 +446,7 @@ def _build_before_send_transaction(
             )
         except BaseException as exc:
             _safe_print(
-                "leadpoet_sentry_transaction_scrub_failed error=%s"
+                "sentry_transaction_scrub_failed error=%s"
                 % type(exc).__name__
             )
             return None
@@ -453,7 +459,7 @@ def init_sentry(component: str, tags: Optional[Dict[str, str]] = None) -> bool:
 
     Returns True only when a live client was installed. The first call wins;
     later calls in the same process are no-ops that return the first result.
-    Complete no-op (False) when the ``LEADPOET_SENTRY_*`` gate is not
+    Complete no-op (False) when the ``SUBNET71_SENTRY_*`` gate is not
     satisfied or ``sentry-sdk`` is not installed.
     """
     with _state_lock:
@@ -469,13 +475,13 @@ def init_sentry(component: str, tags: Optional[Dict[str, str]] = None) -> bool:
                 # Enabled by env but the optional dependency is missing: say so
                 # once (class only) instead of failing the runtime.
                 _safe_print(
-                    "leadpoet_sentry_disabled sdk_import=%s" % type(exc).__name__
+                    "sentry_disabled sdk_import=%s" % type(exc).__name__
                 )
                 return False
 
-            dsn = os.getenv(DSN_ENV, "").strip()
+            dsn = env_get(None, DSN_ENV, "").strip()
             environment = sentry_scrubbing.scrub_text(
-                os.getenv(ENVIRONMENT_ENV, "").strip() or "production", 100
+                env_get(None, ENVIRONMENT_ENV, "").strip() or "production", 100
             )
             release = sentry_scrubbing.scrub_text(
                 _release_identity(component) or "unknown", 200
@@ -535,14 +541,14 @@ def init_sentry(component: str, tags: Optional[Dict[str, str]] = None) -> bool:
                 )
             _state["active"] = True
             _safe_print(
-                "leadpoet_sentry_initialized component=%s release=%s"
+                "sentry_initialized component=%s release=%s"
                 % (safe_component, release)
             )
             return True
         except BaseException as exc:
             # Never let error monitoring break the runtime. Class name only —
             # the message could contain the DSN.
-            _safe_print("leadpoet_sentry_init_skipped error=%s" % type(exc).__name__)
+            _safe_print("sentry_init_skipped error=%s" % type(exc).__name__)
             _state["active"] = False
             return False
 

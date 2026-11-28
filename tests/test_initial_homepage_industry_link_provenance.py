@@ -27,7 +27,7 @@ IDENTITY = {'submitted_domain': 'coreworks.ai', 'observed_domain': 'coreworks.ai
 @pytest.fixture(autouse=True)
 def policy(monkeypatch):
     monkeypatch.setenv('ARENA_INDUSTRY_EVIDENCE_MODEL', 'openai/gpt-6.1-sol')
-    monkeypatch.setenv('LEADPOET_COMPETITION_EVALUATION_DATE', '2026-10-24')
+    monkeypatch.setenv('COMPETITION_EVALUATION_DATE', '2026-10-24')
 
 
 def initialize(monkeypatch, raw, *, company='Coreworks', url=HOME, final=None,

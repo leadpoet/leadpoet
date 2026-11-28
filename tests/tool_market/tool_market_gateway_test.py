@@ -93,7 +93,7 @@ def signed(path, body, *, method="POST"):
 
 
 def test_every_route_is_404_when_the_mode_is_off(client, monkeypatch):
-    monkeypatch.delenv("LEADPOET_TOOL_MARKET_MODE", raising=False)
+    monkeypatch.delenv("TOOL_MARKET_MODE", raising=False)
     routes.configure()
     for method, path in (("GET", "/tool-market/books/exa"), ("GET", "/tool-market/catalog"), ("POST", "/tool-market/call"),
                          ("GET", "/tool-market/tab"), ("POST", "/tool-market/tab/close"),
@@ -109,7 +109,7 @@ def test_every_route_is_404_when_the_mode_is_off(client, monkeypatch):
 
 
 def test_misconfigured_live_mode_answers_503(client, monkeypatch):
-    monkeypatch.setenv("LEADPOET_TOOL_MARKET_MODE", "live")
+    monkeypatch.setenv("TOOL_MARKET_MODE", "live")
     routes.configure()
     response = client.get("/tool-market/books/exa")
     assert response.status_code == 503 and response.json() == {"error": "tool_market_misconfigured"}

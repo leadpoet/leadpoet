@@ -7,8 +7,8 @@ buyer's hotkey spent to the market's Gamma service on netuid 71
 (`GammaSpent`). Each call selects an eligible key from the price-ranked book, subject to health, privacy, price and budget limits. The attested vault and the vendor execute the request.
 
 It is off by default. Every route answers 404 until
-`LEADPOET_TOOL_MARKET_MODE=live`.
-`LEADPOET_TOOL_MARKET_TOOLS_OFF` turns single tools off, for example
+`TOOL_MARKET_MODE=live`.
+`TOOL_MARKET_TOOLS_OFF` turns single tools off, for example
 `exa,hunter`.
 
 ## How it works
@@ -16,7 +16,7 @@ It is off by default. Every route answers 404 until
 1. **List a key.** A miner seals a vendor key to the vault on their own
    machine (`python -m lead_order_vault.cli seal`). They then send the
    envelope to `POST /tool-market/keys`, signed with their hotkey.
-   - Leadpoet stores only the envelope. Only the vault can open it.
+   - The subnet operator stores only the envelope. Only the vault can open it.
    - The body carries the miner's signed attestation (below).
    - The vault checks the key with the vendor's free balance call, if the
      vendor has one. A key with no credit is refused.
@@ -176,7 +176,7 @@ To publish it (ops, once per service hotkey):
 
 ## Launch set
 
-These are the end vendors Leadpoet already uses, called directly with each
+These are the end vendors the subnet operator already uses, called directly with each
 miner's own vendor key. Deepline is not in the market: it resells these
 same vendors. Each one bills per request or reports its own cost.
 
@@ -202,9 +202,9 @@ clients). Default-view clients receive the vendor object in `result`.
 Clients should keep their existing timeouts, failure handling and privacy checks.
 A timeout after dispatch needs reconciliation before another paid call.
 
-Email verification uses the cheapest eligible private offer by default. Lead Search can set `LEADPOET_TOOL_MARKET_VERIFY_MAX_ASK_MICROUSD`
+Email verification uses the cheapest eligible private offer by default. Lead Search can set `TOOL_MARKET_VERIFY_MAX_ASK_MICROUSD`
 as its own maximum ask in micro-USD for `zerobounce_validate`. This does not limit the ask a supplier may post. The other compatibility operations use the JSON object
-`LEADPOET_TOOL_MARKET_PLATFORM_MAX_ASKS`. A missing ceiling disables that
+`TOOL_MARKET_PLATFORM_MAX_ASKS`. A missing ceiling disables that
 variant. For example, for company lookups and short profiles on a $0.002
 incumbent plan, a cap of 1,817 leaves the fee-inclusive price below $0.002:
 
@@ -302,10 +302,10 @@ the request.
 
 - Each tool states its `request_privacy` in the catalog and its book:
   `visible` when the vendor documents a request history, `unverified` when
-  it does not (treat it as visible), and `private` only after Leadpoet checks
+  it does not (treat it as visible), and `private` only after the subnet operator checks
   a vendor account itself (`REQUEST_PRIVACY` in `catalog.py`).
 - Miners who sign a private-supply agreement, promising not to read buyers'
-  requests, are listed in `LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS`. Leadpoet
+  requests, are listed in `TOOL_MARKET_PRIVATE_SUPPLIERS`. The subnet operator
   can be one of them.
 - A call with `"private": true` goes only to those miners' keys, or to a tool
   marked `private`. The book marks which asks can serve one.
@@ -395,15 +395,15 @@ Migration 770 creates the tool ledger. Migration 771 links supplier earnings to 
 
 | Variable | Meaning |
 | --- | --- |
-| `LEADPOET_TOOL_MARKET_MODE` | `off` (default) or `live` |
-| `LEADPOET_TOOL_MARKET_TOOLS_OFF` | comma-separated tools turned off; empty by default, so all trade |
-| `LEADPOET_TOOL_MARKET_BUYER_HOTKEYS` | optional allowlist of buyer hotkeys, for a staff rollout |
-| `LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS` | hotkeys of miners with a private-supply agreement; serve private calls |
-| `LEADPOET_TOOL_MARKET_GAMMA_SERVICE` | the tool market's Gamma service SS58 hotkey; must differ from lead orders' |
-| `LEADPOET_TOOL_MARKET_TERMS_VERSION` | the terms both sides sign: `tool-market-terms-v1`, whose SHA-256 of `docs/tool-market-terms.md`'s exact bytes is in `PUBLISHED_TERMS` in `config.py`; live mode refuses any other version |
-| `LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL` | the https host every signed request names, and the base of the services document's urls |
-| `LEADPOET_TOOL_MARKET_VERIFY_MAX_ASK_MICROUSD` | the highest ask, in micro-USD a call, the Lead Search ZeroBounce route pays; unset uses the market price within the buyer’s tab budget |
-| `LEADPOET_TOOL_MARKET_PLATFORM_MAX_ASKS` | JSON mapping of platform operation, or profile variant (`harvestapi_get_profile.main`, `harvestapi_get_profile.findEmail`), to maximum supplier ask in micro-USD. Missing entries disable the corresponding route. `zerobounce_validate` is refused here: the variable above sets it. |
+| `TOOL_MARKET_MODE` | `off` (default) or `live` |
+| `TOOL_MARKET_TOOLS_OFF` | comma-separated tools turned off; empty by default, so all trade |
+| `TOOL_MARKET_BUYER_HOTKEYS` | optional allowlist of buyer hotkeys, for a staff rollout |
+| `TOOL_MARKET_PRIVATE_SUPPLIERS` | hotkeys of miners with a private-supply agreement; serve private calls |
+| `TOOL_MARKET_GAMMA_SERVICE` | the tool market's Gamma service SS58 hotkey; must differ from lead orders' |
+| `TOOL_MARKET_TERMS_VERSION` | the terms both sides sign: `tool-market-terms-v1`, whose SHA-256 of `docs/tool-market-terms.md`'s exact bytes is in `PUBLISHED_TERMS` in `config.py`; live mode refuses any other version |
+| `TOOL_MARKET_PUBLIC_BASE_URL` | the https host every signed request names, and the base of the services document's urls |
+| `TOOL_MARKET_VERIFY_MAX_ASK_MICROUSD` | the highest ask, in micro-USD a call, the Lead Search ZeroBounce route pays; unset uses the market price within the buyer’s tab budget |
+| `TOOL_MARKET_PLATFORM_MAX_ASKS` | JSON mapping of platform operation, or profile variant (`harvestapi_get_profile.main`, `harvestapi_get_profile.findEmail`), to maximum supplier ask in micro-USD. Missing entries disable the corresponding route. `zerobounce_validate` is refused here: the variable above sets it. |
 | `LAB_ARENA_NETUID` | must be 71, the default; any other value is `503 tool_market_misconfigured` |
 
 It reuses the Arena store and chain settings, and the key vault
@@ -444,7 +444,7 @@ deployment, exactly as lead orders do.
 - **The vault checks a key before the 30-day rule is read.** A hotkey at
   its limit still gets one vendor check per tool a minute, which tells it
   whether a key is live. The miner sealed the key, so it holds it already;
-  the check adds only Leadpoet's address. A read-only 30-day check before
+  the check adds only the subnet operator's address. A read-only 30-day check before
   the vault would close this.
 - **Reads that grow.** A balance reads every tab the buyer ever opened (a
   btauth/1 call is a tab of its own), every signed request keeps a nonce
@@ -480,7 +480,7 @@ deployment, exactly as lead orders do.
   can keep every call at `503 no_supply` (nothing is charged). Limit the
   vault port to the gateway's egress, leaving only `/v1/identity` public.
 - **No vault receipts for miners.** Calls do not yet keep the vault's
-  signed receipts, so miners cannot check Leadpoet's reports against the
+  signed receipts, so miners cannot check the subnet operator's reports against the
   vault. Lead orders keep them; this lane can add them the same way.
 - **Ask increases apply at once.** A buyer who cares sends
   `max_ask_microusd`; a delay on increases can follow.
@@ -505,7 +505,7 @@ A tool is data, not a new code path:
    routes it may call, and its free balance check. The vault is a separate
    attested image, so it keeps this allowlist rather than trusting the
    gateway's catalog. A vault change needs a new vault release.
-3. Its `REQUEST_PRIVACY` entry in `catalog.py`: `unverified` until Leadpoet
+3. Its `REQUEST_PRIVACY` entry in `catalog.py`: `unverified` until the subnet operator
    checks the vendor's account terms.
 
 ## 2.0 list

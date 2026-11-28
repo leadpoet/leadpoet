@@ -128,10 +128,10 @@ def test_platform_ceiling_must_specify_known_approved_operation_and_integer_ask(
     from lab_arena.tool_market.config import PLATFORM_MAX_ASKS_ENV, load_config, ToolMarketConfigError
 
     env = {
-        "LEADPOET_TOOL_MARKET_MODE": "live",
-        "LEADPOET_TOOL_MARKET_TERMS_VERSION": "tool-market-terms-v1",
-        "LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL": "https://market.example.test",
-        "LEADPOET_TOOL_MARKET_GAMMA_SERVICE": "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+        "TOOL_MARKET_MODE": "live",
+        "TOOL_MARKET_TERMS_VERSION": "tool-market-terms-v1",
+        "TOOL_MARKET_PUBLIC_BASE_URL": "https://market.example.test",
+        "TOOL_MARKET_GAMMA_SERVICE": "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
     }
     assert not load_config(env).platform_max_asks
     alias = platform.SHORT_PROFILE

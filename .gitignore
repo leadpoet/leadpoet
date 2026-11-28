@@ -37,7 +37,7 @@ data/regulatory/miner_attestation.json
 *.key   # Stray key files
 pending_reveals.json  # Validator reveal cache (runtime file)
 
-# Leadpoet-specific
+# Subnet 71-specific
 wallet.hotkey/
 lead_pool.json
 leadpoet_subnet.egg-info/

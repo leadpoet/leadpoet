@@ -34,7 +34,7 @@ for _credential_name in (
 
 @pytest.fixture()
 def handoff_root():
-    root = Path(tempfile.mkdtemp(prefix="leadpoet-handoff-test.", dir="/tmp"))
+    root = Path(tempfile.mkdtemp(prefix="subnet71-handoff-test.", dir="/tmp"))
     try:
         yield root
     finally:

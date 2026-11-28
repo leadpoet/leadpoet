@@ -17,6 +17,7 @@ import sys
 import tempfile
 import uuid
 
+from leadpoet_canonical.env_names import env_get
 from lab_arena import contracts, operations, output, runner, runtime, source_bundle
 from lab_arena.collection_intake import MODELS
 from lab_arena.cache_retention import workspace_cache_lock
@@ -253,7 +254,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not 60 <= args.seconds <= contracts.ICP_WALL_CLOCK_SECONDS:
         parser.error("invalid time limit")
-    args.web_proxy = os.environ.get("LEADPOET_COLLECTION_WEB_PROXY") or None
+    args.web_proxy = env_get(None, "COLLECTION_WEB_PROXY") or None
     # Reserve stdout exclusively for the private protocol even if a legacy
     # component writes a progress line. Do not log traces from this process.
     wire = sys.stdout.buffer

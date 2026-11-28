@@ -20,7 +20,7 @@ boto3>=1.40.0
 # Monitoring and metrics
 # Error monitoring for HOST processes only — never enclave images (the
 # sentry boundary guard test fails CI if it enters an enclave requirements
-# file). Optional at runtime and inert without the LEADPOET_SENTRY_* env
+# file). Optional at runtime and inert without the SUBNET71_SENTRY_* env
 # gate; see docs/sentry_error_monitoring.md.
 sentry-sdk==2.66.1
 # Gateway tracing is optional at runtime, but these packages are required when

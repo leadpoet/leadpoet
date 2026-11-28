@@ -26,11 +26,11 @@ BOB = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
 WRONG_NETWORK = "4zVPe3pyrYm2nenze7ns4xVoGycNdggAAbEmCszvXGDw2CKz"
 INVALID_ADDRESSES = [ALICE[:-1] + "Z", WRONG_NETWORK, "1" * 46]
 BASE_ENV = {
-    "LEADPOET_LEAD_ORDERS_RUNNER_SECRET": "s" * 32,
-    "LEADPOET_LEAD_ORDERS_POLICY_PATH": "/etc/policy.json",
-    "LEADPOET_LEAD_ORDERS_TERMS_VERSION": "2026-11",
-    "LEADPOET_LEAD_ORDERS_PUBLIC_BASE_URL": "https://gw.example/",
-    "LEADPOET_LEAD_ORDERS_STAFF_HOTKEYS": ALICE,
+    "LEAD_ORDERS_RUNNER_SECRET": "s" * 32,
+    "LEAD_ORDERS_POLICY_PATH": "/etc/policy.json",
+    "LEAD_ORDERS_TERMS_VERSION": "2026-11",
+    "LEAD_ORDERS_PUBLIC_BASE_URL": "https://gw.example/",
+    "LEAD_ORDERS_STAFF_HOTKEYS": ALICE,
 }
 
 
@@ -38,30 +38,30 @@ BASE_ENV = {
 
 
 def test_config_is_off_by_default_and_ignores_other_settings():
-    for env in ({}, {"LEADPOET_LEAD_ORDERS_MODE": "off", "LEADPOET_LEAD_ORDERS_RUNNER_SECRET": "x",
-                     "LEADPOET_LEAD_ORDERS_GAMMA_SERVICE": "7"}):
+    for env in ({}, {"LEAD_ORDERS_MODE": "off", "LEAD_ORDERS_RUNNER_SECRET": "x",
+                     "LEAD_ORDERS_GAMMA_SERVICE": "7"}):
         config = load_config(env)
         assert config.mode == "off" and not config.enabled and not config.weights_rewards
         assert not config.may_order(ALICE) and not config.runner_secret_matches("x")
 
 
 def test_config_requires_every_setting_outside_off():
-    assert load_config(dict(BASE_ENV, LEADPOET_LEAD_ORDERS_MODE="staff")).public_base_url == "https://gw.example"
-    for name in ("LEADPOET_LEAD_ORDERS_RUNNER_SECRET", "LEADPOET_LEAD_ORDERS_POLICY_PATH",
-                 "LEADPOET_LEAD_ORDERS_TERMS_VERSION", "LEADPOET_LEAD_ORDERS_PUBLIC_BASE_URL",
-                 "LEADPOET_LEAD_ORDERS_STAFF_HOTKEYS"):
-        env = dict(BASE_ENV, LEADPOET_LEAD_ORDERS_MODE="shadow")
+    assert load_config(dict(BASE_ENV, LEAD_ORDERS_MODE="staff")).public_base_url == "https://gw.example"
+    for name in ("LEAD_ORDERS_RUNNER_SECRET", "LEAD_ORDERS_POLICY_PATH",
+                 "LEAD_ORDERS_TERMS_VERSION", "LEAD_ORDERS_PUBLIC_BASE_URL",
+                 "LEAD_ORDERS_STAFF_HOTKEYS"):
+        env = dict(BASE_ENV, LEAD_ORDERS_MODE="shadow")
         env.pop(name)
         with pytest.raises(LeadOrdersConfigError):
             load_config(env)
     with pytest.raises(LeadOrdersConfigError):
-        load_config(dict(BASE_ENV, LEADPOET_LEAD_ORDERS_MODE="live"))  # no Gamma service id
+        load_config(dict(BASE_ENV, LEAD_ORDERS_MODE="live"))  # no Gamma service id
     with pytest.raises(LeadOrdersConfigError):
-        load_config(dict(BASE_ENV, LEADPOET_LEAD_ORDERS_MODE="loud"))
-    live = load_config(dict(BASE_ENV, LEADPOET_LEAD_ORDERS_MODE="live", LEADPOET_LEAD_ORDERS_GAMMA_SERVICE=ALICE,
-                            LEADPOET_LEAD_ORDERS_BLOCKED_HOTKEYS=BOB))
+        load_config(dict(BASE_ENV, LEAD_ORDERS_MODE="loud"))
+    live = load_config(dict(BASE_ENV, LEAD_ORDERS_MODE="live", LEAD_ORDERS_GAMMA_SERVICE=ALICE,
+                            LEAD_ORDERS_BLOCKED_HOTKEYS=BOB))
     assert live.may_order(ALICE) is True and live.may_order(BOB) is False and live.weights_rewards
-    staff = load_config(dict(BASE_ENV, LEADPOET_LEAD_ORDERS_MODE="staff"))
+    staff = load_config(dict(BASE_ENV, LEAD_ORDERS_MODE="staff"))
     assert staff.may_order(ALICE) and not staff.may_order(BOB) and not staff.uses_miner_keys
     assert staff.runner_secret_matches("s" * 32) and not staff.runner_secret_matches("s" * 31)
     assert "s" * 32 not in repr(staff)
@@ -73,8 +73,8 @@ def test_config_requires_every_setting_outside_off():
 @pytest.mark.parametrize("service_id", ["0", "7", "4294967295", *INVALID_ADDRESSES])
 def test_gamma_service_config_rejects_invalid_accounts(service_id):
     with pytest.raises(LeadOrdersConfigError, match="SS58"):
-        load_config(dict(BASE_ENV, LEADPOET_LEAD_ORDERS_MODE="live",
-                         LEADPOET_LEAD_ORDERS_GAMMA_SERVICE=service_id))
+        load_config(dict(BASE_ENV, LEAD_ORDERS_MODE="live",
+                         LEAD_ORDERS_GAMMA_SERVICE=service_id))
 
 
 @pytest.mark.parametrize("service_id", ["0", "7", "4294967295", *INVALID_ADDRESSES])
@@ -85,10 +85,10 @@ def test_gamma_service_reader_rejects_invalid_accounts_before_chain_access(servi
     assert client.calls == []
 
 
-@pytest.mark.parametrize("setting", ["LEADPOET_LEAD_ORDERS_STAFF_HOTKEYS", "LEADPOET_LEAD_ORDERS_BLOCKED_HOTKEYS"])
+@pytest.mark.parametrize("setting", ["LEAD_ORDERS_STAFF_HOTKEYS", "LEAD_ORDERS_BLOCKED_HOTKEYS"])
 @pytest.mark.parametrize("address", INVALID_ADDRESSES)
 def test_config_validates_each_configured_hotkey(setting, address):
-    env = dict(BASE_ENV, LEADPOET_LEAD_ORDERS_MODE="staff")
+    env = dict(BASE_ENV, LEAD_ORDERS_MODE="staff")
     env[setting] = ALICE + "," + address
     with pytest.raises(LeadOrdersConfigError, match="invalid hotkey"):
         load_config(env)
@@ -159,18 +159,18 @@ def key(key_id, hotkey, seq):
     return keys.ProviderKey(key_id, "openrouter", hotkey, seq, "sha256:" + key_id.ljust(64, "0")[:64])
 
 
-def test_rank_keys_by_settled_spend_with_leadpoet_last_and_exhausted_skipped():
-    leadpoet = keys.leadpoet_keys("o" * 40, "")["openrouter"]
+def test_rank_keys_by_settled_spend_with_owner_last_and_exhausted_skipped():
+    owner = keys.owner_keys("o" * 40, "")["openrouter"]
     miners = [key("aa", ALICE, 1), key("bb", BOB, 2), key("cc", BOB, 3)]
-    ranked = keys.rank_keys("openrouter", miners, leadpoet, settled_spend_by_key={"bb": 50, "cc": 50, "aa": 10},
+    ranked = keys.rank_keys("openrouter", miners, owner, settled_spend_by_key={"bb": 50, "cc": 50, "aa": 10},
                             use_miner_keys=True)
     assert [k.key_id for k in ranked] == ["bb", "cc", "aa", "leadpoet-openrouter"]
-    ranked = keys.rank_keys("openrouter", miners, leadpoet, settled_spend_by_key={}, use_miner_keys=True,
+    ranked = keys.rank_keys("openrouter", miners, owner, settled_spend_by_key={}, use_miner_keys=True,
                             exhausted=["aa", "leadpoet-openrouter"])
     assert [k.key_id for k in ranked] == ["bb", "cc"]
-    assert keys.rank_keys("openrouter", miners, leadpoet, settled_spend_by_key={}, use_miner_keys=False) == [leadpoet]
-    assert keys.rank_keys("deepline", miners, leadpoet, settled_spend_by_key={}, use_miner_keys=True) == []
-    assert leadpoet.public_fingerprint != leadpoet.internal_fingerprint and len(leadpoet.public_fingerprint) == 39
+    assert keys.rank_keys("openrouter", miners, owner, settled_spend_by_key={}, use_miner_keys=False) == [owner]
+    assert keys.rank_keys("deepline", miners, owner, settled_spend_by_key={}, use_miner_keys=True) == []
+    assert owner.public_fingerprint != owner.internal_fingerprint and len(owner.public_fingerprint) == 39
 
 
 @pytest.mark.parametrize("status,headers,body,reason", [
@@ -399,7 +399,7 @@ def test_miner_keys_never_fall_back_to_the_direct_transport():
 
     with pytest.raises(ValueError, match="vault transport"):
         LeadOrderBroker(store=None, policy=POLICY, transport=object(), registrar=keys.MinerKeyRegistrar(None),
-                        leadpoet_secrets={}, price_table=dict, current_epoch=lambda: 1)
+                        owner_secrets={}, price_table=dict, current_epoch=lambda: 1)
 
 
 def test_a_vault_receipt_the_store_does_not_keep_is_logged(caplog):
@@ -418,7 +418,7 @@ def test_a_vault_receipt_the_store_does_not_keep_is_logged(caplog):
                            ({"status": "not_recordable"}, True), (OSError("store down"), True)):
         caplog.clear()
         broker = LeadOrderBroker(store=Store(answer), policy=POLICY, transport=None, registrar=None,
-                                 leadpoet_secrets={}, price_table=dict, current_epoch=lambda: 1)
+                                 owner_secrets={}, price_table=dict, current_epoch=lambda: 1)
         sent = type("Sent", (), {"vault_receipt": {"document": {}, "signature": "00"}})()
         broker._keep_receipt("call-1", "call", sent)
         assert ("receipt not kept" in caplog.text) is logged, answer

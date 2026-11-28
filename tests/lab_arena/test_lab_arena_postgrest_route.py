@@ -39,7 +39,7 @@ def _b64(data: bytes) -> str:
 
 def mint_jwt(role: str, *, secret: str = JWT_SECRET, expires_in: int = 3600) -> str:
     header = _b64(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
-    payload = _b64(json.dumps({"role": role, "iss": "leadpoet-lab-arena-test", "exp": int(time.time()) + expires_in}, separators=(",", ":")).encode())
+    payload = _b64(json.dumps({"role": role, "iss": "subnet71-lab-arena-test", "exp": int(time.time()) + expires_in}, separators=(",", ":")).encode())
     signature = _b64(hmac.new(secret.encode(), ("%s.%s" % (header, payload)).encode(), hashlib.sha256).digest())
     return "%s.%s.%s" % (header, payload, signature)
 

@@ -1,6 +1,6 @@
 """Lead-order orchestration: buyers, orders, runner claims, settlement.
 
-Everything here is reached only when ``LEADPOET_LEAD_ORDERS_MODE`` is not
+Everything here is reached only when ``LEAD_ORDERS_MODE`` is not
 ``off``. Money rules run in the database (``scripts/707-lead-orders.sql``)
 and in ``money``; this module wires them together and never touches an
 Arena table, reward or weight.
@@ -469,7 +469,7 @@ class LeadOrderService:
         if view["mode"] == MODE_LIVE:
             owed = rewards.order_rewards(policy, order=view, calls=calls)
         elif view["mode"] == "shadow":
-            # Shadow runs on Leadpoet's keys: publish what miners would have
+            # Shadow runs on the subnet's own keys: publish what miners would have
             # earned, owe nothing.
             what_if = rewards.what_if_reward(policy, order=view, calls=calls)
         self._store.record_rewards(order_id, owed)

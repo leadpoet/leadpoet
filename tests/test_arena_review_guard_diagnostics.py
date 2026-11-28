@@ -19,7 +19,7 @@ def run_two_review_cycles(monkeypatch, *, fail_at=None, error=None, guard_presen
     monkeypatch.setattr(entrypoint, "_install_arena_telemetry", lambda _: None)
     monkeypatch.setattr(entrypoint, "_record_service_lifecycle", lambda *a, **k: None)
     monkeypatch.setenv("LAB_ARENA_MODE", "live")
-    monkeypatch.setenv("LEADPOET_SENTRY_ENABLED", "0")
+    monkeypatch.setenv("SUBNET71_SENTRY_ENABLED", "0")
     reads, reviews, waits, callbacks = [], [], [], []
 
     class Stop:

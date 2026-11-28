@@ -110,60 +110,51 @@ def reconcile_owner(db, http, subject, owner_key):
     return {"status": "settled", "cost_microusd": cost.microusd}
 
 
-def reconcile_pending(db, look_up, state_file, *, now):
+def reconcile_pending(db, look_up, state_file, *, now, max_calls=2, deadline=None, monotonic=time.monotonic):
+    """Bound provider lookups and resume at the last attempted bill, including within a page."""
+    if not 1 <= max_calls <= 200:
+        raise ValueError("invalid billing lookup limit")
     state = json.loads(state_file.read_bytes()) if state_file.exists() else {}
     cursor = state.get("cursor")
     if cursor is None and now < state.get("next_sweep_at", 0):
         return {"checked": 0, "status": "waiting"}
-    page = db.rpc(
-        "collection_pending_billing_v1",
-        {
+    outcomes = []
+    while len(outcomes) < max_calls and (deadline is None or monotonic() < deadline):
+        page = db.rpc("collection_pending_billing_v1", {
             "p_after_job": cursor[0] if cursor else None,
             "p_after_request": cursor[1] if cursor else None,
-        },
-    )
-    if not isinstance(page, list) or len(page) > 2:
-        raise ValueError("invalid collection billing page")
-    outcomes = []
-    for item in page:
-        try:
-            result = look_up(item)
-            reason = result.get("reason", result.get("generation_lookup_http"))
-            outcomes.append(
-                {
-                    "provider": item["provider"],
-                    "status": result["status"],
-                    "reason": reason,
-                }
-            )
-        except (
-            broker.ProviderTransportError,
-            CredentialError,
-            store.ArenaStoreError,
-        ) as exc:
-            outcomes.append(
-                {
-                    "provider": item["provider"],
-                    "status": "unresolved",
-                    "reason": type(exc).__name__,
-                }
-            )
-    # The SQL ledger makes settlement idempotent if we restart before saving this
-    # cursor. An old persistent 404 cannot starve a later job or cause a fast loop.
-    state = (
-        {"cursor": [page[-1]["job"], page[-1]["request"]]}
-        if len(page) == 2
-        else {"next_sweep_at": now + 3600}
-    )
-    with tempfile.NamedTemporaryFile(
-        mode="w", dir=state_file.parent, delete=False
-    ) as stream:
-        temporary = Path(stream.name)
-        json.dump(state, stream)
-        stream.flush()
-        os.fsync(stream.fileno())
-    temporary.replace(state_file)
-    return {"checked": len(page), "outcomes": outcomes}
+        })
+        if not isinstance(page, list) or len(page) > 2:
+            raise ValueError("invalid collection billing page")
+        for item in page:
+            if len(outcomes) == max_calls or (deadline is not None and monotonic() >= deadline):
+                break
+            position = [item["job"], item["request"]]
+            if cursor is not None and position <= cursor:
+                raise ValueError("billing page did not advance")
+            try:
+                result = look_up(item)
+                outcome = dict(provider=item["provider"], status=result["status"],
+                               reason=result.get("reason", result.get("generation_lookup_http")))
+            except (broker.ProviderTransportError, CredentialError, store.ArenaStoreError) as exc:
+                outcome = dict(provider=item["provider"], status="unresolved", reason=type(exc).__name__)
+            outcomes.append(outcome)
+            cursor = position
+        complete = len(page) < 2 and (not page or cursor == [page[-1]["job"], page[-1]["request"]])
+        if cursor is None and not complete:
+            break
+        state = {"next_sweep_at": now + 3600} if complete else {"cursor": cursor}
+        # A crash before the cursor is durable repeats receipt verification safely.
+        # The SQL settlement itself is idempotent.
+        with tempfile.NamedTemporaryFile(mode="w", dir=state_file.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(state, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(state_file)
+        if complete:
+            break
+    return {"checked": len(outcomes), "outcomes": outcomes}
 
 
 def main(argv=None):
@@ -204,7 +195,7 @@ def main(argv=None):
                 return reconcile(db, vault, http, item["job"], item["request"])
 
             result = reconcile_pending(
-                db, look_up, args.pending_state, now=int(time.time())
+                db, look_up, args.pending_state, now=int(time.time()), max_calls=200, deadline=time.monotonic() + 24
             )
             print(json.dumps({"collection_billing": result}, sort_keys=True))
             return 0

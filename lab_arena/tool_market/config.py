@@ -8,8 +8,9 @@ unless it is named there.
 
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import FrozenSet, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
 
@@ -17,10 +18,12 @@ from lab_arena.lead_orders.auth import normalize_host
 from lab_arena.lead_orders.config import is_valid_hotkey
 from lab_arena.lead_orders.config import GAMMA_SERVICE_ENV as LEAD_ORDERS_GAMMA_SERVICE_ENV
 from lab_arena.tool_market.catalog import MAX_ASK, TOOLS
+from lab_arena.tool_market import platform
 
 MODE_ENV = "LEADPOET_TOOL_MARKET_MODE"
 TOOLS_OFF_ENV = "LEADPOET_TOOL_MARKET_TOOLS_OFF"
 VERIFY_MAX_ASK_ENV = "LEADPOET_TOOL_MARKET_VERIFY_MAX_ASK_MICROUSD"
+PLATFORM_MAX_ASKS_ENV = "LEADPOET_TOOL_MARKET_PLATFORM_MAX_ASKS"
 APPROVED_SUPPLIERS_ENV = "LEADPOET_TOOL_MARKET_APPROVED_SUPPLIERS"
 BUYERS_ENV = "LEADPOET_TOOL_MARKET_BUYER_HOTKEYS"
 PRIVATE_SUPPLIERS_ENV = "LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS"
@@ -64,6 +67,8 @@ class ToolMarketConfig:
     lead_search_verify_max_ask: Optional[int] = None
     approved_suppliers: FrozenSet[Tuple[str, str]] = frozenset()
 
+    platform_max_asks: Mapping[str, int] = field(default_factory=dict)
+
     def may_supply(self, tool: str, hotkey: str) -> bool:
         return tool in self.tools and (tool, hotkey) in self.approved_suppliers
 
@@ -101,11 +106,21 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
     if verify_limit and not (verify_limit.isascii() and verify_limit.isdigit() and len(verify_limit) <= 6
                              and 0 < int(verify_limit) <= MAX_ASK[TOOLS["zerobounce"]]):
         raise ToolMarketConfigError("%s must be a positive per-call ask within the catalog limit" % VERIFY_MAX_ASK_ENV)
+    try:
+        platform_limits = json.loads(env.get(PLATFORM_MAX_ASKS_ENV, "{}"))
+    except (ValueError, RecursionError):
+        raise ToolMarketConfigError(f"{PLATFORM_MAX_ASKS_ENV} must be a JSON object") from None
+    permitted = (set(platform.OPERATIONS) - {"zerobounce_validate"}) | {platform.SHORT_PROFILE}
+    if not isinstance(platform_limits, dict) or any(
+        key not in permitted or type(limit) is not int or not 1 <= limit <= MAX_ASK["call"]
+        for key, limit in platform_limits.items()
+    ):
+        raise ToolMarketConfigError(f"{PLATFORM_MAX_ASKS_ENV} needs a supported operation and positive per-call ask")
     terms_version = env.get(TERMS_VERSION_ENV, "").strip()
     if env.get(NETUID_ENV, str(NETUID)).strip() != str(NETUID):
         raise ToolMarketConfigError("%s must be %d: the market counts only that subnet's Gamma" % (NETUID_ENV, NETUID))
     config = ToolMarketConfig(
-        lead_search_verify_max_ask=int(verify_limit) if verify_limit else None,
+        lead_search_verify_max_ask=int(verify_limit) if verify_limit else None, platform_max_asks=platform_limits,
         mode=mode, tools=tools, approved_suppliers=frozenset(approved), buyer_hotkeys=buyers, private_suppliers=private,
         gamma_service=env.get(GAMMA_SERVICE_ENV, "").strip(),
         terms_version=terms_version, terms_sha256=PUBLISHED_TERMS.get(terms_version, ""),

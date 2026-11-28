@@ -223,11 +223,11 @@ async def call(request: Request) -> Response:
                          limiter=_call_threads)
 
 
-@router.post("/tool-market/api/v2/integrations/zerobounce_validate/execute")
-async def lead_search_validation(request: Request) -> Response:
+@router.post("/tool-market/api/v2/integrations/{operation}/execute")
+async def platform_call(operation: str, request: Request) -> Response:
     token = _bearer(request)
-    return await _handle(request, lambda market, who, body: market.lead_search_validation(
-        token, _json(body)), signed=False, limiter=_call_threads)
+    return await _handle(request, lambda market, who, body: market.platform_call(
+        token, operation, _json(body), raw=request.headers.get("x-deepline-execute-response-contract") == "raw-v2"), signed=False, limiter=_call_threads)
 
 
 @router.get("/tool-market/tab")

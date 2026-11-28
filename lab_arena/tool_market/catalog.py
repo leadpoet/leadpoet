@@ -351,7 +351,7 @@ _OPERATIONS: Sequence[Operation] = (
     # HarvestAPI: per-request credits. Its prices are not published per
     # endpoint, so launch keeps the two profile reads only.
     Operation("harvestapi", "linkedin_profile", "GET", _HARVEST + "/linkedin/profile", UNIT_CALL, 1,
-              {"url": _HARVEST_URL}, cost=_harvest_cost, does="Read a LinkedIn profile: name, headline, current jobs."),
+              {"url": _HARVEST_URL, "main": Param("enum", choices=("true",))}, cost=_harvest_cost, does="Read a LinkedIn profile: name, headline, current jobs."),
     Operation("harvestapi", "linkedin_company", "GET", _HARVEST + "/linkedin/company", UNIT_CALL, 1,
               {"url": _HARVEST_URL}, cost=_harvest_cost, does="Read a LinkedIn company page."),
 )

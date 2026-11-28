@@ -193,27 +193,49 @@ same vendors. Each one bills per request or reports its own cost.
 
 ## Using the existing Lead Search client
 
-Set `LEADPOET_TOOL_MARKET_VERIFY_MAX_ASK_MICROUSD` to the maximum supplier ask for this lookup; leaving it unset disables the compatibility endpoint. For example, an incumbent cost of 6,490 micro-USD requires an ask of at most 5,899 to beat it after the fee. For an approved ZeroBounce pilot, pass the existing site client a tab token as
-`credentials.apiKey` and the gateway origin plus `/tool-market` as
-`credentials.hostUrl` **for that operation only**. Its existing
-`POST /api/v2/integrations/zerobounce_validate/execute` sends
-`{"payload":{"email":"person@example.org"}}`. The adapter uses the same
-market reservation and settlement as a native call, requires private supply,
-and returns the raw vendor verdict under `toolResponse.raw` with the buyer's
-actual charge in `billing.cost_usd`. Every accepted request is a fresh lookup.
-A vendor error or malformed verdict is a failed lookup. Retain the client
-timeout and the original privacy policy. An ambiguous timeout needs
-reconciliation before sending another paid request.
+For one approved operation, point the site client's `credentials.hostUrl` at
+the gateway plus `/tool-market` and give it a scoped tab token. It posts to
+`/api/v2/integrations/{operation}/execute` with `{"payload":{...}}`. The
+adapter uses the native market's private-supply check, spending limits,
+reservations and settlement. Raw-v2 clients receive the original vendor
+object in `toolResponse.rawV2` (also `raw` for existing verification
+clients). Default-view clients receive the vendor object in `result`.
+`billing.cost_usd` reports the buyer's charge. Every call is fresh.
+Clients should keep their existing timeouts, failure handling and privacy checks.
+A timeout after dispatch needs reconciliation before another paid call.
 
-This adapter covers only ZeroBounce verification. Lead Search also uses
-CrustData, Harvest jobs/search/posts/reactions, email discovery, bulk tools
-and multi-step plays. Even an identically named profile operation can use
-different fields, enrichment options and prices. Test other operations against
-the platform's existing parser, expected fields, error and billing contracts
-before routing them. The platform keeps the lead-search orchestration,
-ranking, verification and customer interface.
+Each compatibility operation requires an explicit price ceiling in micro-USD
+per supplier unit. Keep the existing `LEADPOET_TOOL_MARKET_VERIFY_MAX_ASK_MICROUSD`
+for `zerobounce_validate`. The other operations use the JSON object
+`LEADPOET_TOOL_MARKET_PLATFORM_MAX_ASKS`. A missing ceiling disables that
+variant. For example, for company lookups and short profiles on a $0.002
+incumbent plan, a cap of 1,817 leaves the fee-inclusive price below $0.002:
 
-[Platform client and BYOK accounting](https://github.com/leadpoet/leadpoet-site/blob/932f97a1b38cc6999dec5dac7161facd094fbc52/server/deepline.ts)
+```json
+{"harvestapi_get_company":1817,"harvestapi_get_profile.main":1817}
+```
+
+- Exact Harvest company URL or universal name maps to the direct lookup. The
+  site's short profile request preserves `main=true`. Its full profile has a
+  separate ceiling. Email-enriched profiles and fuzzy company-name searches
+  need their own contract and supplier pricing.
+- Harvest job and post reads, filtered searches, reactions, comments and
+  profile posts accept the parameters listed in the market catalog. More
+  expensive Sales Navigator lead search is outside these profile-key asks.
+- Findymail name/domain and business-profile lookup, Hunter email finder and
+  email-only Prospeo enrichment use the native provider contract. Explicit
+  `enrich_mobile: false` keeps Prospeo's default; a mobile request is refused.
+- ZeroBounce's provider status and substatus pass through to the existing
+  site verdict parser. An undocumented status or error stays a failure.
+- CrustData, bulk/paginated orchestration, async plays and other unsupported
+  operations stay on their existing platform transport.
+
+The site owns orchestration, customer billing, ranking, caching and result
+quality checks. Compare real match yield, fields, billed cost and latency per
+enabled variant before moving traffic. Controlled tests exercise HTTP, a
+disposable PostgreSQL database, sealed credentials, exact vendor request
+shapes and charges. No successful authenticated Harvest or ZeroBounce call
+through Gamma has been demonstrated here. [Platform providers](https://github.com/leadpoet/leadpoet-site/blob/b1def0e083/server/lead-search/finding/providers.ts) · [Platform client and BYOK accounting](https://github.com/leadpoet/leadpoet-site/blob/b1def0e083/server/deepline.ts) · [Harvest direct API](https://github.com/HarvestAPI/harvestapi-docs/blob/main/linkedin-api-reference/openapi.json)
 
 ## Miner attestation
 
@@ -355,6 +377,7 @@ All tool-market data is in `scripts/770-tool-market.sql`.
 | `LEADPOET_TOOL_MARKET_TERMS_VERSION` | the terms both sides sign: `tool-market-terms-v1`, whose SHA-256 of `docs/tool-market-terms.md`'s exact bytes is in `PUBLISHED_TERMS` in `config.py`; live mode refuses any other version |
 | `LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL` | the https host every signed request names, and the base of the services document's urls |
 | `LEADPOET_TOOL_MARKET_VERIFY_MAX_ASK_MICROUSD` | the highest ask, in micro-USD a call, the Lead Search ZeroBounce route pays; unset turns that route off (`404 verification_route_disabled`) |
+| `LEADPOET_TOOL_MARKET_PLATFORM_MAX_ASKS` | JSON mapping of platform operation or short-profile variant to maximum supplier ask in micro-USD. Missing entries disable the corresponding route. |
 | `LAB_ARENA_NETUID` | must be 71, the default; any other value is `503 tool_market_misconfigured` |
 
 It reuses the Arena store and chain settings, and the key vault

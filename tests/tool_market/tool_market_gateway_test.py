@@ -22,7 +22,7 @@ BOB = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"  # the market's Gamma s
 
 
 class FakeMarket:
-    lead_search_validation = ToolMarket.lead_search_validation
+    platform_call = ToolMarket.platform_call
     def __init__(self):
         self.used = set()
         self.seen = []
@@ -210,7 +210,7 @@ def test_lead_search_raw_v2_verification_preserves_vendor_verdict_and_actual_cha
     response = client.post(url, headers={"Authorization": "Bearer tab"}, json={
         "payload": {"email": "fixture@example.test"}, "forceToolRefresh": True})
     assert response.status_code == 200
-    assert response.json() == {"status": "completed", "toolResponse": {"raw": {"status": "invalid"}},
+    assert response.json() == {"status": "completed", "result": {"status": "invalid"}, "toolResponse": {"raw": {"status": "invalid"}},
                                "billing": {"cost_usd": 0.0051}, "call_id": "call1"}
     assert calls == [("tab", {"tool": "zerobounce", "operation": "validate", "private": True, "max_ask_microusd": 5899,
                                "params": {"email": "fixture@example.test"}})]

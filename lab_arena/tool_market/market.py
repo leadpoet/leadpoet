@@ -400,23 +400,44 @@ class ToolMarket:
 
     # Calls ------------------------------------------------------------------
     def lead_search_validation(self, token: str, request: Mapping[str, Any]) -> dict:
-        """Adapt Lead Search's raw-v2 ZeroBounce contract at the buyer boundary."""
-        ceiling = self._config.lead_search_verify_max_ask
-        if ceiling is None:
-            raise ToolMarketError(404, "verification_route_disabled")
+        """Original verification-only entry point."""
+        return self.platform_call(token, "zerobounce_validate", request)
+
+    def platform_call(self, token: str, alias: str, request: Mapping[str, Any], *, raw: bool = True) -> dict:
+        """Serve approved platform calls using the same private supply, reservations and settlement."""
+        from . import platform
+
+        if alias not in platform.OPERATIONS:
+            raise ToolMarketError(404, "tool_unavailable")
         if set(request) - {"payload", "forceToolRefresh"} or not isinstance(request.get("payload"), dict) or (
             type(request.get("forceToolRefresh", False)) is not bool
         ):
             raise ToolMarketError(400, "request_invalid")
-        # This endpoint serves platform customer data. Every call requires private supply.
-        result = self.call(token, {"tool": "zerobounce", "operation": "validate",
-                                     "params": request["payload"], "private": True, "max_ask_microusd": ceiling})
+        try:
+            tool, name, params, price_key = platform.platform_request(alias, request["payload"])
+        except catalog.CatalogError as exc:
+            raise ToolMarketError(400, exc.code) from None
+        legacy_verify = alias == "zerobounce_validate"
+        ceiling = self._config.lead_search_verify_max_ask if legacy_verify else self._config.platform_max_asks.get(price_key)
+        if ceiling is None:
+            raise ToolMarketError(404, "verification_route_disabled" if legacy_verify else "platform_route_disabled")
+        result = self.call(token, {"tool": tool, "operation": name, "params": params,
+                                   "private": True, "max_ask_microusd": ceiling})
         status, body = result["status"], result["body"]
-        op = catalog.operation("zerobounce", "validate")
+        op = catalog.operation(tool, name)
         answered = 200 <= op.status(status, body) < 300 and op.units(status, body) is not None
-        return {"call_id": result["call_id"], "status": "completed" if answered else "failed",
-                "toolResponse": {"raw": body} if answered else {},
-                "billing": {"cost_usd": result["charge_microusd"] / 1_000_000}}
+        verdict = "completed" if answered else "failed"
+        # Prospeo documents this exact 400 as a free, valid miss.
+        if alias == "prospeo_enrich_person" and status == 400 and isinstance(body, dict) and body.get("error_code") == "NO_MATCH":
+            verdict = "no_result"
+        view = {"rawV2": body} if raw and verdict != "failed" else {}
+        if legacy_verify and answered:
+            view["raw"] = body  # earlier Gamma verification clients read this field
+        answer = {"call_id": result["call_id"], "status": verdict, "toolResponse": view,
+                  "billing": {"cost_usd": result["charge_microusd"] / 1_000_000}}
+        if not raw and verdict != "failed":
+            answer["result"] = body
+        return answer
 
     def call(self, token: str, body: Mapping[str, Any], identity: Optional[BuyerIdentity] = None) -> Dict[str, Any]:
         """One catalog call, on a tab's ``token`` or, with ``identity`` (a

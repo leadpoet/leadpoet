@@ -21,14 +21,24 @@ from tests.tool_market.tool_market_pg_test import FakeGamma, database, store
 def test_private_platform_lookup_from_funded_tab_to_miner_statement(store, monkeypatch):
     buyer, miner = (Keypair.create_from_uri(uri) for uri in ("//Alice", "//Bob"))
     version, digest = next(iter(PUBLISHED_TERMS.items()))
-    cfg = ToolMarketConfig(mode="live", tools=frozenset({"zerobounce"}), gamma_service=miner.ss58_address,
+    cfg = ToolMarketConfig(mode="live", tools=frozenset({"zerobounce", "harvestapi"}), gamma_service=miner.ss58_address,
                            public_base_url="https://gw.example", terms_version=version, terms_sha256=digest,
-                           approved_suppliers=frozenset({("zerobounce", miner.ss58_address)}),
+                           approved_suppliers=frozenset({(tool, miner.ss58_address) for tool in ("zerobounce", "harvestapi")}),
+                           platform_max_asks={"harvestapi_get_profile.main": 1_800, "harvestapi_get_company": 1_800},
                            lead_search_verify_max_ask=5000, private_suppliers=frozenset({miner.ss58_address}))
     secret = "fixture-zb-key"
     statuses = iter(["valid", "unknown"])
     def provider(method, host, target, headers, body, timeout, limit):
         parsed = urlsplit(target)
+        if host == "api.harvestapi.io":
+            assert method == "GET" and headers["x-api-key"] == "fixture-harvest-key"
+            assert "authorization" not in headers
+            if parsed.path == "/linkedin/profile":
+                assert parse_qs(parsed.query) == {"query": ["https://www.linkedin.com/in/fixture"], "main": ["true"]}
+            else:
+                assert parsed.path == "/linkedin/company" and parse_qs(parsed.query) == {"query": ["fixture-company"]}
+            return UpstreamResponse(200, [("content-type", "application/json")],
+                                    b'{"status":200,"element":{"id":"fixture-id"}}')
         assert host == "api.zerobounce.net" and method == "GET"
         assert parse_qs(parsed.query)["api_key"] == [secret]
         if parsed.path == "/v2/getcredits":
@@ -81,5 +91,28 @@ def test_private_platform_lookup_from_funded_tab_to_miner_statement(store, monke
             assert refused.status_code == 503 and refused.json()["error"] == "no_supply"
             keys = signed(miner, "/tool-market/statement")["keys"]
             assert keys[0]["calls"] == 2 and keys[0]["owed_microusd"] == 5000
+
+            harvest_key = signed(miner, "/tool-market/keys", {"tool": "harvestapi", "daily_cap_microusd": 1_000_000,
+                                 "attestation": ATTESTATION, "envelope": _seal("fixture-harvest-key", provider="harvestapi",
+                                                                             hotkey=miner.ss58_address)})
+            signed(miner, "/tool-market/asks", {"key_id": harvest_key["key_id"], "ask_microusd": 1700})
+            for alias, payload, raw in (
+                ("harvestapi_get_profile", {"url":"https://www.linkedin.com/in/fixture","main":"true"}, True),
+                ("harvestapi_get_company", {"universalName":"fixture-company"}, False),
+            ):
+                route = f"/tool-market/api/v2/integrations/{alias}/execute"
+                transport_headers = headers if raw else {"authorization":"Bearer " + tab["token"]}
+                response = http.post(route, headers=transport_headers, json={"payload":payload})
+                assert response.status_code == 200
+                result = response.json()
+                view = result["toolResponse"]["rawV2"] if raw else result["result"]
+                assert view["element"]["id"] == "fixture-id" and result["billing"]["cost_usd"] == 0.00187
+
+            blocked = http.post("/tool-market/api/v2/integrations/harvestapi_get_profile/execute",
+                                headers=headers, json={"payload":{"url":"fixture"}})
+            assert blocked.status_code == 404  # only the short variant has an approved ceiling
+            entries = signed(miner, "/tool-market/statement")["keys"]
+            harvest = next(entry for entry in entries if entry["key_id"] == harvest_key["key_id"])
+            assert harvest["calls"] == 2 and harvest["owed_microusd"] == 3400
     finally:
         routes.configure()

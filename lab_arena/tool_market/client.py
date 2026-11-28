@@ -149,7 +149,7 @@ MCP_TOOLS = [
          "tool": {"type": "string"}, "operation": {"type": "string"},
          "params": {"type": "object", "description": "The operation's parameters, as find_tool lists them."},
          "max_ask_microusd": {"type": "integer", "description": "Optional: skip keys asking more per unit."},
-         "request_id": {"type": "string", "description": "A UUID retained by the buyer for this purchase."},
+         "request_id": {"type": "string", "description": "A lowercase UUID the buyer keeps for this purchase and reuses for its retries."},
          "private": {"type": "boolean", "description": "Optional: only suppliers that keep the request private."}}}},
 ]
 

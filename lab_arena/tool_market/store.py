@@ -1,7 +1,8 @@
 """Tool-market storage: thin typed calls to the ``tool_market_*_v1`` functions.
 
 All rules on stored state live in ``scripts/770-tool-market.sql`` and
-``scripts/771-tool-market-emission.sql``, and tests run them on a disposable PostgreSQL, as ``lab_arena.lead_orders.store`` does.
+``scripts/771-tool-market-emission.sql``, and tests run them on a disposable
+PostgreSQL, as ``lab_arena.lead_orders.store`` does.
 """
 
 from __future__ import annotations

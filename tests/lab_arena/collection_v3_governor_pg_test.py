@@ -375,3 +375,31 @@ def test_cutover_preserves_real_old_assignments_quotes_digests_and_missing_bill(
     p.record(inflight, token, "actual", 20, "gen-old-lease")
     p.finish(inflight, token, epoch=201)
     assert p.rpc("epoch_liability", 201) == 75 + 105 + 30
+
+
+def test_crashed_lease_expires_without_another_grant_or_replaying_its_provider_request(
+    gov,
+):
+    p = gov
+    capacity(p)
+    token = "sha256:" + digest("crashed")
+    j = claim(p, "crashed", token=token)
+    assert p.reserve(j, token, "no-native-reply", 55) == "reserved"
+    p.rpc("revoke", j["registration_id"], j["miner_hotkey"], "live")
+    # Advance only the local database fixture to the original lease deadline.
+    with p.driver.connect(**p.dsn) as conn, conn.cursor() as cur:
+        cur.execute("SET LOCAL session_replication_role=replica")
+        cur.execute(
+            "UPDATE public.collection_jobs SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE job_id=%s",
+            (j["job_id"],),
+        )
+    assert p.rpc("worker_funding") == 0
+    [held] = p.rpc("batch_jobs", j["batch_id"])
+    assert (
+        held["job_id"] == j["job_id"]
+        and held["status"] == "failed"
+        and held["price_microusd"] == 0
+    )
+    assert p.rpc("experiment_costs", j["batch_id"])[0]["unresolved"] == 1
+    assert p.rpc("epoch_liability", 202) == 83
+    assert p.rpc("worker_funding") == 0 and p.rpc("batch_jobs", j["batch_id"]) == [held]

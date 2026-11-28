@@ -1294,7 +1294,7 @@ def main(argv=None):
             if args.governed_workers:
                 args.max_jobs = limit
                 # No provider or chain traffic when every authorized limit is empty.
-                funds = database.rpc("collection_pool_fundable_v1", {})
+                funds = database.rpc("collection_worker_funding_v1", {})
                 if type(funds) is not int or funds<0:
                     raise ValueError("invalid signed pool capacity")
                 from scripts.collection_review import read_file

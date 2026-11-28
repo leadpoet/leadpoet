@@ -171,6 +171,28 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $$
     WHERE k.key_id=c.key_id AND b.http_status IN(401,402) AND c.created_at>statement_timestamp()-interval '1 hour')
 $$;
 
+-- A crashed worker may have consumed the last available funding. Preserve the
+-- original expiry behavior even when a cheap idle check suppresses all new probes.
+CREATE FUNCTION public.collection_expire_worker_leases_v1(p_pool_only boolean,p_epoch bigint)
+RETURNS void LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path=pg_catalog AS $$
+ WITH expired AS (
+  UPDATE public.collection_jobs SET status='failed',finished_at=clock_timestamp(),quality='{}'
+  WHERE status='running' AND lease_expires_at<=clock_timestamp() AND (NOT p_pool_only OR batch_id LIKE 'pool-%') RETURNING job_id
+ ) UPDATE public.collection_governed_jobs a SET finished_epoch=greatest(a.budget_epoch,
+    coalesce(p_epoch,(SELECT max(epoch) FROM public.collection_epoch_capacity),a.budget_epoch))
+ FROM expired e WHERE a.job_id=e.job_id
+$$;
+CREATE FUNCTION public.collection_worker_funding_v1() RETURNS bigint
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $$
+BEGIN
+ PERFORM pg_advisory_xact_lock(hashtextextended('lab-arena-claim-control',0));
+ PERFORM pg_advisory_xact_lock(hashtextextended('collection_claim:finney:71',0));
+ IF NOT EXISTS(SELECT FROM public.lab_arena_restart_claim_control
+    WHERE singleton AND NOT operator_paused AND guard_commitment='') THEN RETURN 0; END IF;
+ PERFORM public.collection_expire_worker_leases_v1(true,NULL);
+ RETURN public.collection_pool_fundable_v1();
+END $$;
+
 -- A route is the pinned provider route for one model. The original billing hold
 -- is never released because of this scheduling signal.
 CREATE FUNCTION public.collection_route_backoff_v1(p_model text,p_route text,p_wait integer DEFAULT 0)
@@ -211,6 +233,10 @@ BEGIN
  addition:=' gov_limit bigint; open_lanes integer; tier_count integer; available bigint; normal_funds bigint;';
  IF cardinality(string_to_array(body,marker))<>2 THEN RAISE EXCEPTION 'unexpected 773 allocator declarations'; END IF;
  body:=replace(body,marker,marker||addition);
+ marker:=$old$ UPDATE public.collection_jobs SET status='failed',finished_at=clock_timestamp(),quality='{}'
+ WHERE status='running' AND lease_expires_at<=clock_timestamp();$old$;
+ IF cardinality(string_to_array(body,marker))<>2 THEN RAISE EXCEPTION 'unexpected 773 lease expiry'; END IF;
+ body:=replace(body,marker,' PERFORM public.collection_expire_worker_leases_v1(false,p_epoch);');
  marker:='   SELECT coalesce(max(slot)+1,successor_first) INTO n FROM public.collection_jobs WHERE batch_id=p_batch;';
  IF cardinality(string_to_array(body,marker))<>2 THEN RAISE EXCEPTION 'unexpected 773 slot allocator'; END IF;
  body:=replace(body,marker,$new$
@@ -277,6 +303,8 @@ DO $$ DECLARE f regprocedure; BEGIN
  FOREACH f IN ARRAY ARRAY[
  'public.collection_governed_claim_v1(uuid,text,text,text,text,jsonb,jsonb,jsonb,jsonb,text,text,bigint,jsonb)'::regprocedure,
  'public.collection_worker_lanes_v1()'::regprocedure,
+ 'public.collection_worker_funding_v1()'::regprocedure,
+ 'public.collection_expire_worker_leases_v1(boolean,bigint)'::regprocedure,
  'public.collection_pool_pack_state_v1(text,integer)'::regprocedure,
  'public.collection_epoch_capacity_v1(bigint,bigint,text,jsonb)'::regprocedure,
  'public.collection_epoch_liability_v1(bigint)'::regprocedure,
@@ -287,7 +315,7 @@ DO $$ DECLARE f regprocedure; BEGIN
  'public.collection_set_worker_lanes_v1(integer)'::regprocedure] LOOP
   EXECUTE format('ALTER FUNCTION %s OWNER TO lab_arena_owner',f);
   EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC,anon,authenticated,service_role,lab_arena_service',f);
-  IF f NOT IN ('public.collection_set_worker_lanes_v1(integer)'::regprocedure,'public.collection_note_route_throttle_v1()'::regprocedure,'public.collection_index_pending_bill_v1()'::regprocedure)
+  IF f NOT IN ('public.collection_expire_worker_leases_v1(boolean,bigint)'::regprocedure,'public.collection_set_worker_lanes_v1(integer)'::regprocedure,'public.collection_note_route_throttle_v1()'::regprocedure,'public.collection_index_pending_bill_v1()'::regprocedure)
   THEN EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO lab_arena_service',f); END IF;
  END LOOP;
  IF NOT (SELECT had_create FROM pg_temp.governor_acl) THEN REVOKE CREATE ON SCHEMA public FROM lab_arena_owner; END IF;

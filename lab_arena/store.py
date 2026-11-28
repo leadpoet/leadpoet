@@ -384,6 +384,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "collection_public_miners_v1": (("p_after", "text"),),
     "collection_pool_active_v1": (),
     "collection_worker_lanes_v1": (),
+    "collection_worker_funding_v1": (),
     "collection_pool_fundable_v1": (("p_priority", "integer"),),
     "collection_epoch_capacity_v1": (("p_epoch","bigint"),("p_boundary","bigint"),("p_hash","text"),("p_valuation","jsonb")),
     "collection_route_backoff_v1": (("p_model","text"),("p_route","text"),("p_wait","integer")),

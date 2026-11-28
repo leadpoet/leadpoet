@@ -220,7 +220,7 @@ def test_empty_funding_never_runs_providers_or_processes(tmp_path, monkeypatch):
         seen.append(op)
         if op == "collection_pool_active_v1":
             return True
-        if op == "collection_pool_fundable_v1":
+        if op == "collection_worker_funding_v1":
             return 99999
         pytest.fail("unfunded worker tried to read additional services")
 
@@ -249,4 +249,4 @@ def test_empty_funding_never_runs_providers_or_processes(tmp_path, monkeypatch):
         )
         == 0
     )
-    assert seen == ["collection_pool_active_v1", "collection_pool_fundable_v1"]
+    assert seen == ["collection_pool_active_v1", "collection_worker_funding_v1"]

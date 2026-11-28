@@ -15,7 +15,7 @@ from Leadpoet.utils.subnet_epoch import SubnetEpochError
 from lab_arena import chain as chain_module
 from lab_arena.lead_orders.gamma import GammaBalanceReader
 from lab_arena.lead_orders.vault_client import VaultClient, VaultTransport
-from lab_arena.store import PostgrestTransport
+from lab_arena.store import ArenaStore, PostgrestTransport
 from lab_arena.tool_market.config import NETUID, ToolMarketConfig, ToolMarketConfigError
 from lab_arena.tool_market.market import ToolMarket
 from lab_arena.tool_market.store import ToolMarketStore
@@ -75,13 +75,34 @@ class MarketGammaReader(GammaBalanceReader):
         return epoch
 
 
+def _purchase_epoch(current_epoch, collection_store, market_store):
+    """Verify the immutable collection cutover and accounting migration before the first vendor call."""
+    ready = False
+
+    def read():
+        nonlocal ready
+        epoch = current_epoch()
+        if not ready:
+            first = collection_store.collection_reward_start_epoch()
+            if first is None or epoch < first:
+                raise chain_module.ArenaChainError("supplier emission lane is not active")
+            # A false result is normal before the first sale. An unavailable RPC
+            # raises and leaves paid admission closed until the next attempt.
+            market_store.has_unallocated(epoch=epoch)
+            ready = True
+        return epoch
+
+    return read
+
+
 def build_from_environment(config: ToolMarketConfig):
     """The live market for ``config``, which ``gateway_support`` loads and checks."""
 
     env = os.environ
-    store = ToolMarketStore(PostgrestTransport(
+    transport = PostgrestTransport(
         _required("LAB_ARENA_SUPABASE_URL", env), service_key=_required("LAB_ARENA_SERVICE_KEY", env),
-    ))
+    )
+    store = ToolMarketStore(transport)
     chain_config = chain_module.ArenaChainConfig(
         endpoint=_required("LAB_ARENA_CHAIN_ENDPOINT", env), netuid=NETUID,
         network_name=env.get("LAB_ARENA_NETWORK", "finney"),
@@ -97,7 +118,7 @@ def build_from_environment(config: ToolMarketConfig):
     gamma = MarketGammaReader(arena_chain, config.gamma_service, cutover, store)
     return ToolMarket(
         config=config, store=store, vault=vault, transport=VaultTransport(vault),
-        gamma_reader=gamma, current_epoch=gamma.current_epoch,
+        gamma_reader=gamma, current_epoch=_purchase_epoch(gamma.current_epoch, ArenaStore(transport), store),
         is_registered=lambda hotkey: chain_module.is_registered(arena_chain.metagraph(), hotkey),
     )
 

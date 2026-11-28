@@ -313,6 +313,16 @@ the request.
 - This lowers the risk; it does not remove it. The vendor still holds the
   data.
 
+## Retrying after a lost HTTP response
+
+For a native paid call, generate a UUID for `request_id` before sending and
+persist it with the purchase. Reuse it for that logical purchase across
+tabs and fresh signatures. The gateway accepts one dispatch sequence per
+buyer and ID. A duplicate that reaches the purchase guard receives HTTP 409
+and the candidate call IDs for reconciliation against that buyer’s usage
+history. An interrupted sequence can have zero receipts. This mechanism
+does not store or replay vendor data. A fresh ID starts a separate purchase.
+
 ## Usage history
 
 `GET /tool-market/usage?after=<watermark>&limit=<1-500, default 100>`, signed by the

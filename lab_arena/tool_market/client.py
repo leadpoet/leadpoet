@@ -115,10 +115,12 @@ class Client:
         return self.request("GET", "/tool-market/catalog")
 
     def call(self, tool: str, operation: str, params: Dict[str, Any],
-             max_ask_microusd: Optional[int] = None, private: Any = False) -> Dict[str, Any]:
+             max_ask_microusd: Optional[int] = None, private: Any = False, request_id: Optional[str] = None) -> Dict[str, Any]:
         """On the API key when one is set, else signed by the hotkey."""
 
         body: Dict[str, Any] = {"tool": tool, "operation": operation, "params": params, "private": private}
+        if request_id is not None:
+            body["request_id"] = request_id
         if max_ask_microusd is not None:
             body["max_ask_microusd"] = max_ask_microusd
         return self.request("POST", "/tool-market/call", body, signed=not self.api_key)
@@ -138,6 +140,7 @@ MCP_TOOLS = [
          "tool": {"type": "string"}, "operation": {"type": "string"},
          "params": {"type": "object", "description": "The operation's parameters, as find_tool lists them."},
          "max_ask_microusd": {"type": "integer", "description": "Optional: skip keys asking more per unit."},
+         "request_id": {"type": "string", "description": "A UUID retained by the buyer for this purchase."},
          "private": {"type": "boolean", "description": "Optional: only suppliers that keep the request private."}}}},
 ]
 
@@ -163,7 +166,7 @@ def mcp_answer(client: Client, message: Dict[str, Any]) -> Optional[Dict[str, An
         elif name == "call_tool":
             answer = client.call(str(arguments.get("tool", "")), str(arguments.get("operation", "")),
                                  arguments.get("params") or {}, arguments.get("max_ask_microusd"),
-                                 arguments.get("private", False))
+                                 arguments.get("private", False), arguments.get("request_id"))
         else:
             return {"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32602, "message": "unknown tool"}}
         result = {"content": [{"type": "text", "text": json.dumps(answer)}], "isError": "error" in answer or (isinstance(answer.get("status"), int) and answer["status"] >= 400)}
@@ -222,6 +225,7 @@ def main(argv: Optional[list] = None) -> int:
     call.add_argument("tool")
     call.add_argument("operation")
     call.add_argument("params", nargs="*")
+    call.add_argument("--request-id", help="buyer-generated UUID; reuse for the same logical purchase")
     call.add_argument("--max-ask-microusd", type=int, help="maximum miner ask per unit before the fee")
     call.add_argument("--private", action="store_true", help="only suppliers that keep the request private")
     commands.add_parser("mcp", help="run the MCP server on stdio")
@@ -271,7 +275,7 @@ def main(argv: Optional[list] = None) -> int:
                 params[name.removesuffix(":")] = json.loads(text) if name.endswith(":") else text
             except ValueError:
                 parser.error("%s is not JSON" % name)
-        answer = client.call(args.tool, args.operation, params, max_ask_microusd=args.max_ask_microusd, private=args.private)
+        answer = client.call(args.tool, args.operation, params, max_ask_microusd=args.max_ask_microusd, private=args.private, request_id=args.request_id)
     else:
         serve_mcp(client)
         return 0

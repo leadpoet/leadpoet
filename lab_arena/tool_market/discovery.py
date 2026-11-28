@@ -43,6 +43,7 @@ def _operation_schema(op: catalog.Operation) -> Dict[str, Any]:
     required = sorted(name for name, p in op.params.items() if p.required)
     return {"type": "object", "description": op.does, "required": ["tool", "operation", "params"],
             "properties": {"tool": {"enum": [op.tool]}, "operation": {"enum": [op.name]},
+                           "request_id": {"type": "string", "format": "uuid", "description": "Reuse for retries of this purchase."},
                            "params": {"type": "object", "properties": params, "required": required,
                                       "additionalProperties": False},
                            "max_ask_microusd": {"type": "integer", "description": "Skip keys asking more per unit."},

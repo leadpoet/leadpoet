@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from typing import FrozenSet, Mapping, Optional, Tuple
+from typing import FrozenSet, Mapping, Optional
 from urllib.parse import urlsplit
 
 from lab_arena.lead_orders.auth import normalize_host

@@ -1154,3 +1154,15 @@ def test_platform_email_verification_without_a_buyer_limit_uses_the_book(world):
     result = world.market.platform_call(token, "zerobounce_validate", {"payload": {"email": "test@example.test"}})
     assert result["status"] == "completed" and result["billing"]["cost_usd"] == 0.0077
     assert world.market.statement(miner)["keys"][0]["owed_microusd"] == 7_000
+
+
+def test_a_tool_turned_off_takes_no_new_price_or_check_but_its_asks_can_be_withdrawn(world, monkeypatch):
+    miner, key_id = world.miner_key("off-key", 4_000, tool="zerobounce")
+    monkeypatch.setattr(world.market, "_config", dataclasses.replace(
+        world.market._config, tools=world.market._config.tools - {"zerobounce"}))
+    for refused in (lambda: world.market.post_ask(world.who(miner), {"key_id": key_id, "ask_microusd": 5_000}),
+                    lambda: world.market.check_key(world.who(miner), key_id)):
+        with pytest.raises(ToolMarketError) as off:
+            refused()
+        assert (off.value.status, off.value.code) == (404, "tool_unavailable")
+    world.market.post_ask(world.who(miner), {"key_id": key_id, "ask_microusd": None})

@@ -109,7 +109,8 @@ class Client:
         # still be charged.
         except (TimeoutError, ConnectionError, http.client.HTTPException):
             return {"error": "outcome_unknown", "status": 0,
-                    "hint": "usage shows a call after 11 minutes; a retry before then can pay twice"}
+                    "hint": "the request may have taken effect; usage shows a call after 11 minutes, and a "
+                            "call retried with its request_id cannot pay twice (a new ID can)"}
         try:
             document = json.loads(raw or b"{}")
         except ValueError:

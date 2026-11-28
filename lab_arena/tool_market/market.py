@@ -704,9 +704,6 @@ class ToolMarket:
             # bears it, and a retry could use it twice.
             settle("uncertain", error.observed_status)
             raise ToolMarketError(502, "vendor_unreachable", call_id=call_id) from None
-        if not 100 <= response.status <= 599:  # http.client takes any three digits; the ledger stores real ones
-            settle("uncertain", None)
-            raise ToolMarketError(502, "vendor_unreachable", call_id=call_id)
         document = _document(response.body)
         status = op.status(response.status, document)
         # 401 and 402 may mean the key is unusable. A 429, Retry-After or not,

@@ -192,6 +192,8 @@ class VaultTransport:
                 deepline_job_id=arena_broker._deepline_response_header_request_id(seen) if provider == "deepline" else None)
         try:
             status = int(result["status"])
+            if not 100 <= status <= 599:  # http.client takes any three digits; the ledgers store real ones
+                raise ValueError
             response_headers = _headers(result.get("headers"))
             content = base64.b64decode(result.get("body_b64") or "", validate=True)
         except (KeyError, TypeError, ValueError):

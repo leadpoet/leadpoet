@@ -1061,6 +1061,20 @@ def test_receipts_check_trusts_only_the_verified_receipts_key():
     assert cli.audit_receipts(page, _identity())["bad_signatures"] == [1]
 
 
+def test_a_vendor_status_outside_http_is_an_unknown_outcome():
+    from lab_arena.lead_orders.vault_client import VaultTransport, VaultTransportError
+
+    vault = _vault(FakeProvider({"/api/v1/chat/completions": UpstreamResponse(777, [], b"{}")}))
+
+    class Direct:
+        def call(self, document, timeout):
+            return vault.call(document)
+
+    with pytest.raises(VaultTransportError) as odd:  # the ledgers' status checks would refuse it
+        _send(VaultTransport(Direct()))
+    assert odd.value.forwarded is None
+
+
 def test_a_timeout_after_headers_keeps_the_generation_id_for_the_cost_read_back():
     from lab_arena.lead_orders.vault_client import VaultTransport, VaultTransportError
 

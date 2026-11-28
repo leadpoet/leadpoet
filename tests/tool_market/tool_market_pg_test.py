@@ -1145,3 +1145,13 @@ def test_a_call_reserves_keys_only_soon_after_it_arrives(world, monkeypatch):
         world.market.call(token, dict(PROFILE, request_id=request_id))  # the same ID still works
     assert (late.value.status, late.value.code) == (503, "no_supply")
     assert [sent[0] for sent in world.vendor.sent] == ["late-cheap"]
+
+
+def test_platform_email_verification_without_a_buyer_limit_uses_the_book(world):
+    miner, _ = world.miner_key("fixture-zb-provider", 7_000, tool="zerobounce")
+    world.market._config = dataclasses.replace(world.market._config, private_suppliers=frozenset({miner}))
+    world.vendor.script["fixture-zb-provider"] = [ok({"status": "valid"})]
+    _, token = world.buyer()
+    result = world.market.platform_call(token, "zerobounce_validate", {"payload": {"email": "test@example.test"}})
+    assert result["status"] == "completed" and result["billing"]["cost_usd"] == 0.0077
+    assert world.market.statement(miner)["keys"][0]["owed_microusd"] == 7_000

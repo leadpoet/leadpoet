@@ -455,10 +455,12 @@ class ToolMarket:
             raise ToolMarketError(400, exc.code) from None
         legacy_verify = alias == "zerobounce_validate"
         ceiling = self._config.platform_max_asks.get(price_key)
-        if ceiling is None:
-            raise ToolMarketError(404, "verification_route_disabled" if legacy_verify else "platform_route_disabled")
-        result = self.call(token, {"tool": tool, "operation": name, "params": params,
-                                   "private": True, "max_ask_microusd": ceiling}, arrived=arrived)
+        if ceiling is None and not legacy_verify:
+            raise ToolMarketError(404, "platform_route_disabled")
+        purchase = {"tool": tool, "operation": name, "params": params, "private": True}
+        if ceiling is not None:
+            purchase["max_ask_microusd"] = ceiling
+        result = self.call(token, purchase, arrived=arrived)
         status, body = result["status"], result["body"]
         op = catalog.operation(tool, name)
         real = op.status(status, body)

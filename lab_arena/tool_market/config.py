@@ -91,7 +91,7 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
         platform_limits = json.loads(env.get(PLATFORM_MAX_ASKS_ENV, "{}"))
     except (ValueError, RecursionError):
         raise ToolMarketConfigError(f"{PLATFORM_MAX_ASKS_ENV} must be a JSON object") from None
-    # ZeroBounce's ceiling has its own, older variable, and only that one: unset, the route is off.
+    # ZeroBounce's ceiling has its own, older variable, and only that one: unset, verification uses the market price.
     if not isinstance(platform_limits, dict) or "zerobounce_validate" in platform_limits:
         raise ToolMarketConfigError(f"{PLATFORM_MAX_ASKS_ENV} must be a JSON object without zerobounce_validate, "
                                     f"whose ceiling is {VERIFY_MAX_ASK_ENV}")

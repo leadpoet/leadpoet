@@ -138,7 +138,8 @@ def workflow_sources(
         if corrections
         else {POET_REV}
     )
-    if builder_revision not in allowed:
+    from lab_arena.collection_programs import registered_builder
+    if builder_revision not in allowed and not (corrections and registered_builder(builder_revision)):
         raise ValueError("unapproved workflow builder revision")
     with tempfile.TemporaryDirectory(prefix="collection-pinned-") as temp:
         root = Path(temp).resolve()
@@ -166,6 +167,7 @@ def workflow_sources(
                 CORRECTION_CHAMPION_REV if corrections else CHAMPION_REV
             )
             builders.source_revision = builder_revision
+            builders.poet_repo = Path(poet_repo).resolve()
             # These are the producer's committed frozen evaluation identities.
             # A batch creator cannot reclassify an evaluation template as training.
             frozen = json.loads((tasks / "FROZEN_V2.json").read_bytes())
@@ -186,11 +188,15 @@ def workflow_sources(
 
 def build_scenario(builders, scenario_id):
     match = re.fullmatch(
-        r"(C\d{2}|K\d{2}|B[1-8]|E[1-7]|P[1-9]|P10)-s([1-9]\d{0,7})", scenario_id
+        r"(C\d{2}|K\d{2}|B[1-8]|E[1-7]|P[1-9]\d{0,3})-s([1-9]\d{0,7})", scenario_id
     )
     if not match:
         raise ValueError("unknown workflow scenario id")
     task_id, seed = match[1], int(match[2])
+    if task_id.startswith("P") and int(task_id[1:]) > 10:
+        from lab_arena.collection_programs import sandbox
+        if sandbox(task_id)["builder"] != builders.source_revision:
+            raise ValueError("unapproved registered builder")
     task = builders.build(task_id, seed)
     if not builders.guard.stamped(builders.plain(task)):
         raise ValueError("unverified scenario build")

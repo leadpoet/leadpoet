@@ -62,10 +62,12 @@ def admit_built_split(builders, task, shape, split):
         raise ValueError("scenario uses a frozen evaluation template")
     from lab_arena.collection_workflow import NATIVE_PARTITIONS
 
-    if identity["template_id"] in NATIVE_PARTITIONS:
-        if not hasattr(
-            builders, "training_partition"
-        ) or split != builders.training_partition(identity["template_id"]):
+    if identity["template_id"] in NATIVE_PARTITIONS or task.get("built_by") == "sandbox.v3":
+        from lab_arena.collection_programs import producer_partition
+        if not hasattr(builders, "training_partition") or split != (
+            producer_partition(builders, identity["template_id"], int(task["seed"]))
+            if task.get("built_by") == "sandbox.v3" else builders.training_partition(identity["template_id"])
+        ):
             raise ValueError(
                 f"split differs from the producer-approved {identity['template_id']} partition"
             )
@@ -76,6 +78,14 @@ def require_release_partition(settings):
     """Historical C/K/B/E/P1–P6 are known evaluation templates at their original pins."""
     from lab_arena.collection_workflow import NATIVE_PARTITIONS as pins
 
+    if "program" in settings:
+        from lab_arena.collection_programs import identity, sandbox
+        family = settings["program"]["sandbox"]
+        entry = sandbox(family)
+        if (entry["kind"] != "train" or settings["split_sha256"] != entry["partition"]
+                or any(identity(c["scenario_id"])[0] != family for c in settings["cases"])):
+            raise ValueError("registered sandbox lacks its pinned training partition")
+        return
     families = {case["scenario_id"].split("-s")[0] for case in settings["cases"]}
     if (
         len(families) != 1

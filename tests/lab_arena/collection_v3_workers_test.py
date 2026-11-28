@@ -250,3 +250,23 @@ def test_empty_funding_never_runs_providers_or_processes(tmp_path, monkeypatch):
         == 0
     )
     assert seen == ["collection_pool_active_v1", "collection_worker_funding_v1"]
+
+
+def test_fundable_program_skips_completed_finite_and_running_packs(tmp_path):
+    from types import SimpleNamespace
+    spec = pool_raw(repeats=1)
+    spec.pop("successor_seeds")
+    name = load_experiment(spec, PROMPT).batch_id
+    store_private_json(tmp_path / (name+".json"), spec)
+    states = []
+    def db(state):
+        def rpc(name, args):
+            assert name == "collection_pool_pack_state_v1" and args["p_slots"] == 1
+            states.append(state)
+            return state
+        return SimpleNamespace(rpc=rpc)
+    assert not worker._fundable_program(tmp_path,db("open"),0)
+    assert not states
+    assert not worker._fundable_program(tmp_path,db("complete"),100000)
+    assert not worker._fundable_program(tmp_path,db("running"),100000)
+    assert worker._fundable_program(tmp_path,db("open"),100000)

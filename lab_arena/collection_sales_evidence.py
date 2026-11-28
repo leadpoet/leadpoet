@@ -120,6 +120,9 @@ def _history(objects, job, manifest, row, packet, *, classify_grounding=False):
             packet["full_evidence"],
             128 * 1024 * 1024,
         )
+    from lab_arena.collection_programs import canonical_tool
+    program = manifest.get("experiment", {}).get("program")
+
     reference = _memo(
         json.loads(packet["reference_answer"])["files"]["qualification.json"]
     )
@@ -149,7 +152,7 @@ def _history(objects, job, manifest, row, packet, *, classify_grounding=False):
                 if msg["role"] == "assistant":
                     for c in msg.get("tool_calls", []):
                         function = c["function"]
-                        inherited[c["id"]] = function["name"]
+                        inherited[c["id"]] = canonical_tool(program, function["name"])
                         if (
                             function["name"] == "write_file"
                             and _memo(function["arguments"]).get("path")
@@ -231,7 +234,7 @@ def _history(objects, job, manifest, row, packet, *, classify_grounding=False):
         elif e["kind"] == "reply":
             action = e["message"]
         elif e["kind"] == "tool":
-            if e["name"] == "archive_search":
+            if canonical_tool(program, e["name"]) == "archive_search":
                 d = _memo(e["output"])
                 found = [record["source_id"] for record in d.get("results", [])]
                 discovered.update(found)
@@ -252,7 +255,7 @@ def _history(objects, job, manifest, row, packet, *, classify_grounding=False):
                         "returned": found,
                     }
                 )
-            if e["name"] == "archive_open":
+            if canonical_tool(program, e["name"]) == "archive_open":
                 d = _memo(e["output"])
                 key = d.get("source_id")
                 if key is not None:

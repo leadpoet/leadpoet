@@ -1144,6 +1144,50 @@ def governed_tick(args, lane, deadline):
         db.close()
 
 
+def _init_collection_process():
+    # The SDK registers a regular atexit hook. A multiprocessing child closes its
+    # log pipe earlier, so drain that child's listener before queue finalizers.
+    import atexit
+    from multiprocessing.util import Finalize
+
+    def stop_sdk_listener():
+        logs = sys.modules.get("bittensor.utils.btlogging")
+        listener = getattr(getattr(logs, "logging", None), "_listener", None)
+        if listener is not None and getattr(listener, "_thread", None) is not None:
+            atexit.unregister(listener.stop)
+            listener.stop()
+    Finalize(None, stop_sdk_listener, exitpriority=20)
+
+
+def _fundable_program(directory, database, funds):
+    """Scheduling hint only. The atomic DB preview and lease still authorize every charged call."""
+    from scripts.collection_review import read_file
+    if funds == 0:
+        return False
+    configured = False
+    for path in sorted(directory.glob("pool-*.json")):
+        try:
+            raw = json.loads(read_file(path))
+            arms = raw["arms"]
+            caps = [a["budget_microusd"] for a in arms]
+            slots = len(raw["cases"]) * sum(a["repeats"] for a in arms)
+            if not caps or not all(type(c) is int and c > 0 for c in caps) or not 1 <= slots <= 4096:
+                continue
+        except (ValueError, KeyError, OSError, TypeError):
+            continue
+        configured = True
+        if min(caps) > funds:
+            continue
+        state = database.rpc("collection_pool_pack_state_v1", {"p_batch": path.stem, "p_slots": slots})
+        if state not in ("complete", "open", "running"):
+            raise ValueError("invalid funded pack state")
+        if state == "open" or (state == "complete" and raw.get("successor_seeds")):
+            return True
+    if not configured:
+        raise ValueError("no standing program is configured")
+    return False
+
+
 def run_governed_lanes(
     args,
     lanes,
@@ -1167,7 +1211,7 @@ def run_governed_lanes(
         return 0
     if executor is None:
         executor = ProcessPoolExecutor(
-            max_workers=lanes, mp_context=get_context("spawn")
+            max_workers=lanes, mp_context=get_context("spawn"), initializer=_init_collection_process
         )
     with executor as workers:
         running = {
@@ -1297,17 +1341,7 @@ def main(argv=None):
                 funds = database.rpc("collection_worker_funding_v1", {})
                 if type(funds) is not int or funds<0:
                     raise ValueError("invalid signed pool capacity")
-                from scripts.collection_review import read_file
-                budgets = []
-                for path in args.offer_directory.glob("pool-*.json"):
-                    try:
-                        arms = json.loads(read_file(path))["arms"]
-                        budgets.extend(a["budget_microusd"] for a in arms if isinstance(a,dict) and type(a.get("budget_microusd")) is int and a["budget_microusd"]>0)
-                    except (ValueError,KeyError,OSError,TypeError):
-                        continue  # Full per-pack validation is performed before any lease.
-                if not budgets:
-                    raise ValueError("no standing program is configured")
-                if funds >= min(budgets):
+                if _fundable_program(args.offer_directory, database, funds):
                     run_governed_lanes(args,database.rpc("collection_worker_lanes_v1",{}))
                 return 0
             def scan():

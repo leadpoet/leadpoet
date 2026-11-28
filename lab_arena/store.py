@@ -383,6 +383,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "collection_batch_jobs_v1": (("p_batch", "text"),),
     "collection_public_miners_v1": (("p_after", "text"),),
     "collection_pool_active_v1": (),
+    "collection_registered_sandbox_v1": (("p_family", "text"),),
     "collection_worker_lanes_v1": (),
     "collection_worker_funding_v1": (),
     "collection_pool_fundable_v1": (("p_priority", "integer"),),

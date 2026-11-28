@@ -43,6 +43,7 @@ setup(
         ],
         "leadpoet_canonical.config": ["stateful-epoch-cutover-sn71.json"],
         "lab_arena": [
+            "sandbox_programs_v3.json",
             "chain_signing_profile_v2.json",
             "chain_signing_profile_test_v2.json",
         ],

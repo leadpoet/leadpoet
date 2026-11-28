@@ -138,8 +138,9 @@ All under `/tool-market`.
   their stored signature must be re-checkable later.
 
 `GET /catalog` lists every tool that trades: its operations, one line on
-what each does, their parameters, its price ceiling, and the first ask a
-call tries with what a buyer pays for it, so an agent can pick a tool by
+what each does, their parameters, its price ceiling, and the cheapest
+tool-wide ask with what a buyer pays for it (`?operation=` on the book
+quotes one operation, its own asks included), so an agent can pick a tool by
 the job it needs done. A request with a bad parameter is refused before
 any charge. `GET /books/{tool}` shows the asks and what a buyer pays for
 each, with no miner hotkeys and no key data.
@@ -526,6 +527,8 @@ A tool is data, not a new code path:
    routes it may call, and its free balance check. The vault is a separate
    attested image, so it keeps this allowlist rather than trusting the
    gateway's catalog. A vault change needs a new vault release.
+3. Its `REQUEST_PRIVACY` entry in `catalog.py`: `unverified` until Leadpoet
+   checks the vendor's account terms.
 
 ## 2.0 list
 

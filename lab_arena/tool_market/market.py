@@ -54,7 +54,8 @@ NO_SESSION = Session()
 MAX_KEYS_PER_CALL = 3
 # A call reserves a key only this long after it reached the gateway (queueing,
 # the chain and earlier keys count), so it ends within 3 minutes: then one key
-# (30 s, the vault's 15, a reconnect) and its 402 re-check (45 s, a reconnect).
+# (its operation timeout, 30 s or Harvest lead search's 90 s, plus the vault's
+# 15 and a reconnect) and, for a tool with a balance check, its 402 re-check (45 s).
 # The gateway's stop grace and the client's timeout sit above that. A call too
 # late for its first key answers 503 busy, nothing reserved.
 FAILOVER_SECONDS = 30.0
@@ -409,7 +410,7 @@ class ToolMarket:
 
     def tool_catalog(self) -> Dict[str, Any]:
         """Every tool that trades: its operations and their parameters, its
-        price ceiling, and the cheapest ask now. Public, for agents."""
+        price ceiling, and the cheapest tool-wide ask now. Public, for agents."""
 
         tools = []
         for tool in sorted(self._config.tools):

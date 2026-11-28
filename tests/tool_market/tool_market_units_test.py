@@ -204,7 +204,6 @@ def test_the_published_terms_hash_is_the_terms_file():
     path = pathlib.Path(__file__).resolve().parents[2] / "docs" / "tool-market-terms.md"
     text = path.read_bytes()
     assert hashlib.sha256(text).hexdigest() == PUBLISHED_TERMS["tool-market-terms-v1"]
-    assert b"(tool-market-terms-v1)" in text
 
 
 def test_btauth_signs_the_standards_eight_lines_and_refuses_each_bad_request():

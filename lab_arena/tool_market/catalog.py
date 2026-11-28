@@ -15,9 +15,9 @@ Usage units:
   A miner asks a price in micro-USD per vendor USD (``900000`` sells at 90%
   of the vendor's price), and the call counts the reported micro-USD.
 
-Adding a tool is data, not code: one ``Operation`` per endpoint here, plus
-the tool's key placement and route rule in ``lead_order_vault.tools.TOOLS``,
-which the attested vault enforces on its own.
+Adding a tool is data, not code: one ``Operation`` per endpoint and a
+``REQUEST_PRIVACY`` entry here, plus the tool's key placement and route rule
+in ``lead_order_vault.tools.TOOLS``, which the attested vault enforces on its own.
 """
 
 from __future__ import annotations
@@ -420,7 +420,7 @@ REQUEST_PRIVACY: Dict[str, str] = {
 assert set(REQUEST_PRIVACY) == set(TOOLS) and set(REQUEST_PRIVACY.values()) <= {"visible", "unverified", "private"}
 _NAME_RE = re.compile(r"^[a-z_]{1,40}$")
 
-# One unit per tool, so one ask prices every operation of that tool. A
+# One unit per tool, so its ask ceiling and unit hold for every operation. A
 # vendor-USD operation must read the vendor's cost. Agents choose by task,
 # so every operation says what it does.
 assert all(op.unit == TOOLS[op.tool] and (op.unit == UNIT_CALL or op.cost) and op.does for op in _OPERATIONS)

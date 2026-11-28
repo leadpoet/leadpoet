@@ -24,8 +24,6 @@ TOOLS_OFF_ENV = "LEADPOET_TOOL_MARKET_TOOLS_OFF"
 VERIFY_MAX_ASK_ENV = "LEADPOET_TOOL_MARKET_VERIFY_MAX_ASK_MICROUSD"
 PLATFORM_MAX_ASKS_ENV = "LEADPOET_TOOL_MARKET_PLATFORM_MAX_ASKS"
 BUYERS_ENV = "LEADPOET_TOOL_MARKET_BUYER_HOTKEYS"
-# Retired: supply is open to registered miners. Still set, it would read as a gate that is not there.
-RETIRED_APPROVED_SUPPLIERS_ENV = "LEADPOET_TOOL_MARKET_APPROVED_SUPPLIERS"
 PRIVATE_SUPPLIERS_ENV = "LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS"
 GAMMA_SERVICE_ENV = "LEADPOET_TOOL_MARKET_GAMMA_SERVICE"
 TERMS_VERSION_ENV = "LEADPOET_TOOL_MARKET_TERMS_VERSION"
@@ -89,9 +87,6 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
     tools = frozenset(TOOLS) - off
     buyers = frozenset(h.strip() for h in env.get(BUYERS_ENV, "").split(",") if h.strip())
     private = frozenset(h.strip() for h in env.get(PRIVATE_SUPPLIERS_ENV, "").split(",") if h.strip())
-    if env.get(RETIRED_APPROVED_SUPPLIERS_ENV, "").strip():
-        raise ToolMarketConfigError("%s is retired: any registered miner may supply; unset it"
-                                    % RETIRED_APPROVED_SUPPLIERS_ENV)
     try:
         platform_limits = json.loads(env.get(PLATFORM_MAX_ASKS_ENV, "{}"))
     except (ValueError, RecursionError):

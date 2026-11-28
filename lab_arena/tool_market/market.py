@@ -751,18 +751,17 @@ class ToolMarket:
         on the subnet supply, since only they can be paid."""
 
         rows = self._store.book(tool=tool, terms_sha256=self._config.terms_sha256, operation=operation)
-        try:
-            return book.rank(book.Ask.from_row(row) for row in rows if self._is_registered(row["miner_hotkey"]))
-        except ArenaChainError:
-            raise ToolMarketError(503, "chain_unavailable") from None
+        return book.rank(book.Ask.from_row(row) for row in rows if self._registered(row["miner_hotkey"]))
 
     def _require_registered(self, hotkey: str) -> None:
+        if not self._registered(hotkey):
+            raise ToolMarketError(403, "miner_not_registered")
+
+    def _registered(self, hotkey: str) -> bool:
         try:
-            registered = self._is_registered(hotkey)
+            return self._is_registered(hotkey)
         except ArenaChainError:
             raise ToolMarketError(503, "chain_unavailable") from None
-        if not registered:
-            raise ToolMarketError(403, "miner_not_registered")
 
     def _check(self, tool: str, envelope: str) -> Mapping[str, Any]:
         try:

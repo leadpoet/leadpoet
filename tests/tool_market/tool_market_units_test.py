@@ -185,8 +185,7 @@ def test_config_is_off_by_default_and_strict_when_live():
                 {"LEADPOET_LEAD_ORDERS_GAMMA_SERVICE": ALICE}, {"LEADPOET_TOOL_MARKET_TERMS_VERSION": "tool-market-terms-v0"},
                 {"LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL": "http://gw.example"},
                 {"LEADPOET_TOOL_MARKET_GAMMA_SERVICE": "71"}, {"LEADPOET_TOOL_MARKET_BUYER_HOTKEYS": "nope"},
-                {"LEADPOET_TOOL_MARKET_MODE": "staff"}, {"LAB_ARENA_NETUID": "72"},
-                {"LEADPOET_TOOL_MARKET_APPROVED_SUPPLIERS": ALICE}):  # retired: supply is open, not allowlisted
+                {"LEADPOET_TOOL_MARKET_MODE": "staff"}, {"LAB_ARENA_NETUID": "72"}):
         with pytest.raises(ToolMarketConfigError):
             load_config(dict(live, **bad))
 

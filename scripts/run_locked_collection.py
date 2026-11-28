@@ -984,7 +984,9 @@ def poll_pool_experiments(prompt, directory, database, run, *, successor_leader=
             if attempted and lane is None:
                 return 0
         except Exception as exc:
-            if attempted:
+            # The same chain is used for every program. Trying unrelated packs
+            # cannot restore finality or ownership evidence during an RPC outage.
+            if attempted or (lane is not None and isinstance(exc, chain.ArenaChainError)):
                 raise
             unavailable(spec.batch_id, exc)
             failures = True
@@ -1102,7 +1104,19 @@ def governed_tick(args, lane, deadline):
     settled = []
     prompt = json.loads(args.prompt.read_bytes())
 
+    tick_epoch = None
+
+    def epoch_for_tick(client, cutover, database, lock):
+        nonlocal tick_epoch
+        if tick_epoch is None:
+            from lab_arena.collection_governor import prepare_epoch
+            tick_epoch = prepare_epoch(client, cutover, database, lock)
+        return tick_epoch
+
     def run(raw, *, before_claim):
+        if time.monotonic() >= deadline or not _worker_timer_active():
+            raise LaneDraining()
+
         def mark_claim():
             if time.monotonic() >= deadline or not _worker_timer_active():
                 raise LaneDraining()
@@ -1113,7 +1127,7 @@ def governed_tick(args, lane, deadline):
             argparse.ArgumentParser(),
             raw,
             before_claim=mark_claim,
-            on_pool_settled=settled.append,
+            on_pool_settled=settled.append, epoch_for_tick=epoch_for_tick,
         )
 
     try:
@@ -1156,6 +1170,8 @@ def _init_collection_process():
         if listener is not None and getattr(listener, "_thread", None) is not None:
             atexit.unregister(listener.stop)
             listener.stop()
+    from lab_arena.collection_chain_access import close_lane_chain
+    Finalize(None, close_lane_chain, exitpriority=25)
     Finalize(None, stop_sdk_listener, exitpriority=20)
 
 
@@ -1341,7 +1357,8 @@ def main(argv=None):
                 funds = database.rpc("collection_worker_funding_v1", {})
                 if type(funds) is not int or funds<0:
                     raise ValueError("invalid signed pool capacity")
-                if _fundable_program(args.offer_directory, database, funds):
+                from lab_arena.collection_chain_access import chain_cooling
+                if not chain_cooling(args.offer_directory) and _fundable_program(args.offer_directory, database, funds):
                     run_governed_lanes(args,database.rpc("collection_worker_lanes_v1",{}))
                 return 0
             def scan():
@@ -1447,7 +1464,7 @@ def main(argv=None):
     return 0
 
 
-def _run_options(args, p, raw, *, before_claim=None, on_pool_settled=None):
+def _run_options(args, p, raw, *, before_claim=None, on_pool_settled=None, epoch_for_tick=None):
     """Return how many new jobs were executed, for bounded pilot polling."""
     prompt = json.loads(args.prompt.read_text())
     from lab_arena import collection_experiment as experiments
@@ -1580,31 +1597,34 @@ def _run_options(args, p, raw, *, before_claim=None, on_pool_settled=None):
         config = chain.ArenaChainConfig(
             os.environ["LAB_ARENA_CHAIN_ENDPOINT"], 71, "finney", 30
         )
-        client = chain.ArenaChain(config, chain.connect_substrate(config))
-        cutover = chain.load_arena_cutover()
-        research = None
-        protocol_out = sys.stdout.buffer
-        if research_index is not None:
-            from lab_arena.collection_research import (
-                FrozenResearchCases,
-                RemoteResearch,
-            )
-            from lab_arena.store import ArenaStore
-
-            cases = FrozenResearchCases(ArenaStore(db), objects, research_index)
-
-            @contextmanager
-            def open_channel(job):
-                yield sys.stdin.buffer, protocol_out
-
-            from lab_arena.collection_research_capture import ResearchGrant
-            research = RemoteResearch(open_channel, cases.load, cases.grade, grant=ResearchGrant.deployed(), objects=objects)
+        governed = standing and getattr(args, "governed_workers", False)
         with ExitStack() as stack:
-            stack.callback(client.close)
-            if getattr(args, "governed_workers", False):
+            if governed:
+                from lab_arena.collection_chain_access import lane_chain
                 stack.callback(db.close)
-            # Confirm the finalized genesis and subnet before even an unpaid lease.
-            chain.current_settlement_epoch(client, cutover)
+                client = stack.enter_context(lane_chain(config, args.offer_directory))
+            else:
+                client = stack.enter_context(closing(chain.ArenaChain(config, chain.connect_substrate(config))))
+            cutover = chain.load_arena_cutover()
+            research = None
+            protocol_out = sys.stdout.buffer
+            if research_index is not None:
+                from lab_arena.collection_research import (
+                    FrozenResearchCases,
+                    RemoteResearch,
+                )
+                from lab_arena.store import ArenaStore
+
+                cases = FrozenResearchCases(ArenaStore(db), objects, research_index)
+
+                @contextmanager
+                def open_channel(job):
+                    yield sys.stdin.buffer, protocol_out
+
+                from lab_arena.collection_research_capture import ResearchGrant
+                research = RemoteResearch(open_channel, cases.load, cases.grade, grant=ResearchGrant.deployed(), objects=objects)
+            if not governed:
+                chain.current_settlement_epoch(client, cutover)
             transport = stack.enter_context(closing(HttpxProviderTransport()))
             if args.research_stdio:
                 stack.enter_context(redirect_stdout(sys.stderr))
@@ -1616,7 +1636,7 @@ def _run_options(args, p, raw, *, before_claim=None, on_pool_settled=None):
                 if standing and getattr(args, "governed_workers", False):
                     from lab_arena.collection_governor import GovernedIntake, prepare_epoch
                     from scripts.prepare_collection_experiment import lock_pool_directory
-                    epoch_id = prepare_epoch(client,cutover,db,partial(lock_pool_directory,args.offer_directory))
+                    epoch_id = (epoch_for_tick or prepare_epoch)(client,cutover,db,partial(lock_pool_directory,args.offer_directory))
                     intake = GovernedIntake(db,cm,epoch_id,experiment.routes,lambda: chain.current_settlement_epoch(client,cutover))
                     price = intake.prices
                 completed = experiments.run_experiment(

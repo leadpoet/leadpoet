@@ -75,7 +75,7 @@ def test_tick_uses_only_a_confirmed_terminal_failure_for_further_work(
     )
     seen = []
 
-    def run_options(args, parser, raw, *, before_claim, on_pool_settled):
+    def run_options(args, parser, raw, *, before_claim, on_pool_settled, epoch_for_tick):
         before_claim()
         if raw.get("confirmed"):
             on_pool_settled("failed")

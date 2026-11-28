@@ -75,9 +75,13 @@ def openapi(config: ToolMarketConfig) -> Dict[str, Any]:
                     "oneOf": [_operation_schema(op) for op in operations]}}}},
                 "responses": {
                     "200": {"description": "The vendor's answer: call_id, status, body and charge_microusd."},
-                    "400": dict(error, description="The request names no catalog operation (operation_unknown) or does not fit it (param_invalid "
-                                                   "also covers its cross-field rules and a GET request's "
-                                                   "encoded length)."),
+                    "400": dict(error, description="The error code names the problem: operation_unknown; "
+                                                   "param_unknown, param_missing or param_invalid (which also "
+                                                   "covers cross-field rules and a GET request's encoded length); "
+                                                   "session_required: a later lead-search page needs its "
+                                                   "sessionId; a bad field's *_invalid code; invalid_json; or "
+                                                   "btauth_ambiguous_credentials: btauth/1 sent with an "
+                                                   "Authorization header."),
                     "402": dict(error, description="insufficient_balance: spend more Gamma; tab_budget: the "
                                                    "API key's budget is spent. Nothing was charged."),
                     "401": dict(error, description="A btauth/1 problem, or tab_unknown or tab_closed, named by "
@@ -90,11 +94,12 @@ def openapi(config: ToolMarketConfig) -> Dict[str, Any]:
                     "413": dict(error, description="request_too_large."),
                     "429": dict(error, description="Too many calls in flight or uncertain for this hotkey."),
                     "502": dict(error, description="vendor_unreachable: the request may have reached the "
-                                                   "vendor. Not charged; carries call_id. Retry with the same "
-                                                   "request_id, never a new one."),
+                                                   "vendor. Not charged; carries call_id."),
                     "503": dict(error, description="No key can serve the call now (no_supply), or the chain "
                                                    "or store is down or busy; retry later. One with a call_id may "
-                                                   "have been charged: usage shows it after 11 minutes.")}}},
+                                                   "have been charged: usage shows it after 11 minutes. Any error "
+                                                   "with request_id_used: true has spent its request_id; buy "
+                                                   "again only with a new one, once nothing was charged.")}}},
             "/tool-market/catalog": {"get": {
                 "summary": "Every tool's operations, parameters and current price per unit (micro-USD).",
                 "responses": {"200": {"description": "The catalog."}}}},

@@ -259,6 +259,6 @@ def test_the_terms_take_only_the_scheme_whose_signature_is_stored(client):
 def test_discovery_and_balance_are_public_and_readable_from_any_page(client):
     enable()
     for path in ("/tool-market/services.json", "/tool-market/openapi.json", "/tool-market/catalog",
-                 "/tool-market/gamma/balance?hotkey=" + ALICE):
+                 "/tool-market/books/exa", "/tool-market/gamma/balance?hotkey=" + ALICE):
         answer = client.get(path)
         assert answer.status_code == 200 and answer.headers["access-control-allow-origin"] == "*"

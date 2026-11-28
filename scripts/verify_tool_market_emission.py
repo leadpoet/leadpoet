@@ -4,7 +4,8 @@ python -m scripts.verify_tool_market_emission --state state.json --signing-key p
 Pass --control for an older state without a tool-market allocation. No credentials, writes or signing
 authority are needed. The archive authenticates chain observations. The operator signature
 authenticates the supplied target. Neither establishes a USD payment for a particular tool call.
-Exit 2 means the observation contains an unmatched target or a requested reveal lacks proof.
+Exit 2 means the observation contains an unmatched target, or a supplier that is unregistered or
+got no emission. A reveal that is pending or lacks proof exits 1 with its error; retry it later.
 """
 from __future__ import annotations
 

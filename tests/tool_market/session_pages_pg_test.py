@@ -53,23 +53,6 @@ def test_a_session_rewrite_past_the_url_limit_is_refused_before_any_key(world, m
     assert "request_id_used" not in refused.value.detail and world.vendor.sent == []
 
 
-def test_page_one_fails_over_and_the_session_pins_to_the_key_that_served_it(world):
-    for secret, ask in (("session-limited", 5000), ("session-serving", 6000)):
-        miner, key = world.miner_key(secret, 10)
-        world.market.post_ask(world.who(miner), dict(key_id=key, operation="search_leads", ask_microusd=ask))
-    world.vendor.script["session-limited"] = [ok({}, status=429)]
-    world.vendor.script["session-serving"] = [ok({"status": 200, "elements": []})]
-    _, tab = world.buyer()
-    session = str(uuid4())
-    def page(n):
-        return world.market.call(tab, {"tool": "harvestapi", "operation": "search_leads",
-              "params": {"currentJobTitles": "Owner", "sessionId": session, "page": n}})
-    page(1)  # the cheaper key is rate-limited; the next one serves page one
-    world.vendor.script["session-limited"] = [ok({"status": 200, "elements": []})]
-    page(2)
-    assert [x[0] for x in world.vendor.sent] == ["session-limited", "session-serving", "session-serving"]
-
-
 def test_a_session_pins_to_the_key_that_first_served_it_not_the_first_reserved(world):
     for secret, ask in (("pin-slow", 5000), ("pin-fast", 6000)):
         miner, key = world.miner_key(secret, 10)

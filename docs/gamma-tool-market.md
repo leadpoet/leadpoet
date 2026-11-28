@@ -367,8 +367,9 @@ All amounts are integer micro-USD.
     A call reserves a key only within 30 s of reaching the gateway, so it
     ends within 3 minutes; one too late for its first key answers
     `503 busy` with nothing charged. Give the gateway a stop grace above
-    3 minutes so a restart drains calls. The CLI waits 4 minutes, and a
-    lost answer reads `outcome_unknown`.
+    3 minutes so a restart drains calls. The CLI waits 4 minutes, and an
+    answer lost after the request was sent (a timeout or a dropped
+    connection) reads `outcome_unknown`.
   - A request that may have reached the vendor is never retried on another
     key, so it cannot be used twice.
   - A buyer shapes some of these, such as an answer too large to return.
@@ -411,6 +412,14 @@ deployment, exactly as lead orders do.
 ## Known limits
 
 - **Supplier compensation is denominated in subnet emissions.** Reconcile settled calls by epoch and miner using [the accrual report](../scripts/tool_market_accruals.sql). Confirm the validator payout on chain before treating a receivable as paid. The marketplace may use only emission capacity left after the experiment lab's full allocation.
+- **A missed epoch repeats the last supplier targets.** The chain keeps
+  paying each validator's last weights until new ones land, but the ledger
+  counts an accepted allocation once. If an epoch's state is not published
+  or its weights do not land, the previous suppliers are paid again.
+  Scheduling continues each epoch on its own (only tool-market mode off
+  stops it, and buying with it), so reconcile each distribution's measured
+  miner alpha by hand. `scripts/verify_tool_market_emission.py` checks only
+  a signed state's first distribution, so it cannot see a repeat.
 - **The vendor's answer sets the usage.** Prospeo's free-match rule is
   read from its docs, not a bill; check it against a miner's statement
   before scaling.
@@ -448,7 +457,7 @@ deployment, exactly as lead orders do.
   written); if the store is still down, the call is `503 store_unavailable`
   with its `call_id`, which may have been charged. `/usage` shows the
   outcome once the call is 11 minutes old; a retry before then can pay
-  twice. A tab whose opening answer is lost this way answers with its `token`:
+  twice unless it reuses the call's `request_id`. A tab whose opening answer is lost this way answers with its `token`:
   keep it, since an open still in flight ends within the store's 30 s
   statement timeout. After a minute `GET /tool-market/tab` shows whether it
   opened, and `POST /tool-market/tab/close` frees its budget.

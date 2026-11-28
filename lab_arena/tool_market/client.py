@@ -14,6 +14,7 @@ https, or http only to this machine. ``name=value`` sends text and
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import sys
@@ -98,13 +99,18 @@ class Client:
         request = urllib.request.Request(self.url + path, data=data if body is not None else None,
                                          headers=headers, method=method)
         try:
-            with _open(request, timeout=TIMEOUT_SECONDS) as answer:
-                status, raw = answer.status, answer.read()
-        except urllib.error.HTTPError as error:
-            status, raw = error.code, error.read()
-        except TimeoutError:  # the answer is lost, not the request: a call may still be charged
+            try:
+                with _open(request, timeout=TIMEOUT_SECONDS) as answer:
+                    status, raw = answer.status, answer.read()
+            except urllib.error.HTTPError as error:
+                status, raw = error.code, error.read()
+        # The request was sent but its answer, or an error's body, was lost
+        # (urllib wraps a failure to connect or send as URLError): a call may
+        # still be charged.
+        except (TimeoutError, ConnectionError, http.client.HTTPException):
             return {"error": "outcome_unknown", "status": 0,
-                    "hint": "usage shows a call after 11 minutes; a retry before then can pay twice"}
+                    "hint": "the request may have taken effect; usage shows a call after 11 minutes, and a "
+                            "call retried with its request_id cannot pay twice (a new ID can)"}
         try:
             document = json.loads(raw or b"{}")
         except ValueError:

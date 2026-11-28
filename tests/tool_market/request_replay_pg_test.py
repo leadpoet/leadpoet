@@ -4,6 +4,7 @@ import threading
 import uuid
 import pytest
 
+from lab_arena.lead_orders.vault_client import VaultTransportError
 from lab_arena.tool_market import book, catalog
 from lab_arena.tool_market.market import ToolMarketError
 from tests.tool_market.tool_market_pg_test import PROFILE, database, ok, store, world
@@ -67,3 +68,7 @@ def test_an_error_after_a_purchase_is_claimed_says_so(world):
         world.market.call(token, body)
     assert (none_left.value.status, none_left.value.code) == (503, "no_supply")
     assert none_left.value.detail["request_id_used"] is True
+    world.vendor.script["replay-limited-supplier"] = [VaultTransportError("vault_unreachable", forwarded=True)]
+    with pytest.raises(ToolMarketError) as lost:  # it may have reached the vendor
+        world.market.call(token, dict(PROFILE, request_id=str(uuid.uuid4())))
+    assert lost.value.status == 502 and lost.value.detail["request_id_used"] is True

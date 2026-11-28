@@ -141,6 +141,7 @@ def test_platform_ceiling_must_specify_known_approved_operation_and_integer_ask(
     for bad in (
         "[1]",
         '{"typo":200}',
+        '{"zerobounce_validate":200}',  # only its own variable turns that route on
         "{",
         json.dumps({alias: 0}),
         json.dumps({alias: True}),

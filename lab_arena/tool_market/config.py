@@ -105,17 +105,20 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
         platform_limits = json.loads(env.get(PLATFORM_MAX_ASKS_ENV, "{}"))
     except (ValueError, RecursionError):
         raise ToolMarketConfigError(f"{PLATFORM_MAX_ASKS_ENV} must be a JSON object") from None
+    # ZeroBounce's ceiling has its own, older variable, and only that one: unset, the route is off.
+    if not isinstance(platform_limits, dict) or "zerobounce_validate" in platform_limits:
+        raise ToolMarketConfigError(f"{PLATFORM_MAX_ASKS_ENV} must be a JSON object without zerobounce_validate, "
+                                    f"whose ceiling is {VERIFY_MAX_ASK_ENV}")
     verify_limit = env.get(VERIFY_MAX_ASK_ENV, "").strip()
-    if verify_limit and isinstance(platform_limits, dict):  # ZeroBounce's ceiling has its own, older variable
+    if verify_limit:
         if not (verify_limit.isascii() and verify_limit.isdigit() and len(verify_limit) <= 6):
             raise ToolMarketConfigError("%s must be a positive per-call ask" % VERIFY_MAX_ASK_ENV)
         platform_limits["zerobounce_validate"] = int(verify_limit)
     permitted = set(platform.OPERATIONS) | {platform.SHORT_PROFILE, platform.EMAIL_PROFILE}
-    if not isinstance(platform_limits, dict) or any(
-        key not in permitted or type(limit) is not int or not 1 <= limit <= MAX_ASK["call"]
-        for key, limit in platform_limits.items()
-    ):
-        raise ToolMarketConfigError(f"{PLATFORM_MAX_ASKS_ENV} needs a supported operation and positive per-call ask")
+    if any(key not in permitted or type(limit) is not int or not 1 <= limit <= MAX_ASK["call"]
+           for key, limit in platform_limits.items()):
+        raise ToolMarketConfigError(f"{PLATFORM_MAX_ASKS_ENV} and {VERIFY_MAX_ASK_ENV} need a supported operation "
+                                    "and a positive per-call ask")
     terms_version = env.get(TERMS_VERSION_ENV, "").strip()
     if env.get(NETUID_ENV, str(NETUID)).strip() != str(NETUID):
         raise ToolMarketConfigError("%s must be %d: the market counts only that subnet's Gamma" % (NETUID_ENV, NETUID))

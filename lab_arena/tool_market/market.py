@@ -16,6 +16,7 @@ the miner is owed nothing (``uncertain``).
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import secrets
 import threading
@@ -519,7 +520,8 @@ class ToolMarket:
             raise ToolMarketError(403, "buyer_not_allowed")
         with self._slot(hotkey, MAX_CALLS_IN_FLIGHT_PER_BUYER, "too_many_calls_in_flight"):
             url, session = self._session(hotkey, op, url)
-            asks = self._asks(op, max_ask, private, hotkey, session.pinned)  # read after the epoch, in _buy
+            # Lazy: the tab path reads the book after the epoch; a signed call reads it first, to size its tab.
+            asks = itertools.islice(self._asks(op, max_ask, private, hotkey, session.pinned), MAX_ASKS_PER_CALL)
             request = (url, headers, payload)
             if tab is None:
                 return self._signed_call(op, hotkey, asks, session, request, arrived, request_id)
@@ -540,7 +542,7 @@ class ToolMarket:
             return self._store.open_tab(tab_id=self._new_id(), hotkey=hotkey, token_hash=tab, budget_microusd=budget,
                                         seconds=CALL_TAB_SECONDS, terms_sha256=None)
 
-        asks = list(asks)[:MAX_ASKS_PER_CALL]
+        asks = list(asks)
         if not asks:
             raise ToolMarketError(503, "no_supply")
         needs = [book.charge_microusd(owed_cap) for _, owed_cap in asks]
@@ -560,7 +562,9 @@ class ToolMarket:
             return self._buy(op, tab, hotkey, asks, session, request, arrived, request_id)
         except ToolMarketError as error:
             if error.code == "tab_budget":  # the tab is this call's share of the balance
-                raise unread or ToolMarketError(402, "insufficient_balance", **error.detail) from None
+                refusal = unread or ToolMarketError(402, "insufficient_balance")
+                refusal.detail.update(error.detail)
+                raise refusal from None
             raise
         finally:
             try:
@@ -605,9 +609,8 @@ class ToolMarket:
              request_id: Optional[str]) -> Dict[str, Any]:
         """Reserve and send on the cheapest keys that fit, up to the per-call limits.
 
-        ``asks``: the book, read lazily or as the caller already read it; each
-        reserve re-checks its key under the key's lock, so a moment-old book
-        cannot over-reserve."""
+        ``asks``: the book, best first; each reserve re-checks its key under the
+        key's lock, so a moment-old book cannot over-reserve."""
 
         # Read before any vendor request, so a chain outage cannot strand a paid answer.
         try:
@@ -619,54 +622,57 @@ class ToolMarket:
         # so a duplicate gets the candidate call IDs instead of another vendor
         # request, and a purchase refused before any reserve can be retried.
         purchase = claim = None
-        spent: Dict[str, Any] = {}  # once claimed, every answer names the purchase's call IDs
+        claimed: Dict[str, Any] = {}  # added to every error once the claim committed
         if request_id is not None:
             purchase = uuid.uuid5(uuid.NAMESPACE_URL, f"sn71/tool-market/purchase/{hotkey}/{request_id}")
             claim = "sha256:" + hashlib.sha256(purchase.bytes).hexdigest()
-            used = dict(request_id=request_id, request_id_used=True, possible_call_ids=[
+            claim_detail = dict(request_id=request_id, request_id_used=True, possible_call_ids=[
                 str(uuid.uuid5(purchase, str(i))) for i in range(1, MAX_ASKS_PER_CALL + 1)])
-        tried = attempts = 0
+        tried = 0
         short = False
-        for ask, owed_cap in asks:
-            if tried >= MAX_KEYS_PER_CALL or attempts >= MAX_ASKS_PER_CALL:
-                break
-            if time.monotonic() - arrived > FAILOVER_SECONDS:
-                if not tried:  # nothing reserved: the buyer may retry freely
-                    raise ToolMarketError(503, "busy")
-                break
-            attempts += 1
-            call_id = str(uuid.uuid5(purchase, str(attempts))) if purchase else self._new_id()
-            try:
+        try:
+            for attempt, (ask, owed_cap) in enumerate(asks, 1):
+                if tried >= MAX_KEYS_PER_CALL:
+                    break
+                if time.monotonic() - arrived > FAILOVER_SECONDS:
+                    if not tried:  # nothing reserved: the buyer may retry freely
+                        raise ToolMarketError(503, "busy")
+                    break
+                call_id = str(uuid.uuid5(purchase, str(attempt))) if purchase else self._new_id()
                 status = self._store.reserve_call(
                     call_id=call_id, token_hash=tab, tool=op.tool, operation=op.name, key_id=ask.key_id,
                     ask_microusd=ask.ask_microusd, owed_cap_microusd=owed_cap, session=session.digest,
-                    first_page=session.first, claim=None if spent else claim)
-            except ArenaStoreError:
-                if claim is None:
-                    raise
-                raise ToolMarketError(503, "store_unavailable", **used) from None  # the claim may have committed
-            if status == "request_already_used":
-                raise ToolMarketError(409, status, **used)
-            if status == "session_page_one_required":
-                raise ToolMarketError(409, status, **spent)
-            if status == "tab_closed":
-                raise ToolMarketError(401, "tab_closed", **spent)
-            if status == "tab_budget":
-                short = True  # a cheaper key further down may still fit
-                continue
-            if status == "uncertain_limit":
-                raise ToolMarketError(429, "uncertain_limit", **spent)
-            if status != "reserved":
-                continue
-            tried += 1
-            if claim is not None:
-                spent = used
-            outcome = self._send(op, ask, call_id, epoch, *request)
-            if outcome is not None:
-                return outcome
-        if short:
-            raise ToolMarketError(402, "tab_budget", **spent)
-        raise ToolMarketError(503, "no_supply", **spent)
+                    first_page=session.first, claim=None if claimed else claim)
+                if status == "request_already_used":
+                    raise ToolMarketError(409, status, **claim_detail)
+                if status == "session_page_one_required":
+                    raise ToolMarketError(409, status)
+                if status == "tab_closed":
+                    raise ToolMarketError(401, status)
+                if status == "uncertain_limit":
+                    raise ToolMarketError(429, status)
+                if status == "tab_budget":
+                    short = True  # a cheaper key further down may still fit
+                    continue
+                if status != "reserved":
+                    continue
+                tried += 1
+                if claim is not None:
+                    claimed = claim_detail
+                outcome = self._send(op, ask, call_id, epoch, *request)
+                if outcome is not None:
+                    return outcome
+            if short:
+                raise ToolMarketError(402, "tab_budget")
+            raise ToolMarketError(503, "no_supply")
+        except ToolMarketError as error:
+            error.detail.update(claimed)
+            raise
+        except ArenaStoreError:
+            if claim is None:
+                raise
+            # A reserve's answer was lost (its claim may have committed), or a later store write failed.
+            raise ToolMarketError(503, "store_unavailable", **claim_detail) from None
 
     def _send(self, op: catalog.Operation, ask: book.Ask, call_id: str, epoch: int, url: str,
               headers: Mapping[str, str], payload: bytes) -> Optional[Dict[str, Any]]:

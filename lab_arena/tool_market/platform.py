@@ -24,25 +24,26 @@ SHORT_PROFILE = "harvestapi_get_profile.main"
 EMAIL_PROFILE = "harvestapi_get_profile.findEmail"
 
 
+def _flag(params: dict, name: str) -> bool:
+    """Pop an optional boolean flag, sent as a JSON boolean or its string."""
+
+    value = params.pop(name, False)
+    if value is not True and value is not False and value not in ("true", "false"):  # not 1 or 0
+        raise CatalogError("param_invalid")
+    return value is True or value == "true"
+
+
 def platform_request(alias: str, payload: Mapping[str, Any]) -> tuple:
     if alias not in OPERATIONS:
         raise CatalogError("operation_unknown")
     tool, name = OPERATIONS[alias]
     params = dict(payload)
     price_key = alias
-    if alias == "harvestapi_get_profile" and "main" in params:
-        main = params.pop("main")
-        if main is True or main == "true":
-            params["main"] = "true"
-            price_key = SHORT_PROFILE
-        elif main is not False and main != "false":
-            raise CatalogError("param_invalid")
-    if alias == "harvestapi_get_profile" and "findEmail" in params:
-        flag = params.pop("findEmail")
-        if flag is True or flag == "true":
+    if alias == "harvestapi_get_profile":
+        if _flag(params, "main"):
+            params["main"], price_key = "true", SHORT_PROFILE
+        if _flag(params, "findEmail"):  # its price covers the profile, short or not
             name, price_key = "linkedin_profile_email", EMAIL_PROFILE
-        elif flag is not False and flag != "false":
-            raise CatalogError("param_invalid")
     elif alias == "harvestapi_get_company" and "universalName" in params:
         # The vendor's documented query accepts a URL, company ID or universal name.
         if "url" in params:

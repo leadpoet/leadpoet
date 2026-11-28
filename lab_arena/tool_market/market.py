@@ -29,7 +29,7 @@ from lab_arena.lead_orders.auth import BuyerIdentity
 from lab_arena.lead_orders.config import is_valid_hotkey
 from lab_arena.lead_orders.keys import json_document
 from lab_arena.lead_orders.vault_client import VaultTransportError, VaultUnavailable
-from lab_arena.tool_market import book, catalog, discovery
+from lab_arena.tool_market import book, catalog, discovery, platform
 from lab_arena.chain import ArenaChainError
 from lab_arena.store import ArenaStoreError
 from lab_arena.tool_market.config import ToolMarketConfig
@@ -44,7 +44,7 @@ MAX_KEYS_PER_CALL = 3
 # the chain and earlier keys count), so it ends within 3 minutes: then one key
 # (30 s, the vault's 15, a reconnect) and its 402 re-check (45 s, a reconnect).
 # The gateway's stop grace and the client's timeout sit above that. A call too
-# late for its first key answers 503 busy, its request_id unused.
+# late for its first key answers 503 busy, nothing reserved.
 FAILOVER_SECONDS = 30.0
 # Reserve attempts per call, refused ones included (an ask that just moved,
 # a key that just reached its cap), so one call cannot walk a whole book.
@@ -422,15 +422,9 @@ class ToolMarket:
         return discovery.openapi(self._config)
 
     # Calls ------------------------------------------------------------------
-    def lead_search_validation(self, token: str, request: Mapping[str, Any],
-                               arrived: Optional[float] = None) -> dict:
-        """Original verification-only entry point."""
-        return self.platform_call(token, "zerobounce_validate", request, arrived=arrived)
-
     def platform_call(self, token: str, alias: str, request: Mapping[str, Any], *, raw: bool = True,
                       arrived: Optional[float] = None) -> dict:
         """Serve approved platform calls using the same private supply, reservations and settlement."""
-        from . import platform
 
         if alias not in platform.OPERATIONS:
             raise ToolMarketError(404, "tool_unavailable")
@@ -443,7 +437,7 @@ class ToolMarket:
         except catalog.CatalogError as exc:
             raise ToolMarketError(400, exc.code) from None
         legacy_verify = alias == "zerobounce_validate"
-        ceiling = self._config.lead_search_verify_max_ask if legacy_verify else self._config.platform_max_asks.get(price_key)
+        ceiling = self._config.platform_max_asks.get(price_key)
         if ceiling is None:
             raise ToolMarketError(404, "verification_route_disabled" if legacy_verify else "platform_route_disabled")
         result = self.call(token, {"tool": tool, "operation": name, "params": params,
@@ -513,7 +507,8 @@ class ToolMarket:
         if not self._config.may_buy(hotkey):  # also for a tab opened before the allowlist changed
             raise ToolMarketError(403, "buyer_not_allowed")
         with self._slot(hotkey, MAX_CALLS_IN_FLIGHT_PER_BUYER, "too_many_calls_in_flight"):
-            return self._buy(tool, op, max_ask, private, tab, hotkey, url, headers, payload, arrived,
+            url, *session = self._session(hotkey, op, url)
+            return self._buy(tool, op, max_ask, private, tab, hotkey, url, headers, payload, arrived, session,
                              request_id=request_id)
 
     def _signed_call(self, hotkey: str, tool: str, op: catalog.Operation, max_ask: int, private: bool,
@@ -534,8 +529,8 @@ class ToolMarket:
                                         seconds=CALL_TAB_SECONDS, terms_sha256=None)
 
         with self._slot(hotkey, MAX_CALLS_IN_FLIGHT_PER_BUYER, "too_many_calls_in_flight"):
-            _, _, _, pinned = self._session(hotkey, op, url)
-            asks = list(self._asks(tool, op, max_ask, private, hotkey, pinned))[:MAX_ASKS_PER_CALL]
+            url, *session = self._session(hotkey, op, url)
+            asks = list(self._asks(tool, op, max_ask, private, hotkey, session[2]))[:MAX_ASKS_PER_CALL]
             if not asks:
                 raise ToolMarketError(503, "no_supply")
             needs = [book.charge_microusd(owed_cap) for _, owed_cap in asks]
@@ -552,8 +547,8 @@ class ToolMarket:
                 # Unread new Gamma may cover it: say retry, not spend more.
                 raise unread or ToolMarketError(402, "insufficient_balance")
             try:
-                return self._buy(tool, op, max_ask, private, tab, hotkey, url, headers, payload, arrived, asks,
-                                 request_id)
+                return self._buy(tool, op, max_ask, private, tab, hotkey, url, headers, payload, arrived, session,
+                                 asks, request_id)
             except ToolMarketError as error:
                 if error.code == "tab_budget":  # the tab is this call's share of the balance
                     raise unread or ToolMarketError(402, "insufficient_balance") from None
@@ -581,7 +576,8 @@ class ToolMarket:
                     self._in_flight[name] = left
 
     def _session(self, hotkey: str, op: catalog.Operation, url: str):
-        """Keep pagination on its upstream account and namespace the vendor token by buyer."""
+        """Keep pagination on its upstream account and namespace the vendor token by buyer:
+        the URL to send, the session digest, whether this is page one, and the pinned key."""
         if (op.tool, op.name) != ("harvestapi", "search_leads"):
             return url, None, True, None
         parts = urlsplit(url)
@@ -597,7 +593,7 @@ class ToolMarket:
         return urlunsplit(parts._replace(query=urlencode(params))), digest, first, pinned
 
     def _buy(self, tool: str, op: catalog.Operation, max_ask: int, private: bool, tab: str, hotkey: str,
-             url: str, headers: Mapping[str, str], payload: bytes, arrived: float,
+             url: str, headers: Mapping[str, str], payload: bytes, arrived: float, session: List[Any],
              asks: Optional[List[Tuple[book.Ask, int]]] = None, request_id: Optional[str] = None) -> Dict[str, Any]:
         """Reserve and send on the cheapest keys that fit, up to the per-call limits.
 
@@ -609,32 +605,34 @@ class ToolMarket:
             epoch = int(self._epoch())
         except ArenaChainError:
             raise ToolMarketError(503, "chain_unavailable") from None
-        if time.monotonic() - arrived > FAILOVER_SECONDS:  # nothing reserved or claimed: retry freely
-            raise ToolMarketError(503, "busy")
-        # Signed nonces guard an individual HTTP signature. A buyer can reuse
-        # its purchase ID across tabs/signatures after an ambiguous response.
-        # Persist the claim before the first reservation. After a crash, return
-        # the candidate receipt IDs instead of making another vendor request.
-        purchase = None
+        digest, first, pinned = session
+        # A buyer reuses a purchase's request_id across tabs and signatures
+        # after an ambiguous answer. Its claim commits with the first reserve,
+        # so a duplicate gets the candidate call IDs instead of another vendor
+        # request, and a purchase refused before any reserve can be retried.
+        purchase = claim = None
         if request_id is not None:
             purchase = uuid.uuid5(uuid.NAMESPACE_URL, f"sn71/tool-market/purchase/{hotkey}/{request_id}")
-            digest = "sha256:" + hashlib.sha256(purchase.bytes).hexdigest()
-            if not self.use_nonce(hotkey, digest, int(time.time())):
-                raise ToolMarketError(409, "request_already_used", request_id=request_id,
-                                      possible_call_ids=[str(uuid.uuid5(purchase, str(i))) for i in
-                                                         range(1, MAX_ASKS_PER_CALL + 1)])
-        url, session, first, pinned = self._session(hotkey, op, url)
+            claim = "sha256:" + hashlib.sha256(purchase.bytes).hexdigest()
         tried = attempts = 0
         short = False
         for ask, owed_cap in self._asks(tool, op, max_ask, private, hotkey, pinned) if asks is None else asks:
-            if tried >= MAX_KEYS_PER_CALL or attempts >= MAX_ASKS_PER_CALL \
-                    or time.monotonic() - arrived > FAILOVER_SECONDS:
+            if tried >= MAX_KEYS_PER_CALL or attempts >= MAX_ASKS_PER_CALL:
+                break
+            if time.monotonic() - arrived > FAILOVER_SECONDS:
+                if not tried:  # nothing reserved: the buyer may retry freely
+                    raise ToolMarketError(503, "busy")
                 break
             attempts += 1
             call_id = str(uuid.uuid5(purchase, str(attempts))) if purchase else self._new_id()
             status = self._store.reserve_call(
                 call_id=call_id, token_hash=tab, tool=tool, operation=op.name, key_id=ask.key_id,
-                ask_microusd=ask.ask_microusd, owed_cap_microusd=owed_cap, session=session, first_page=first)
+                ask_microusd=ask.ask_microusd, owed_cap_microusd=owed_cap, session=digest, first_page=first,
+                claim=None if tried else claim)
+            if status == "request_already_used":
+                raise ToolMarketError(409, status, request_id=request_id,
+                                      possible_call_ids=[str(uuid.uuid5(purchase, str(i))) for i in
+                                                         range(1, MAX_ASKS_PER_CALL + 1)])
             if status == "session_page_one_required":
                 raise ToolMarketError(409, status)
             if status == "tab_closed":

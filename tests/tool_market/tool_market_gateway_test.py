@@ -200,7 +200,7 @@ def test_usage_is_signed_and_pages_by_a_strict_watermark(client):
 
 def test_lead_search_raw_v2_verification_preserves_vendor_verdict_and_actual_charge(client):
     market = enable()
-    market._config = ToolMarketConfig(lead_search_verify_max_ask=5899)
+    market._config = ToolMarketConfig(platform_max_asks={"zerobounce_validate": 5899})
     calls = []
     def verify(token, body, arrived=None):
         calls.append((token, body))

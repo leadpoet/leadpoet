@@ -13,7 +13,7 @@ from lab_arena.tool_market.market import ToolMarketError
 def test_real_factory_cannot_sell_or_solicit_spend_without_supplier_settlement(monkeypatch):
     buyer = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
     config = ToolMarketConfig(mode="live", tools=frozenset({"zerobounce"}), gamma_service=buyer,
-                              public_base_url="https://market.example", lead_search_verify_max_ask=5_000)
+                              public_base_url="https://market.example", platform_max_asks={"zerobounce_validate": 5_000})
     store = Mock()
     store.open_tab.return_value = {"status": "opened", "tab_id": "existing"}
     store.tab.return_value = {"open": True}
@@ -38,7 +38,7 @@ def test_real_factory_cannot_sell_or_solicit_spend_without_supplier_settlement(m
     call = {"tool": "zerobounce", "operation": "validate", "params": {"email": "a@example.test"}}
     for request in (lambda: instance.open_tab(identity, {"budget_microusd": 1000, "seconds": 90}),
                     lambda: instance.call("tmt_existing", call), lambda: instance.call("", call, identity),
-                    lambda: instance.lead_search_validation("tmt_existing", {"payload": call["params"]})):
+                    lambda: instance.platform_call("tmt_existing", "zerobounce_validate", {"payload": call["params"]})):
         with pytest.raises(ToolMarketError, match="miner_settlement_unavailable") as refused:
             request()
         assert refused.value.status == 503

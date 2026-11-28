@@ -32,3 +32,14 @@ def test_concurrent_and_lost_http_reply_share_one_purchase(world):
     _, other = world.buyer()
     assert world.market.call(other, body)["call_id"] != completed["call_id"]
     assert len(world.vendor.sent) == 2
+
+
+def test_a_purchase_refused_before_any_reserve_keeps_its_request_id(world):
+    world.miner_key("replay-budget-supplier", 5_000)
+    buyer, token = world.buyer(budget=1)
+    body = dict(PROFILE, request_id=str(uuid.uuid4()))
+    with pytest.raises(ToolMarketError, match="tab_budget"):
+        world.market.call(token, body)
+    bigger = world.market.open_tab(world.who(buyer), {"budget_microusd": 100_000, "seconds": 600})["token"]
+    assert world.market.call(bigger, body)["status"] == 200  # the same purchase on a funded tab
+    assert len(world.vendor.sent) == 1

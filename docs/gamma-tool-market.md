@@ -328,9 +328,10 @@ the request.
 
 For Harvest lead search, use a new `sessionId` on page one and send the same
 ID on subsequent pages. The existing reservation ledger binds it to the buyer
-and one supplier account. A later page needs a settled successful first page
-and that same account still eligible at the buyer's ceiling. Gamma will refuse
-if the session cannot continue. Harvest controls its own scraping resources
+and the supplier account that first serves a page of it; until then, page
+one fails over between keys as any call does. A later page needs that
+account still eligible at the buyer's ceiling. Gamma will refuse if the
+session cannot continue. Harvest controls its own scraping resources
 within that account and can itself fall back; these checks cannot guarantee
 an unchanged LinkedIn result set.
 
@@ -339,9 +340,10 @@ an unchanged LinkedIn result set.
 For a native paid call, generate a UUID for `request_id` before sending and
 persist it with the purchase. Reuse it for that logical purchase across
 tabs and fresh signatures. The gateway accepts one dispatch sequence per
-buyer and ID. A duplicate that reaches the purchase guard receives HTTP 409
-and the candidate call IDs for reconciliation against that buyer’s usage
-history. An interrupted sequence can have zero receipts. This mechanism
+buyer and ID, claimed with its first reservation: a call refused before any
+key was reserved (no supply, a tab budget, busy) leaves the ID free. A
+duplicate receives HTTP 409 and the candidate call IDs for reconciliation
+against that buyer’s usage history. This mechanism
 does not store or replay vendor data. A fresh ID starts a separate purchase.
 
 ## Usage history

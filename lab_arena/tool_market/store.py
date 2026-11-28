@@ -46,6 +46,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "tool_market_reserve_call_v1": (
         ("p_call_id", _U), ("p_token_hash", _T), ("p_tool", _T), ("p_operation", _T), ("p_key_id", _U),
         ("p_ask", _B), ("p_owed_cap", _B), ("p_session", _T), ("p_first", "boolean"),
+        ("p_claim", _T),
     ),
     "tool_market_settle_call_v1": (
         ("p_call_id", _U), ("p_status", _T), ("p_http_status", _I), ("p_units", _B), ("p_owed", _B),
@@ -151,10 +152,12 @@ class ToolMarketStore:
         return self._rpc("tool_market_session_key_v1", p_buyer=buyer, p_digest=digest)["key_id"]
 
     def reserve_call(self, *, call_id: str, token_hash: str, tool: str, operation: str, key_id: str,
-                     ask_microusd: int, owed_cap_microusd: int, session: Optional[str] = None, first_page: bool = True) -> str:
+                     ask_microusd: int, owed_cap_microusd: int, session: Optional[str] = None, first_page: bool = True,
+                     claim: Optional[str] = None) -> str:
         return str(self._rpc("tool_market_reserve_call_v1", p_call_id=call_id, p_token_hash=token_hash, p_tool=tool,
                              p_operation=operation, p_key_id=key_id, p_ask=int(ask_microusd),
-                             p_owed_cap=int(owed_cap_microusd), p_session=session, p_first=first_page)["status"])
+                             p_owed_cap=int(owed_cap_microusd), p_session=session, p_first=first_page,
+                             p_claim=claim)["status"])
 
     def settle_call(self, *, call_id: str, status: str, http_status: Optional[int], units: int, owed_microusd: int,
                     charge_microusd: int, epoch: int) -> str:

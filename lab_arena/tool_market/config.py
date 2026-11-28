@@ -64,7 +64,6 @@ class ToolMarketConfig:
     terms_sha256: str = ""
     public_base_url: str = ""
 
-    lead_search_verify_max_ask: Optional[int] = None
     approved_suppliers: FrozenSet[Tuple[str, str]] = frozenset()
 
     platform_max_asks: Mapping[str, int] = field(default_factory=dict)
@@ -120,7 +119,7 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
     if env.get(NETUID_ENV, str(NETUID)).strip() != str(NETUID):
         raise ToolMarketConfigError("%s must be %d: the market counts only that subnet's Gamma" % (NETUID_ENV, NETUID))
     config = ToolMarketConfig(
-        lead_search_verify_max_ask=int(verify_limit) if verify_limit else None, platform_max_asks=platform_limits,
+        platform_max_asks=dict(platform_limits, **({"zerobounce_validate": int(verify_limit)} if verify_limit else {})),
         mode=mode, tools=tools, approved_suppliers=frozenset(approved), buyer_hotkeys=buyers, private_suppliers=private,
         gamma_service=env.get(GAMMA_SERVICE_ENV, "").strip(),
         terms_version=terms_version, terms_sha256=PUBLISHED_TERMS.get(terms_version, ""),

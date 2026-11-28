@@ -115,6 +115,26 @@ def test_an_unreachable_gateway_fails_the_call_not_the_mcp_server(monkeypatch):
     assert [(r["id"], r["result"]["isError"]) for r in replies] == [(1, True), (2, True)]
 
 
+def test_a_connection_dropped_after_the_request_reads_outcome_unknown():
+    import socket
+    import threading
+
+    server = socket.create_server(("127.0.0.1", 0))
+
+    def read_then_drop():  # a gateway that dies mid-call
+        conn, _ = server.accept()
+        conn.recv(65536)
+        conn.close()
+
+    threading.Thread(target=read_then_drop, daemon=True).start()
+    try:
+        answer = client_module.Client("http://127.0.0.1:%d" % server.getsockname()[1], api_key="k").request(
+            "POST", "/tool-market/call", {"tool": "exa"})
+    finally:
+        server.close()
+    assert answer["error"] == "outcome_unknown"
+
+
 def test_the_client_names_its_gateway_and_follows_no_redirect(monkeypatch):
     for url in ("http://gw.example", "ftp://gw.example", "gw.example"):
         with pytest.raises(ValueError):

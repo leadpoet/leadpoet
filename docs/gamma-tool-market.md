@@ -367,8 +367,9 @@ All amounts are integer micro-USD.
     A call reserves a key only within 30 s of reaching the gateway, so it
     ends within 3 minutes; one too late for its first key answers
     `503 busy` with nothing charged. Give the gateway a stop grace above
-    3 minutes so a restart drains calls. The CLI waits 4 minutes, and a
-    lost answer reads `outcome_unknown`.
+    3 minutes so a restart drains calls. The CLI waits 4 minutes, and an
+    answer lost after the request was sent (a timeout or a dropped
+    connection) reads `outcome_unknown`.
   - A request that may have reached the vendor is never retried on another
     key, so it cannot be used twice.
   - A buyer shapes some of these, such as an answer too large to return.

@@ -412,6 +412,12 @@ deployment, exactly as lead orders do.
 ## Known limits
 
 - **Supplier compensation is denominated in subnet emissions.** Reconcile settled calls by epoch and miner using [the accrual report](../scripts/tool_market_accruals.sql). Confirm the validator payout on chain before treating a receivable as paid. The marketplace may use only emission capacity left after the experiment lab's full allocation.
+- **A missed epoch repeats the last supplier targets.** The chain keeps
+  paying each validator's last weights until new ones land, but the ledger
+  counts an accepted allocation once. If an epoch's state is not published
+  or its weights do not land, the previous suppliers are paid again;
+  reconcile against the distributions' measured miner alpha before
+  scheduling more.
 - **The vendor's answer sets the usage.** Prospeo's free-match rule is
   read from its docs, not a bill; check it against a miner's statement
   before scaling.

@@ -18,10 +18,13 @@ NEW_TERMS = "sha256:29c76e6f5d945c6e68821a331423395a3445d37c2f9d8943dab79433e8b6
 def migrate(p):
     # Exercise the same unprivileged membership and schema grants as the RDS migrator.
     with p.driver.connect(**p.dsn) as admin, admin.cursor() as cur:
-        cur.execute("CREATE ROLE rate_test_migrator NOINHERIT")
-        cur.execute(
-            "GRANT lab_arena_owner TO rate_test_migrator WITH INHERIT TRUE, SET TRUE"
-        )
+        if admin.server_version >= 160000:
+            cur.execute("CREATE ROLE rate_test_migrator NOINHERIT")
+            cur.execute("GRANT lab_arena_owner TO rate_test_migrator WITH INHERIT TRUE, SET TRUE")
+        else:
+            # PostgreSQL 15 controls inheritance on the member role.
+            cur.execute("CREATE ROLE rate_test_migrator INHERIT")
+            cur.execute("GRANT lab_arena_owner TO rate_test_migrator")
         cur.execute(
             "GRANT USAGE, CREATE ON SCHEMA public TO rate_test_migrator WITH GRANT OPTION"
         )

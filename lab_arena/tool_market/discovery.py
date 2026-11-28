@@ -75,7 +75,7 @@ def openapi(config: ToolMarketConfig) -> Dict[str, Any]:
                     "oneOf": [_operation_schema(op) for op in operations]}}}},
                 "responses": {
                     "200": {"description": "The vendor's answer: call_id, status, body and charge_microusd."},
-                    "400": dict(error, description="The request does not fit the operation (param_invalid "
+                    "400": dict(error, description="The request names no catalog operation (operation_unknown) or does not fit it (param_invalid "
                                                    "also covers its cross-field rules and a GET request's "
                                                    "encoded length)."),
                     "402": dict(error, description="insufficient_balance: spend more Gamma; tab_budget: the "
@@ -86,7 +86,7 @@ def openapi(config: ToolMarketConfig) -> Dict[str, Any]:
                                                    "see possible_call_ids; session_page_one_required: "
                                                    "a lead-search session starts at page one."),
                     "403": dict(error, description="buyer_not_allowed: this hotkey may not buy yet."),
-                    "404": dict(error, description="tool_unavailable or operation_unknown."),
+                    "404": dict(error, description="tool_unavailable."),
                     "413": dict(error, description="request_too_large."),
                     "429": dict(error, description="Too many calls in flight or uncertain for this hotkey."),
                     "502": dict(error, description="vendor_unreachable: the request may have reached the "

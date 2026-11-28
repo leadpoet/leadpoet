@@ -144,6 +144,24 @@ def test_every_operation_fits_its_vault_route():
     assert not tools.TOOLS["harvestapi"].route("GET", "/linkedin/profile-search", "search=a")
 
 
+def test_the_spec_bounds_each_parameter_as_call_does():
+    import jsonschema
+
+    for op in catalog.OPERATIONS.values():
+        for name, param in op.params.items():
+            longest = "x" * param.max_length
+            values = [_sample(param), _sample(param, True), longest, longest + "x", "", None, True, 0,
+                      param.low - 1, param.high + 1, [], ["a"] * (param.high + 1), [longest + "x"], "nope"]
+            for value in values:
+                try:
+                    param.read(value)
+                    read = True
+                except catalog.CatalogError:
+                    read = False
+                valid = jsonschema.Draft4Validator(param.schema()).is_valid(value)
+                assert valid == read, (op.tool, op.name, name, value)
+
+
 def _sample(param, high=False):
     count = param.high if high else param.low
     return {"str": "https://www.linkedin.com/in/someone", "int": count, "bool": True,

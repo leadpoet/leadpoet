@@ -85,7 +85,13 @@ def openapi(config: ToolMarketConfig) -> Dict[str, Any]:
                     "409": dict(error, description="request_already_used: this request_id already bought, "
                                                    "see possible_call_ids; session_page_one_required: "
                                                    "a lead-search session starts at page one."),
+                    "403": dict(error, description="buyer_not_allowed: this hotkey may not buy yet."),
+                    "404": dict(error, description="tool_unavailable or operation_unknown."),
+                    "413": dict(error, description="request_too_large."),
                     "429": dict(error, description="Too many calls in flight or uncertain for this hotkey."),
+                    "502": dict(error, description="vendor_unreachable: the request may have reached the "
+                                                   "vendor. Not charged; carries call_id. Retry with the same "
+                                                   "request_id, never a new one."),
                     "503": dict(error, description="No key can serve the call now (no_supply), or the chain "
                                                    "or store is down or busy; retry later. One with a call_id may "
                                                    "have been charged: usage shows it after 11 minutes.")}}},

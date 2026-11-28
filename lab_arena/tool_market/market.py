@@ -410,7 +410,7 @@ class ToolMarket:
 
     def tool_catalog(self) -> Dict[str, Any]:
         """Every tool that trades: its operations and their parameters, its
-        price ceiling, and the cheapest tool-wide ask now. Public, for agents."""
+        price ceiling, and the first tool-wide ask a call would try. Public, for agents."""
 
         tools = []
         for tool in sorted(self._config.tools):

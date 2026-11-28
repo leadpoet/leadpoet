@@ -138,8 +138,9 @@ All under `/tool-market`.
   their stored signature must be re-checkable later.
 
 `GET /catalog` lists every tool that trades: its operations, one line on
-what each does, their parameters, its price ceiling, and the cheapest
-tool-wide ask with what a buyer pays for it (`?operation=` on the book
+what each does, their parameters, its price ceiling, and the first
+tool-wide ask a call would try (demoted keys go last) with what a buyer
+pays for it (`?operation=` on the book
 quotes one operation, its own asks included), so an agent can pick a tool by
 the job it needs done. A request with a bad parameter is refused before
 any charge. `GET /books/{tool}` shows the asks and what a buyer pays for

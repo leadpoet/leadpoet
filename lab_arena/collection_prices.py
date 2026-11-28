@@ -13,8 +13,9 @@ from lab_arena.collection_broker import batch_versions
 class CatalogError(ValueError):
     """A bounded operator reason with the usual descriptive validation error."""
 
-    def __init__(self, code, message):
+    def __init__(self, code, message, *, retry_after=None):
         self.code = code
+        self.retry_after = retry_after
         super().__init__(message)
 
 
@@ -30,7 +31,7 @@ def _catalog(url, open_url):
             if exc.code == 429
             else "provider_catalog_http_error"
         )
-        raise CatalogError(code, "catalog HTTP request failed") from exc
+        raise CatalogError(code, "catalog HTTP request failed", retry_after=(exc.headers or {}).get("Retry-After")) from exc
     except (URLError, TimeoutError, ConnectionError) as exc:
         raise CatalogError(
             "provider_catalog_unreachable", "catalog unavailable"

@@ -33,7 +33,11 @@ Before changing the checkout for either service, stop its timer and let the curr
 
 Use `systemctl show SERVICE -p ActiveState -p SubState -p MainPID -p ControlPID -p Job`. Wait for `inactive`, `dead`, both PIDs zero and an empty job. Change the checkout, restart the timer and confirm the next cycle completes on that revision. If a service fails, inspect the failed cycle before updating.
 
-The installed paid worker can start up to 64 jobs or 30 minutes of new work per cycle. It finishes any authorized job already in progress. An empty queue or an unsuccessful cycle uses the normal five-minute timer. Stopping the timer lets a busy cycle drain at its next eight-job boundary or time limit.
+The governed paid service starts four independent worker processes. Each can start up to 64 jobs per cycle, with a shared 30-minute limit on new work. It finishes work already leased. The paid timer checks idle funding every 30 seconds. A verified task failure earns the same rate as a pass. A confirmed interruption preserves its partial evidence and original cost holds, and another safe slot can run. A rate-limited model and route rest while other approved routes continue.
+
+Drain the existing worker, apply migration 773, and install `deploy/leadpoet-collection-paid.conf` on the service and `deploy/leadpoet-collection-paid-timer.conf` on its timer. Reload systemd before restarting the timer. Use `collection_worker_lanes_v1()` to read the approved limit. The database owner can call `collection_set_worker_lanes_v1(N)` to advance from 4 to 16, 40 and 66 once a group of genuinely overlapping runs at the prior tier has settled. A lower setting applies to new leases. Credentials and signed limits are checked for every assignment.
+
+Before authorizing new work the governor reserves running job ceilings and unsettled bills against 90% of the measured finalized epoch emission. It also counts current accepted targets and closed unsuccessful spend. A missing or stale valuation stops new claims. Network valuations and independent validator votes can still change realized payments.
 
 The paid worker starts fresh consent-and-suppression packs with DeepSeek and uses the original model order for the other task families. This lets another program try a healthy route when the first one is unavailable. The change takes effect only when the existing pack finishes. Each scenario still gets four runs per model. A catalog or retention check that fails before a lease spends no miner funds.
 

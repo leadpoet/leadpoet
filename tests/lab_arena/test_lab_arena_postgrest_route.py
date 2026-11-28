@@ -258,6 +258,7 @@ def stack(tmp_path_factory):
                     "757-public-miner-contributions.sql",
                     "758-standing-collection-funding.sql",
                     "772-standing-pool-reward-rate.sql",
+                    "773-governed-standing-workers.sql",
                 ):
                     cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / migration).read_text())
             # Install additive current readers before PostgREST takes its
@@ -346,6 +347,8 @@ def test_service_role_authorization_reaches_whoami_and_functions_through_postgre
     identity = store.require_service_role()
     assert transport.rpc("collection_pool_active_v1", {}) is False
     assert transport.rpc("collection_pool_reward_rate_bps_v1", {}) == 15_000
+    assert transport.rpc("collection_worker_lanes_v1", {}) == 4
+    assert transport.rpc("collection_pool_pack_state_v1", {"p_batch":"pool-"+"0"*64,"p_slots":1}) == "open"
     assert identity["current_user"] == "lab_arena_service" and identity["jwt_role"] == "lab_arena_service"
     assert identity["rolsuper"] is False and identity["rolbypassrls"] is False and identity["session_user"] == "authenticator"
     assert store.list_rounds() == []

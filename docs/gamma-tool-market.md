@@ -398,17 +398,13 @@ deployment, exactly as lead orders do.
 
 ## Known limits
 
-- **Miner payout is not wired yet.** Settlements record what each miner is
-  owed for each epoch. Turning that into weight needs a payout ledger and
-  validator wiring, which reuse `lab_arena.lead_orders.money.epoch_payout`.
-  Until then, owed amounts build up but pay nothing. That wiring must:
-  skip a hotkey that is not registered on the subnet and keep its amount
-  owed, rather than fail the whole payout; give every positive share at
-  least one weight unit, or record as paid only what the weights deliver;
-  price each epoch from one snapshot at its closing block, taken once the
-  10-minute answer window after that block has passed (a settlement carries
-  the epoch its call started in); and publish each epoch's settlements so
-  validators can check them.
+- **Supplier settlement requires an independent funded treasury.** The
+  current ledger records a supplier liability per settled call. A paid
+  release needs an approved asset, funding account and limits, a signed
+  supplier withdrawal destination, a conversion policy for USD liabilities,
+  and independent confirmation of each transfer. Reconcile transfers once
+  against call IDs, including partial and retried withdrawals. The lab's
+  emissions and validator weight budget are outside this marketplace.
 - **The vendor's answer sets the usage.** Prospeo's free-match rule is
   read from its docs, not a bill; check it against a miner's statement
   before scaling.

@@ -52,6 +52,9 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_call_id", _U), ("p_status", _T), ("p_http_status", _I), ("p_units", _B), ("p_owed", _B),
         ("p_charge", _B), ("p_epoch", _B),
     ),
+    "tool_market_emission_statement_v1": (("p_hotkey", _T),),
+    "tool_market_has_unallocated_v1": (("p_epoch", _B),),
+    "tool_market_epoch_allocations_v1": (("p_epoch", _B), ("p_cap", _B), ("p_emission", _B), ("p_eligible", "text[]")),
     "tool_market_statement_v1": (("p_hotkey", _T),),
     "tool_market_usage_v1": (("p_hotkey", _T), ("p_after", _B), ("p_limit", _I)),
 }
@@ -140,6 +143,20 @@ class ToolMarketStore:
 
     def book(self, *, tool: str, terms_sha256: str, operation: Optional[str] = None) -> List[Dict[str, Any]]:
         return list(self._rpc("tool_market_book_v1", p_tool=tool, p_terms_sha256=terms_sha256, p_operation=operation) or [])
+
+    def emission_statement(self, hotkey: str) -> Dict[str, Any]:
+        return self._rpc("tool_market_emission_statement_v1", p_hotkey=hotkey)
+
+    def has_unallocated(self, *, epoch: int) -> bool:
+        result = self._rpc("tool_market_has_unallocated_v1", p_epoch=epoch)
+        if type(result) is not bool:
+            raise arena_store.ArenaStoreError("invalid supplier accrual lookup")
+        return result
+
+    def epoch_allocations(self, *, epoch: int, cap_microusd: int, emission_microusd: int,
+                          eligible_hotkeys: Sequence[str]) -> Dict[str, int]:
+        return self._rpc("tool_market_epoch_allocations_v1", p_epoch=epoch, p_cap=cap_microusd,
+                         p_emission=emission_microusd, p_eligible=list(eligible_hotkeys))
 
     def statement(self, hotkey: str) -> Dict[str, Any]:
         return self._rpc("tool_market_statement_v1", p_hotkey=hotkey)

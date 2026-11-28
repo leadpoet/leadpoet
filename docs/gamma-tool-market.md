@@ -21,9 +21,10 @@ It is off by default. Every route answers 404 until
    - The vault checks the key with the vendor's free balance call, if the
      vendor has one. A key with no credit is refused.
    - The same vendor key can be listed only once at a time.
-   - Only a hotkey registered on the subnet lists keys (`403
-     miner_not_registered`), and a miner's own tab never buys from their
-     own keys.
+   - Only a hotkey registered on the subnet lists, prices or checks keys
+     (`403 miner_not_registered`), and a deregistered miner's keys leave
+     the book at once; it can still withdraw its asks. A miner's own tab
+     never buys from their own keys.
    - For security, a hotkey registers at most one key per tool every 30
      days, revoked keys included (`429 key_registration_too_soon` with
      `next_at`). A key revoked before it took a call does not count, but a

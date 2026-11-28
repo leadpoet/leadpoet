@@ -276,9 +276,10 @@ class ToolMarket:
         """List a key. ``signed_body`` is the request body as signed; it is kept
         with the key, so the miner's attestation can be verified again later.
 
-        Only a hotkey registered on the subnet lists keys: a registration
-        costs TAO, so a key the vault cannot check costs more than a
-        signature, and only registered hotkeys are paid anyway.
+        Only a hotkey registered on the subnet supplies (here, and again at
+        each price, check and book read): a registration costs TAO, so a key
+        the vault cannot check costs more than a signature, and only
+        registered hotkeys are paid anyway.
         """
 
         if set(body) != {"tool", "envelope", "daily_cap_microusd", "attestation"}:
@@ -289,12 +290,7 @@ class ToolMarket:
             raise ToolMarketError(400, "attestation_required", attestation=ATTESTATION)
         tool = self._enabled_tool(body["tool"])
         cap = _int(body["daily_cap_microusd"], 1, MAX_KEY_DAILY_CAP_MICROUSD, "daily_cap_invalid")
-        try:
-            registered = self._is_registered(identity.hotkey)
-        except ArenaChainError:
-            raise ToolMarketError(503, "chain_unavailable") from None
-        if not registered:
-            raise ToolMarketError(403, "miner_not_registered")
+        self._require_registered(identity.hotkey)
         envelope = body["envelope"]
         try:
             header, _ = vault_envelope.read_header(envelope)
@@ -346,6 +342,7 @@ class ToolMarket:
 
         key = self._own_key(identity, key_id)
         self._enabled_tool(key["tool"])
+        self._require_registered(identity.hotkey)
         if vault_tools.TOOLS[key["tool"]].balance_url is None:
             raise ToolMarketError(409, "key_cannot_be_checked")
         with self._vendor_check(identity.hotkey, key["key_id"]):
@@ -373,6 +370,7 @@ class ToolMarket:
         ceiling = catalog.MAX_EXACT_ASK
         if ask is not None:
             self._enabled_tool(tool)
+            self._require_registered(identity.hotkey)
             _int(ask, 1, ceiling, "ask_invalid", max_ask_microusd=ceiling)
             # Each operation's largest call owes something, so every call
             # reserves, and a key's cap holds 4 of them, so each buyer's
@@ -749,10 +747,22 @@ class ToolMarket:
                 yield ask, owed_cap
 
     def _supply(self, tool: str, operation: Optional[str] = None) -> List[book.Ask]:
-        """The book's eligible asks, best first."""
+        """The book's eligible asks, best first: only hotkeys still registered
+        on the subnet supply, since only they can be paid."""
 
         rows = self._store.book(tool=tool, terms_sha256=self._config.terms_sha256, operation=operation)
-        return book.rank(book.Ask.from_row(row) for row in rows)
+        try:
+            return book.rank(book.Ask.from_row(row) for row in rows if self._is_registered(row["miner_hotkey"]))
+        except ArenaChainError:
+            raise ToolMarketError(503, "chain_unavailable") from None
+
+    def _require_registered(self, hotkey: str) -> None:
+        try:
+            registered = self._is_registered(hotkey)
+        except ArenaChainError:
+            raise ToolMarketError(503, "chain_unavailable") from None
+        if not registered:
+            raise ToolMarketError(403, "miner_not_registered")
 
     def _check(self, tool: str, envelope: str) -> Mapping[str, Any]:
         try:

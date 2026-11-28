@@ -822,7 +822,7 @@ def test_a_miners_tab_never_buys_from_their_own_key(world):
         operation="linkedin_profile", key_id=key_id, ask_microusd=10_000, owed_cap_microusd=10_000) == "own_key"
 
 
-def test_only_a_registered_hotkey_lists_keys(world):
+def test_only_a_currently_registered_hotkey_supplies(world):
     miner = hotkey()
     world.accept(miner, "miner")
     world.unregistered.add(miner)
@@ -832,6 +832,20 @@ def test_only_a_registered_hotkey_lists_keys(world):
     assert (refused.value.status, refused.value.code) == (403, "miner_not_registered")
     world.unregistered.clear()
     world.register(miner, body)
+    # A miner deregistered after listing stops selling, pricing and checking, but can still withdraw.
+    gone, key_id = world.miner_key("deregistered-key", 9_000)
+    zb_miner, zb_key = world.miner_key("deregistered-zb", 4_000, tool="zerobounce")
+    world.unregistered.update({gone, zb_miner})
+    _, token = world.buyer()
+    with pytest.raises(ToolMarketError) as none:
+        world.market.call(token, PROFILE)
+    assert (none.value.status, none.value.code) == (503, "no_supply") and world.vendor.sent == []
+    for refused_call in (lambda: world.market.post_ask(world.who(gone), {"key_id": key_id, "ask_microusd": 5_000}),
+                         lambda: world.market.check_key(world.who(zb_miner), zb_key)):
+        with pytest.raises(ToolMarketError) as refused:
+            refused_call()
+        assert (refused.value.status, refused.value.code) == (403, "miner_not_registered")
+    world.market.post_ask(world.who(gone), {"key_id": key_id, "ask_microusd": None})
 
 
 def test_a_hotkey_registers_one_key_per_tool_every_30_days(world):

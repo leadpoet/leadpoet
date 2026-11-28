@@ -168,6 +168,15 @@ def test_config_is_off_by_default_and_strict_when_live():
                 {"LEADPOET_TOOL_MARKET_MODE": "staff"}, {"LAB_ARENA_NETUID": "72"}):
         with pytest.raises(ToolMarketConfigError):
             load_config(dict(live, **bad))
+    # Resale permission is per vendor and hotkey.
+    bob = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
+    assert not config.may_supply("zerobounce", bob)
+    supplied = load_config(dict(live, LEADPOET_TOOL_MARKET_APPROVED_SUPPLIERS="zerobounce:" + bob))
+    assert supplied.may_supply("zerobounce", bob)
+    assert not supplied.may_supply("harvestapi", bob) and not supplied.may_supply("zerobounce", ALICE)
+    for invalid in ("unknown:" + bob, "zerobounce:", bob):
+        with pytest.raises(ToolMarketConfigError):
+            load_config(dict(live, LEADPOET_TOOL_MARKET_APPROVED_SUPPLIERS=invalid))
 
 
 def test_the_published_terms_hash_is_the_terms_file():

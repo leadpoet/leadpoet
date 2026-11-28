@@ -438,7 +438,8 @@ class ToolMarket:
     # Calls ------------------------------------------------------------------
     def platform_call(self, token: str, alias: str, request: Mapping[str, Any], *, raw: bool = True,
                       arrived: Optional[float] = None) -> dict:
-        """Serve platform calls that have a configured ceiling, using the same private supply, reservations and settlement."""
+        """Serve platform calls that have a configured ceiling (zerobounce_validate also without one),
+        using the same private supply, reservations and settlement."""
 
         if alias not in platform.OPERATIONS:
             raise ToolMarketError(404, "tool_unavailable")

@@ -1,0 +1,92 @@
+"""Paid pagination must retain the supplier that owns the vendor session."""
+from uuid import uuid4
+from urllib.parse import parse_qs, urlsplit
+
+import pytest
+
+from tests.tool_market.tool_market_pg_test import database, store, world, ok
+from lab_arena.tool_market import catalog
+from lab_arena.tool_market.market import ToolMarketError
+
+
+def test_lead_search_session_stays_on_first_supplier_after_price_change(world):
+    a, key_a = world.miner_key("session-supplier-A", 10)
+    b, key_b = world.miner_key("session-supplier-B", 12)
+    def price(miner, key, ask):
+        world.market.post_ask(world.who(miner), dict(key_id=key, operation="search_leads", ask_microusd=ask))
+    price(a, key_a, 5000)
+    price(b, key_b, 6000)
+    for secret in ("session-supplier-A", "session-supplier-B"):
+        world.vendor.script[secret] = [ok({"status":200,"elements":[]})]
+    _, tab = world.buyer()
+    session = str(uuid4())
+    def page(n, token=tab):
+        return world.market.call(token, {"tool":"harvestapi","operation":"search_leads",
+              "params":{"currentJobTitles":"Owner","sessionId":session,"page":n}})
+    with pytest.raises(ToolMarketError, match="session_page_one_required"):
+        page(2)
+    page(1)
+    price(b, key_b, 4000)
+    page(2)
+    assert [x[0] for x in world.vendor.sent] == ["session-supplier-A"] * 2
+    price(a, key_a, None)
+    with pytest.raises(ToolMarketError, match="no_supply"):
+        page(3)
+    _, other = world.buyer()
+    page(1, other)
+    upstream_ids = [parse_qs(urlsplit(x[2]).query)["sessionId"][0] for x in world.vendor.sent]
+    assert upstream_ids[0] == upstream_ids[1] != upstream_ids[2]
+    assert session not in upstream_ids
+
+
+def test_a_session_rewrite_past_the_url_limit_is_refused_before_any_key(world, monkeypatch):
+    miner, key = world.miner_key("session-long", 10)
+    world.market.post_ask(world.who(miner), dict(key_id=key, operation="search_leads", ask_microusd=5000))
+    _, tab = world.buyer()
+    params = {"currentJobTitles": "Owner", "sessionId": "a", "page": 1}
+    url, _, _ = catalog.operation("harvestapi", "search_leads").build(params)
+    monkeypatch.setattr(catalog, "MAX_URL", len(url))  # the buyer's URL fits; its rewrite does not
+    with pytest.raises(ToolMarketError) as refused:
+        world.market.call(tab, {"tool": "harvestapi", "operation": "search_leads", "params": params,
+                                "request_id": str(uuid4())})
+    assert (refused.value.status, refused.value.code) == (400, "param_invalid")
+    assert "request_id_used" not in refused.value.detail and world.vendor.sent == []
+
+
+def test_page_one_fails_over_and_the_session_pins_to_the_key_that_served_it(world):
+    for secret, ask in (("session-limited", 5000), ("session-serving", 6000)):
+        miner, key = world.miner_key(secret, 10)
+        world.market.post_ask(world.who(miner), dict(key_id=key, operation="search_leads", ask_microusd=ask))
+    world.vendor.script["session-limited"] = [ok({}, status=429)]
+    world.vendor.script["session-serving"] = [ok({"status": 200, "elements": []})]
+    _, tab = world.buyer()
+    session = str(uuid4())
+    def page(n):
+        return world.market.call(tab, {"tool": "harvestapi", "operation": "search_leads",
+              "params": {"currentJobTitles": "Owner", "sessionId": session, "page": n}})
+    page(1)  # the cheaper key is rate-limited; the next one serves page one
+    world.vendor.script["session-limited"] = [ok({"status": 200, "elements": []})]
+    page(2)
+    assert [x[0] for x in world.vendor.sent] == ["session-limited", "session-serving", "session-serving"]
+
+
+def test_a_session_pins_to_the_key_that_first_served_it_not_the_first_reserved(world):
+    for secret, ask in (("pin-slow", 5000), ("pin-fast", 6000)):
+        miner, key = world.miner_key(secret, 10)
+        world.market.post_ask(world.who(miner), dict(key_id=key, operation="search_leads", ask_microusd=ask))
+    _, tab = world.buyer()
+    session = str(uuid4())
+    def page(n):
+        return world.market.call(tab, {"tool": "harvestapi", "operation": "search_leads",
+              "params": {"currentJobTitles": "Owner", "sessionId": session, "page": n}})
+    served = ok({"status": 200, "elements": []})
+    def slow_then_served():  # while the first page one waits on the slow key, a retry is served elsewhere
+        world.vendor.script["pin-slow"] = [ok({}, status=429)]
+        page(1)
+        world.vendor.script["pin-slow"] = [served]
+        return served
+    world.vendor.script["pin-slow"] = [slow_then_served]
+    world.vendor.script["pin-fast"] = [served]
+    page(1)
+    page(2)
+    assert [x[0] for x in world.vendor.sent] == ["pin-slow", "pin-slow", "pin-fast", "pin-fast"]

@@ -41,15 +41,22 @@ def evidence(monkeypatch):
     def signed(epoch):
         basis = {"schema_version": COLLECTION_BASIS_SCHEMA, "source_epoch": epoch-1, "job_count":0,
                  "job_set_sha256":sha256(b"").hexdigest(), "quotes_microusd":{}, "valuation":None}
+        snapshot = {"block":1000, "block_hash":"0x"+"2"*64, "miner_alpha_rao":10**9,
+                    "tao_rao_per_alpha":10**9, "tao_price_microusd":100, "price_updated_at":1,
+                    "observed_at":1, "emission_microusd":100}
+        market = None
+        if epoch == 100 and config.get("market"):
+            market = {"epoch": epoch, "schema_version": "leadpoet.tool_market.supplier_allocations.v1",
+                      "emission_microusd": 100, "allocations_microusd": {keys[2]: 25}}
+            if not config.get("paid"):
+                market["valuation"] = snapshot
         if epoch == 100 and config.get("paid"):
             basis.update(job_count=1, job_set_sha256="b"*64, quotes_microusd={keys[1]:50},
-                         valuation={"block":1000, "block_hash":"0x"+"2"*64, "miner_alpha_rao":10**9,
-                                    "tao_rao_per_alpha":10**9, "tao_price_microusd":100, "price_updated_at":1,
-                                    "observed_at":1, "emission_microusd":100})
+                         valuation=snapshot)
         return weight_state.build_accepted_weight_state(
             signer, network="finney", netuid=71, genesis_hash="1"*64, epoch=epoch,
             valid_from_block=1000, valid_until_block=1359, reward_basis=basis,
-            burn_hotkey=keys[0], issued_at="2026-11-25T00:00:00Z", slot_eligibility=None)
+            burn_hotkey=keys[0], issued_at="2026-11-25T00:00:00Z", slot_eligibility=None, tool_market=market)
     monkeypatch.setattr(sampler, "ArenaStore", lambda _: SimpleNamespace(
         collection_reward_start_epoch=lambda:100, get_weight_state=lambda _net, _uid, e: {"state_doc":signed(e)}))
     def billing(name, params):
@@ -64,6 +71,20 @@ def evidence(monkeypatch):
                                          "attributes":{"netuid":71,"emissions":config["actual"]}}}])
     return config, matches, keys, lambda: sampler.receipt_at(
         graph, None, SimpleNamespace(rpc=billing), signer, None, 1360, 100, watch.VALIDATORS)
+
+
+def test_supplier_only_and_mixed_recipients_keep_separate_signed_targets(evidence):
+    config, matches, keys, receipt = evidence
+    config.update(market=True, actual=[1500, 0, 500])
+    row = receipt()
+    assert row["result"] == "supplier_recipients_observed"
+    assert row["quotes_microusd"] == {} and row["supplier_targets_microusd"] == {keys[2]: 25}
+    config.update(paid=True, actual=[500, 1000, 500])
+    row = receipt()
+    assert row["result"] == "collection_recipients_observed"
+    assert row["quotes_microusd"] == {keys[1]: 50} and row["supplier_targets_microusd"] == {keys[2]: 25}
+    matches["yuma"] = "differs"
+    assert receipt()["result"] == "inspect"
 
 
 def test_actual_burn_and_paid_recipients_require_ledger_both_vector_checks_and_event(evidence):

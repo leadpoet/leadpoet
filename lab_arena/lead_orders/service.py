@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol
 
 from lab_arena import signing
+from lab_arena.store import ArenaStoreError
 from lab_arena.contracts import canonical_json
 from lab_arena.lead_orders import keys as lead_keys
 from lab_arena.lead_orders import receipts, rewards, suppressions
@@ -134,6 +135,15 @@ class UnavailableMailer:
 
     def send_confirmation(self, *, email: str, confirm_url: str) -> None:
         raise MailerUnavailable("no confirmation mail sender is configured")
+
+
+def _since(since: Any) -> int:
+    """A feed cursor: a whole number, 0 when absent."""
+
+    text = "0" if since in (None, "") else str(since)
+    if not text.isdigit() or len(text) > 18:
+        raise LeadOrderServiceError(422, "since_invalid")
+    return int(text)
 
 
 def usd(microusd: Any) -> Optional[str]:
@@ -522,7 +532,13 @@ class LeadOrderService:
             key_id=row["key_id"], provider=row["provider"], miner_hotkey=hotkey, registered_sequence=0,
             internal_fingerprint=row["internal_fingerprint"],
         ).public_fingerprint
-        result = self._store.register_key(row, public_fingerprint=public, daily_cap_microusd=daily_cap)
+        try:
+            result = self._store.register_key(row, public_fingerprint=public, daily_cap_microusd=daily_cap)
+        except ArenaStoreError as exc:
+            # Fingerprints are unique for good: a revoked key never comes back.
+            if (getattr(exc, "store_error", None) or {}).get("code") == "23505":
+                raise LeadOrderServiceError(409, "key_already_registered") from None
+            raise
         if result.get("status") != "registered":
             raise LeadOrderServiceError(409, str(result.get("status") or "key_not_registered"))
         return {"status": "registered", "key_id": row["key_id"], "public_fingerprint": public,
@@ -594,11 +610,9 @@ class LeadOrderService:
                    or bool(self._store.buyer(hotkey).get("confirmed")))
         if not allowed:
             raise LeadOrderServiceError(403, "suppressions_not_allowed")
-        text = "0" if since in (None, "") else str(since)
-        if not text.isdigit() or len(text) > 18:
-            raise LeadOrderServiceError(422, "since_invalid")
-        rows = self._store.suppressions(since=int(text), limit=suppressions.PAGE_SIZE)
-        return {"suppressions": rows, "next_since": rows[-1]["sequence"] if rows else int(text),
+        since = _since(since)
+        rows = self._store.suppressions(since=since, limit=suppressions.PAGE_SIZE)
+        return {"suppressions": rows, "next_since": rows[-1]["sequence"] if rows else since,
                 "more": len(rows) == suppressions.PAGE_SIZE}
 
     def statement(self, hotkey: str, since: Any) -> Dict[str, Any]:
@@ -608,10 +622,24 @@ class LeadOrderService:
 
         if hotkey in self.config.blocked_hotkeys:
             raise LeadOrderServiceError(403, "hotkey_not_allowed")
-        text = "0" if since in (None, "") else str(since)
-        if not text.isdigit() or len(text) > 18:
-            raise LeadOrderServiceError(422, "since_invalid")
-        return self._store.statement(hotkey, since=int(text), limit=STATEMENT_PAGE_SIZE)
+        return self._store.statement(hotkey, since=_since(since), limit=STATEMENT_PAGE_SIZE)
+
+    def vault_receipts(self, hotkey: str, since: Any) -> Dict[str, Any]:
+        """A miner's signed vault receipts after ``since`` (receipt sequence),
+        and the vault key each of their active keys is sealed to.
+
+        ``python -m lead_order_vault.cli receipts`` checks the signatures and
+        the per-key sequence against the vault it verified itself."""
+
+        if hotkey in self.config.blocked_hotkeys:
+            raise LeadOrderServiceError(403, "hotkey_not_allowed")
+        since = _since(since)
+        page = self._store.vault_receipts(hotkey, since=since, limit=STATEMENT_PAGE_SIZE)
+        rows = list(page.get("receipts") or [])
+        keys = [{"key_id": row["key_id"], "provider": row["provider"], "key_fingerprint": row["key_fingerprint"],
+                 "sealed_to": lead_keys.sealed_to(row.get("envelope"))} for row in page.get("keys") or []]
+        return {"receipts": rows, "keys": keys, "next_since": rows[-1]["sequence"] if rows else since,
+                "more": len(rows) == STATEMENT_PAGE_SIZE}
 
     # -- public -------------------------------------------------------------
     def public_policy(self, version: Any) -> Dict[str, Any]:

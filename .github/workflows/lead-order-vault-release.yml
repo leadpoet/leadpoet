@@ -1,0 +1,48 @@
+name: Lead-order vault release
+
+# Builds the key vault image twice from the exact main commit, refuses to
+# publish unless both builds have the same digest, pushes it to GHCR, and
+# uploads the compose file pinned to that digest. Approving the compose hash
+# on Base stays a manual, owner-signed step (docs/gamma-lead-order-vault.md, "Releasing").
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: lead-order-vault-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/leadpoet/lead-order-vault
+
+jobs:
+  release:
+    if: github.repository == 'leadpoet/leadpoet' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out exact main commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Build twice and compare
+        id: build
+        run: bash .github/scripts/lead_order_vault_build.sh
+      - name: Push the image
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: bash .github/scripts/lead_order_vault_build.sh push
+      - name: Upload the pinned compose file
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lead-order-vault-${{ github.sha }}
+          path: dist/lead-order-vault/
+          if-no-files-found: error

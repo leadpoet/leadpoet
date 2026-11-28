@@ -88,6 +88,8 @@ LEAD_ORDER_FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lead_order_record_readback_v1": (("p_call_id", _U), ("p_outcome", _T)),
     "lead_order_reward_late_v1": (("p_epoch", _B), ("p_limit", _I)),
     "lead_order_statement_v1": (("p_hotkey", _T), ("p_since", _B), ("p_limit", _I)),
+    "lead_order_record_vault_receipt_v1": (("p_call_id", _U), ("p_kind", _T), ("p_receipt", _J)),
+    "lead_order_vault_receipts_v1": (("p_hotkey", _T), ("p_since", _B), ("p_limit", _I)),
 }
 
 
@@ -217,6 +219,14 @@ class LeadOrderStore:
 
     def statement(self, hotkey: str, *, since: int, limit: int) -> Dict[str, Any]:
         return self._rpc("lead_order_statement_v1", p_hotkey=hotkey, p_since=int(since), p_limit=int(limit))
+
+    def record_vault_receipt(self, *, call_id: str, kind: str, receipt: Mapping[str, Any]) -> Dict[str, Any]:
+        """Keep one signed vault receipt for a call or its cost read-back."""
+        return self._rpc("lead_order_record_vault_receipt_v1", p_call_id=call_id, p_kind=kind,
+                         p_receipt=dict(receipt))
+
+    def vault_receipts(self, hotkey: str, *, since: int, limit: int) -> Dict[str, Any]:
+        return self._rpc("lead_order_vault_receipts_v1", p_hotkey=hotkey, p_since=int(since), p_limit=int(limit))
 
     def exhaust_key(self, *, order_id: str, key_id: str, reason: str) -> None:
         self._rpc("lead_order_exhaust_key_v1", p_order_id=order_id, p_key_id=key_id, p_reason=reason)

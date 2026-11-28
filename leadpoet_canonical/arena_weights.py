@@ -41,7 +41,9 @@ _BODY_FIELDS = (
     "valid_from_block", "valid_until_block", "reward_basis",
     "burn_hotkey", "issued_at",
 )
-_OPTIONAL_BODY_FIELDS = ("slot_eligibility", "weekly_slot_decay")
+_SLOT_FIELDS = ("slot_eligibility", "weekly_slot_decay")
+_OPTIONAL_BODY_FIELDS = _SLOT_FIELDS + ("tool_market",)
+TOOL_MARKET_SCHEMA = "leadpoet.tool_market.supplier_allocations.v1"
 _HOTKEY_CHARS = frozenset("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
 _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$")
 
@@ -150,6 +152,10 @@ def validate_collection_basis(basis: Mapping[str, Any], epoch: int, start_block:
     if not count:
         _require(valuation is None, "empty collection has a valuation")
         return
+    _validate_emission_valuation(valuation, start_block)
+
+
+def _validate_emission_valuation(valuation: Any, start_block: int) -> None:
     _require(isinstance(valuation, dict) and set(valuation) == {
         "block", "block_hash", "miner_alpha_rao", "tao_rao_per_alpha", "tao_price_microusd",
         "price_updated_at", "observed_at", "emission_microusd"}, "collection valuation fields are invalid")
@@ -164,6 +170,31 @@ def validate_collection_basis(basis: Mapping[str, Any], epoch: int, start_block:
     budget = _integer(valuation["emission_microusd"], "emission_microusd")
     _require(price > 0 and usd > 0 and budget == alpha * price * usd // 10**18,
              "collection emission valuation differs")
+
+
+def validate_tool_market(market: Any, basis: Mapping[str, Any], *, epoch: int, start_block: int, burn: str) -> None:
+    """Authorize only registered supplier targets within the unquoted collection residual."""
+    fields = {"schema_version", "epoch", "emission_microusd", "allocations_microusd"}
+    if not basis["job_count"]:
+        fields.add("valuation")
+    _require(isinstance(market, dict) and set(market) == fields, "tool market allocation fields differ")
+    _require(market["schema_version"] == TOOL_MARKET_SCHEMA and _integer(market["epoch"], "market epoch") == epoch,
+             "tool market epoch or schema differs")
+    if basis["job_count"]:
+        valuation = basis["valuation"]  # verified with the unchanged collection quote set
+    else:
+        valuation = market["valuation"]
+        _validate_emission_valuation(valuation, start_block)
+    emission = _integer(market["emission_microusd"], "tool market emission")
+    _require(emission > 0 and emission == valuation["emission_microusd"], "tool market emission differs")
+    targets = market["allocations_microusd"]
+    _require(isinstance(targets, dict) and 0 < len(targets) <= 65536, "invalid tool market beneficiaries")
+    for key, amount in targets.items():
+        _require(_hotkey(key, "supplier") != burn and _integer(amount, "supplier amount") * U16_MAX >= emission,
+                 "invalid tool market target")
+    # Reserve every collection quote even if a beneficiary left the metagraph.
+    _require(sum(targets.values()) <= emission - sum(basis["quotes_microusd"].values()),
+             "tool market exceeds residual after collection quotes")
 
 
 def validate_accepted_weight_state(value: Any) -> Dict[str, Any]:
@@ -182,12 +213,16 @@ def validate_accepted_weight_state(value: Any) -> Dict[str, Any]:
     _require(valid_from <= valid_until, "accepted weight state validity window is invalid")
     _require(isinstance(value.get("issued_at"), str) and bool(_TIMESTAMP_RE.fullmatch(value["issued_at"])), "issued_at is invalid")
     if _collection_basis(value):
-        _require(not (set(value) & set(_OPTIONAL_BODY_FIELDS)), "collection cannot pay champion slots")
+        _require(not (set(value) & set(_SLOT_FIELDS)), "collection cannot pay champion slots")
         _require((network, netuid) == ("finney", 71), "collection subnet differs")
         reward_basis = value["reward_basis"]
         validate_collection_basis(reward_basis, epoch, valid_from)
         _require(value.get("burn_hotkey") not in reward_basis["quotes_microusd"], "burn cannot fund a job")
+        if "tool_market" in value:
+            validate_tool_market(value["tool_market"], reward_basis, epoch=epoch, start_block=valid_from,
+                                 burn=value["burn_hotkey"])
     else:
+        _require("tool_market" not in value, "tool market requires a collection reward state")
         reward_basis = validate_reward_basis(value.get("reward_basis"))
         _require(int(reward_basis["effective_reward_epoch"]) <= epoch, "reward basis is not effective for epoch")
     if "slot_eligibility" in value:
@@ -277,6 +312,13 @@ def derive_arena_weights(value: Any, metagraph_hotkeys: Sequence[str]) -> Dict[s
             champion_share = Fraction(0)
     _require(champion_share <= 1, "Arena allocation exceeds total emissions")
     unused = Fraction(1) - champion_share - collection_share
+    if "tool_market" in state:
+        market = state["tool_market"]
+        for key, amount in market["allocations_microusd"].items():
+            if key in registered_hotkeys:
+                share = Fraction(amount, market["emission_microusd"])
+                by_hotkey[key] = by_hotkey.get(key, Fraction(0)) + share
+                unused -= share
     if unused:
         by_hotkey[burn_hotkey] = by_hotkey.get(burn_hotkey, Fraction(0)) + unused
     registered = []

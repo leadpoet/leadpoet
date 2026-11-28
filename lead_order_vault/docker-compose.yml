@@ -1,0 +1,19 @@
+# The compose file Phala hashes. Its hash must be approved on the app's
+# on-chain contract before the KMS releases the vault's keys to it.
+# The image is pinned by digest. The release workflow writes the pinned copy
+# to its artifact; this file keeps a placeholder digest.
+services:
+  vault:
+    image: ghcr.io/leadpoet/lead-order-vault@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    restart: always
+    # Calls in flight finish before the vault stops (vault.py, main).
+    stop_grace_period: 330s
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    environment:
+      # Encrypted env var, set in Phala. Only the broker holds it.
+      - LEAD_ORDER_VAULT_CALLER_TOKEN=${LEAD_ORDER_VAULT_CALLER_TOKEN}
+    logging:
+      driver: none

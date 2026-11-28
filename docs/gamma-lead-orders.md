@@ -363,10 +363,20 @@ mailer is wired the registration is stored and the call answers 503
 `confirmation_email_unavailable`.
 
 Miner key routes (hotkey-signed): `POST /lead-orders/keys` `{provider,
-credentials, daily_cap_usd}` stores the key encrypted with the Arena
-credential KMS key and returns `{status, key_id, public_fingerprint,
-daily_cap_usd}`; one active key per miner and provider.
-`POST /lead-orders/keys/{key_id}/revoke`.
+credentials, daily_cap_usd}` takes a key sealed to the lead-order key vault
+(`docs/gamma-lead-order-vault.md`). `credentials` is `{envelope}` for
+Deepline and `{envelope, management_envelope}` for OpenRouter, as
+`python -m lead_order_vault.cli seal` prints them. The vault checks the key
+with its provider; Leadpoet stores only the envelope and returns `{status,
+key_id, public_fingerprint, daily_cap_usd}`; one active key per miner and
+provider. `POST /lead-orders/keys/{key_id}/revoke`.
+
+`GET /lead-orders/vault-receipts?since=<receipt sequence>` (hotkey-signed)
+answers up to 500 of the vault's signed receipts for the miner's keys, each
+with its `sequence`, `call_id` and `kind` (`call` or the free cost
+`readback`), and lists the miner's active keys with the vault key each is
+sealed to, plus `next_since` and `more` for the next page.
+`python -m lead_order_vault.cli receipts` checks them.
 
 `GET /lead-orders/statement?since=<call sequence>` (hotkey-signed; the
 signature covers the path without the query) is a miner's own ledger. It
@@ -454,8 +464,8 @@ validator's weight signer: wiring it in is a separate reviewed change.
 
 ## Known limits
 
-- Lead-order keys are encrypted with the Arena credential KMS key, not a
-  dedicated key, so the two share access and audit scope.
+- A key registered before the vault is not sealed to it. The broker skips
+  it and `vault-receipts` lists it as needing a new seal.
 - The suppression hashes are unsalted (see the suppression feed).
 - Miners see what Leadpoet calls on their keys. Every call runs on miner keys
   in `live` (Gavin's choice, Nov 20 2026), so a miner can read the request

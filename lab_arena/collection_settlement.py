@@ -154,8 +154,15 @@ def payment_receipt(
         paid["total_miner_rao"],
         state["reward_basis"]["valuation"],
     )
+    supplier_targets = state.get("tool_market", {}).get("allocations_microusd", {})
+    shared = quotes.keys() & supplier_targets.keys()
+    for key in shared:
+        # The chain records exactly one total per UID. Keep that gross total in
+        # miner_emissions_rao, outside the collection-only payment fields.
+        amounts[key].update(actual_rao=None, actual_microusd_at_signed_price=None, reference_target_rao=None)
     return {
-        **paid,
+        **{k: v for k, v in paid.items() if k != "supplier_targets_microusd"},
+        **({"supplier_targets_microusd": supplier_targets} if supplier_targets else {}),
         "schema": "leadpoet.collection.revealed_payment.v1",
         "quote_epoch": quote_epoch,
         "distribution_epoch": paid["epoch"],
@@ -222,13 +229,14 @@ def observe(env, db, directory, previous, closed_epoch, first_paid_epoch, valida
             digest = distributions.persist_receipt(
                 directory / "settlements", epoch, receipt
             )
+            shared = receipt["quotes_microusd"].keys() & receipt.get("supplier_targets_microusd", {}).keys()
             progress["last_paid"] = {
                 "quote_epoch": epoch,
                 "distribution_epoch": epoch + 1,
                 "result": receipt["result"],
                 "quoted_microusd": sum(receipt["quotes_microusd"].values()),
-                "actual_rao": sum(a["actual_rao"] for a in receipt["amounts"].values()),
-                "reference_target_rao": sum(
+                "actual_rao": None if shared else sum(a["actual_rao"] for a in receipt["amounts"].values()),
+                "reference_target_rao": None if shared else sum(
                     a["reference_target_rao"] for a in receipt["amounts"].values()
                 ),
                 "receipt_sha256": digest,

@@ -231,7 +231,8 @@ def historical_realization(db, blocks):
         {"boundary": pay_boundary},
         VALIDATORS,
     )
-    if receipt["result"] != "collection_recipients_observed" or not receipt["amounts"]:
+    if (receipt["result"] != "collection_recipients_observed" or not receipt["amounts"]
+            or any(r["actual_microusd_at_signed_price"] is None for r in receipt["amounts"].values())):
         raise ValueError("missing finalized comparable payout observation")
     return {
         "quote_epoch": epoch,

@@ -287,8 +287,16 @@ class Vault:
                 if tool.balance_url is None:
                     # No free check: opened and named only. Its calls prove it.
                     return dict(result, status="unchecked")
-                balance = _field(self._probe(tool, tool.balance_url, runtime, provider + "_api_key"),
-                                 tool.balance_field)
+                account = self._probe(tool, tool.balance_url, runtime, provider + "_api_key")
+                if provider == "findymail" and account.get("has_capacity") is not None:
+                    # Usage plans expose remaining capacity as a boolean. Their
+                    # numeric credits may be zero even when requests can run.
+                    if type(account["has_capacity"]) is not bool:
+                        raise VaultError("check_unavailable", 503)
+                    if not account["has_capacity"]:
+                        raise _Invalid("findymail_api_key_no_credit")
+                    return dict(result, status="valid", has_capacity=True)
+                balance = _field(account, tool.balance_field)
                 if tool.balance_field and balance is None:
                     raise VaultError("check_unavailable", 503)
                 if balance is not None:

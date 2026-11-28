@@ -797,7 +797,7 @@ class ToolMarket:
             except ToolMarketError:  # unknown: the key stays
                 return
             # Already recorded as invalid, or it still has credit.
-            if checked["status"] == "invalid" or checked.get("balance") is not None:
+            if checked["status"] == "invalid" or checked.get("balance") is not None or checked.get("has_capacity") is True:
                 return
         self._store.record_key_event(key_id=ask.key_id, status="invalid",
                                      reason="unauthorized" if status == 401 else "no_credit")

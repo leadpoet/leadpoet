@@ -586,6 +586,11 @@ ZB_CREDITS = "/v2/getcredits?api_key=" + ZEROBOUNCE_KEY
     ("zerobounce", lambda: _balance(ZB_CREDITS, 200, {"error": "unavailable"}), None),
     ("findymail", lambda: _balance("/api/credits", 200, {"credits": True}), None),
     ("findymail", lambda: _balance("/api/credits", 200, {"credits": 40}), {"status": "valid", "balance": 40}),
+    ("findymail", lambda: _balance("/api/credits", 200, {"credits": 0, "has_capacity": True}),
+     {"status": "valid", "has_capacity": True}),
+    ("findymail", lambda: _balance("/api/credits", 200, {"credits": 40, "has_capacity": False}),
+     {"status": "invalid", "reason": "findymail_api_key_no_credit"}),
+    ("findymail", lambda: _balance("/api/credits", 200, {"credits": 0, "has_capacity": "true"}), None),
     ("findymail", lambda: _balance("/api/credits", 401, {}), {"status": "invalid", "reason": "findymail_api_key_invalid"}),
     ("findymail", lambda: _balance("/api/credits", 402, {}),
      {"status": "invalid", "reason": "findymail_api_key_no_credit"}),
@@ -756,8 +761,19 @@ def test_every_answer_closes_its_connection_and_slow_clients_are_cut(monkeypatch
 
     monkeypatch.setattr(vault_module, "REQUEST_READ_SECONDS", 0.5)
 
+    released = threading.Event()
+
     class OneSlot(BoundedServer):
         MAX_CONNECTIONS = 1
+
+        def process_request_thread(self, request, client_address):
+            super().process_request_thread(request, client_address)
+            released.set()
+
+    def wait_for_release():
+        # Receiving EOF precedes the worker returning its one connection slot.
+        assert released.wait(3)
+        released.clear()
 
     vault, tls = _tls_vault()
     with _serving(make_handler(vault), tls, OneSlot) as (server, _):
@@ -768,6 +784,7 @@ def test_every_answer_closes_its_connection_and_slow_clients_are_cut(monkeypatch
         refused.read()
         assert refused.status == 401 and refused.will_close
         connection.close()
+        wait_for_release()
         # A client that never finishes the TLS handshake is cut too.
         silent = socket.create_connection(server.server_address)
         silent.settimeout(3)
@@ -778,6 +795,7 @@ def test_every_answer_closes_its_connection_and_slow_clients_are_cut(monkeypatch
             pass
         assert time.monotonic() - started < 2
         silent.close()
+        wait_for_release()
         # A client sending one byte at a time holds the only slot only until
         # the read deadline, not for as long as it keeps trickling.
         slow = UNVERIFIED.wrap_socket(socket.create_connection(server.server_address))
@@ -795,7 +813,7 @@ def test_every_answer_closes_its_connection_and_slow_clients_are_cut(monkeypatch
             pass
         assert time.monotonic() - started < 2
         slow.close()
-        time.sleep(0.1)
+        wait_for_release()
         connection = _connect(server)
         connection.request("GET", "/healthz")
         answered = connection.getresponse()

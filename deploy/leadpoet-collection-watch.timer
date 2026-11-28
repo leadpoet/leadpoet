@@ -3,7 +3,8 @@ Description=Check for funded SN71 runs, admission failures and reward transition
 
 [Timer]
 OnBootSec=2min
-OnUnitInactiveSec=10min
+OnUnitInactiveSec=2min
+AccuracySec=10s
 
 [Install]
 WantedBy=timers.target

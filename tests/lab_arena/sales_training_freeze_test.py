@@ -10,6 +10,9 @@ def row(
 ):
     band = {"base": 1, "brief": 2, "review": 3}.get(variant, 4)
     scenario = f"{family}-s{band*10_000_000+ordinal}"
+    from lab_arena import collection_programs as programs
+
+    entry = programs.sandbox(family)
     messages = [
         {"role": "system", "content": "Follow policy."},
         {"role": "user", "content": scenario},
@@ -28,9 +31,9 @@ def row(
             "template_id": family,
             "rule_pool": "fixture",
             "tool_variant": variant,
-            "manifest_sha256": "a" * 64,
+            "manifest_sha256": entry["partition"].removeprefix("sha256:"),
         },
-        "builder_commit": "1" * 40,
+        "builder_commit": entry["builder"],
         "harness_commit": "2" * 40,
         "manifest_sha256": "sha256:" + "3" * 64,
         "terms_sha256": "sha256:" + "4" * 64,
@@ -60,6 +63,7 @@ def row(
             "case_pattern": ordinal % 200,
             "program": {
                 "schema": "collection.sales-program.v3",
+                "registry_sha256": "sha256:" + f.digest(entry),
                 "collection": "C3" if student else "C1",
                 "sandbox": family,
                 "variant": variant,
@@ -192,3 +196,42 @@ def test_no_heldout_high_effort_or_counterfactual_leakage():
     r["model_revision"] = "untested"
     with pytest.raises(ValueError, match="approved untuned"):
         f.observation(r, 256, node=True)
+
+
+def test_private_index_rechecks_archive_and_excludes_quarantine(tmp_path):
+    from hashlib import sha256
+    from zipfile import ZipFile
+
+    root = tmp_path / "exports"
+    batch = "pool-" + "f" * 64
+    row1 = row("good", f.FAR, 1, True)
+    bad = row("held", f.FAR, 2, False)
+    (root / "snapshots").mkdir(parents=True)
+    folder = root / batch
+    folder.mkdir()
+    archive = folder / ("a" * 64 + ".zip")
+    with ZipFile(archive, "x") as z:
+        z.writestr("metadata.json", f.encoded({"dataset_sha256": "sha256:" + "a" * 64}))
+        z.writestr("trajectories/good.jsonl", f.encoded(row1))
+        z.writestr("trajectories/held.jsonl", f.encoded(bad))
+    group = {
+        "file": archive.name,
+        "archive_sha256": sha256(archive.read_bytes()).hexdigest(),
+        "dataset_sha256": "sha256:" + "a" * 64,
+        "released": ["good"],
+        "held": {"held": "quarantine"},
+    }
+    idx = f.encoded(
+        {
+            "schema": "collection.private-export-index.v1",
+            "offers": {batch: {row1["scenario_id"]: group}},
+        }
+    )
+    ident = sha256(idx).hexdigest()
+    index = root / "snapshots" / (ident + ".json")
+    index.write_bytes(idx)
+    index.chmod(0o600)
+    assert [record[0]["run_id"] for record in f.packs(root, ident)] == ["good"]
+    archive.write_bytes(archive.read_bytes() + b"x")
+    with pytest.raises(ValueError, match="archive hash"):
+        list(f.packs(root, ident))

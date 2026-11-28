@@ -120,7 +120,10 @@ class Observation:
     first_failure: bool
     short: bool
     score: float | None
-    source_kind: str | None = None
+    effort: str
+    route: str | None
+    revision: str
+    checkpoint: str | None
 
     @property
     def matched_case(self):
@@ -137,7 +140,8 @@ def observation(row, short_words, *, node=False):
     if not (
         sep
         and seed.isdigit()
-        and int(seed) >= 300
+        and int(seed) > 0
+        and not 101 <= int(seed) <= 299
         and family == split["template_id"]
         and INPUT_SHA.fullmatch(split["manifest_sha256"])
     ):
@@ -164,13 +168,22 @@ def observation(row, short_words, *, node=False):
     ):
         raise ValueError("program provenance differs from training purpose")
     if program:
-        band, ordinal = divmod(int(seed), 10_000_000)
+        from lab_arena import collection_programs as programs
+
+        entry = programs.sandbox(family)
+        identified_family, identified_variant, ordinal = programs.identity(
+            row["scenario_id"]
+        )
         if (
-            band not in (1, 2, 3)
-            or {"base": 1, "brief": 2, "review": 3}[variant] != band
+            program.get("schema") != programs.SCHEMA
+            or program.get("registry_sha256") != "sha256:" + digest(entry)
+            or entry["kind"] != "train"
+            or row["builder_commit"] != entry["builder"]
+            or "sha256:" + split["manifest_sha256"] != entry["partition"]
+            or (identified_family, identified_variant) != (family, variant)
             or type(experiment.get("ordinal")) is not int
             or experiment["ordinal"] != ordinal
-            or experiment.get("case_pattern") != ordinal % 200
+            or experiment.get("case_pattern") != ordinal % entry["patterns"]
         ):
             raise ValueError("scenario differs from its training-only program identity")
     if collection != "C5" and experiment.get("reasoning_effort", "low") == "high":
@@ -224,7 +237,10 @@ def observation(row, short_words, *, node=False):
         bool(row.get("first_failed_check")),
         short,
         score,
-        program.get("source_kind"),
+        experiment.get("reasoning_effort", "low"),
+        row.get("provider_route"),
+        row["model_revision"],
+        row.get("student_source_sha256"),
     )
 
 
@@ -541,11 +557,20 @@ def freeze(
         maps = defaultdict(list)
         for o in observations:
             maps[
-                (o.origin, o.collection, o.family, o.variant, o.case, o.model, o.role)
+                (
+                    o.origin,
+                    o.collection,
+                    o.family,
+                    o.variant,
+                    o.case,
+                    o.model,
+                    o.role,
+                    o.group,
+                )
             ].append(o)
         with (bundle / "case-map.jsonl").open("xb") as f:
             for key, g in sorted(maps.items()):
-                origin, coll, fam, v, case, model, role = key
+                origin, coll, fam, v, case, model, role, group_id = key
                 f.write(
                     encoded(
                         dict(
@@ -557,6 +582,12 @@ def freeze(
                             model=model,
                             role=role,
                             pattern=g[0].pattern,
+                            repeat_group_id=group_id,
+                            repeats=sorted(o.repeat for o in g),
+                            reasoning_effort=g[0].effort,
+                            route=g[0].route,
+                            model_revision=g[0].revision,
+                            source_state=g[0].checkpoint,
                             attempts=len(g),
                             passes=sum(o.passed is True for o in g),
                             failures=sum(o.passed is False for o in g),
@@ -582,6 +613,23 @@ def freeze(
             "runs": len(observations),
             "arm_counts": counts,
             "controls": controls,
+            "case_patterns_by_sandbox": {
+                family: sorted(
+                    {
+                        o.pattern
+                        for o in observations
+                        if o.family == family and o.pattern is not None
+                    }
+                )
+                for family in sorted({o.family for o in observations})
+            },
+            "verified_outcomes": {
+                "pass": sum(o.passed is True for o in observations),
+                "fail": sum(o.passed is False for o in observations),
+                "incomplete": sum(o.passed is None for o in observations),
+            },
+            "positive_corrections": dict(Counter(corrections.values())),
+            "verified_restatements": len(restatements),
             "sandbox_counts": dict(Counter(o.family for o in observations)),
             "collection_counts": dict(Counter(o.collection for o in observations)),
             "source_counts": dict(Counter(o.origin for o in observations)),
@@ -720,13 +768,9 @@ def signed_students(bundles, harness, builders, key):
             ):
                 raise ValueError("invalid or duplicate node repetition")
             seen_repeats.add((tuple(group), rep))
-            program = {
-                "schema": "collection.sales-program.v3",
-                "collection": "C3",
-                "sandbox": family,
-                "variant": row["variant"],
-                "use": "training",
-            }
+            from lab_arena.collection_programs import program as make_program
+
+            program = make_program("C3", family, row["variant"])
             exact = {
                 **row,
                 "repeat_group_id": "sha256:" + digest(group),

@@ -61,6 +61,10 @@ class Experiment:
 def source_revisions(raw=None):
     from lab_arena.collection_workflow import experiment_revisions
 
+    if raw and "program" in raw:
+        from lab_arena.collection_programs import sandbox
+        from lab_arena.collection_workflow import CORRECTION_CHAMPION_REV
+        return CORRECTION_CHAMPION_REV, sandbox(raw["program"]["sandbox"])["builder"]
     return experiment_revisions(c["scenario_id"] for c in (raw or {}).get("cases", []))
 
 
@@ -90,6 +94,8 @@ def load_experiment(raw, prompt):
                 "successor_seeds",
                 "correction_model",
                 "auto_from_program",
+                "program",
+                "followups",
                 "series_arm_order",
             }
             if pool
@@ -146,13 +152,19 @@ def load_experiment(raw, prompt):
         for items in (cases, arms)
     ):
         raise ValueError("invalid experiment size")
+    v3 = "program" in raw
+    if "followups" in raw and not v3:
+        raise ValueError("research follow-ups require a registered program")
+    from lab_arena.collection_programs import SCENARIO as registered_scenario, validate_program
+
     for case in cases:
         if (
             not isinstance(case, dict)
-            or set(case) not in ({"scenario_id"}, {"scenario_id", "source_sha256"})
+            or set(case) not in (({"scenario_id"}, {"scenario_id", "source_sha256", "decision_sha256"}) if v3 else ({"scenario_id"}, {"scenario_id", "source_sha256"}))
             or not isinstance(case["scenario_id"], str)
             or not (
-                re.fullmatch(r"(?:P7|P8|P9|P10)-s[1-9][0-9]{0,7}", case["scenario_id"])
+                (registered_scenario.fullmatch(case["scenario_id"]) if v3 else
+                 re.fullmatch(r"(?:P7|P8|P9|P10)-s[1-9][0-9]{0,7}", case["scenario_id"]))
                 if pool
                 else SYNTHETIC_SCENARIO.fullmatch(case["scenario_id"])
             )
@@ -195,7 +207,7 @@ def load_experiment(raw, prompt):
         if (
             not NAME.fullmatch(arm["id"])
             or arm["id"] in arm_names
-            or arm["role"] not in {"expert", "continuation"}
+            or arm["role"] not in ({"expert", "continuation", "student"} if v3 else {"expert", "continuation"})
             or model not in GENERATOR_ROUTES
             or not _integer(arm["repeats"], 1, slot_limit)
             or not _integer(arm["max_steps"], 1, 90)
@@ -257,6 +269,8 @@ def load_experiment(raw, prompt):
         from lab_arena.collection_broker import REFERENCE_MODEL, REFERENCE_ROUTE
         from lab_arena.collection_quality import require_release_partition
 
+        if v3:
+            validate_program(raw)
         require_release_partition(raw)
         selected = raw.get("routes")
         if (
@@ -363,13 +377,16 @@ def verify_provenance(spec, receipt, sources, *, objects=None):
         "sources",
     }:
         raise ValueError("invalid Poet source attestation")
+    bulk = body["schema"] == "collection.poet-student-sources.v2"
+    requested = {c["source_sha256"] for c in spec.raw["cases"] if "source_sha256" in c}
     if (
-        body["schema"] != "collection.poet-student-sources.v1"
+        (body["schema"] != "collection.poet-student-sources.v1" and not bulk)
+        or (bulk and (spec.raw.get("program", {}).get("source_kind") != "node_student"
+                      or not 1 <= len(body["sources"]) <= 10000))
         or not NAME.fullmatch(body["producer"])
         or body["split_sha256"] != spec.raw["split_sha256"]
         or not isinstance(body["sources"], dict)
-        or set(body["sources"])
-        != {c["source_sha256"] for c in spec.raw["cases"] if "source_sha256" in c}
+        or (not requested <= set(body["sources"]) if bulk else set(body["sources"]) != requested)
         or _hash(receipt) != spec.raw["provenance_sha256"]
     ):
         raise ValueError("Poet source attestation differs from the experiment")
@@ -382,6 +399,10 @@ def verify_provenance(spec, receipt, sources, *, objects=None):
         raise ValueError("invalid Poet source signature") from exc
     for digest, source in sources.items():
         info = body["sources"][digest]
+        if bulk:
+            from lab_arena.collection_programs import STUDENT, STUDENT_REVISION
+            if str(info.get("model")).lower() != STUDENT or info.get("model_revision") != STUDENT_REVISION:
+                raise ValueError("source is not the pinned untuned student")
         if (
             set(info)
             != {"role", "model", "model_revision", "source_run_id", "rights", "split"}
@@ -425,6 +446,17 @@ def read_inputs(spec, directory, sources, *, objects=None, database=None, prompt
     ):
         raise ValueError("experiment loaded the wrong pinned sources")
     split = read(spec.raw["split_sha256"])
+    if "program" in spec.raw:
+        from lab_arena.collection_programs import sandbox, verify_selection
+        doc = spec.raw["program"]
+        entry = sandbox(doc["sandbox"])
+        if database is not None:
+            from lab_arena.collection_programs import require_registered
+            require_registered(database,doc)
+        if doc["collection"]=="C5":
+            verify_selection(read(doc["selection_sha256"]),spec.raw)
+        if _hash(split)!=entry["partition"]:
+            raise ValueError("operator input differs from registered task partition")
     resolved = {}
     for case in spec.raw["cases"]:
         if "source_sha256" not in case:
@@ -460,6 +492,10 @@ def read_inputs(spec, directory, sources, *, objects=None, database=None, prompt
                 raise ValueError(
                     "external student source requires its original provenance"
                 )
+        if "program" in spec.raw:
+            from lab_arena.collection_programs import source_case
+            if case != source_case(source):
+                raise ValueError("registered correction decision or original checkpoint changed")
         if source["scenario_id"] != case["scenario_id"]:
             raise ValueError("student checkpoint origin differs from assignment")
         if any(
@@ -605,6 +641,10 @@ def run_experiment(
     stored, split, provenance = inputs
     live = spec.raw["mode"] == "live"
     pool = spec.raw.get("payment_rule") == POOL_PAYMENT_RULE
+    if "program" in spec.raw:
+        from lab_arena.collection_programs import require_registered
+        require_registered(database,spec.raw["program"])
+
     tariff = None
     if live and not pool:
         from lab_arena.collection_correction_tariff import load_approved
@@ -631,7 +671,9 @@ def run_experiment(
         run_id = job["job_id"]
         case, arm, repeat = spec.slots[job["slot"]]
         batch = spec.batch_id
+        from lab_arena.collection_programs import run_metadata
         meta = {
+            **run_metadata(spec.raw, case["scenario_id"]),
             "id": spec.raw["id"],
             "arm": arm["id"],
             "settings_sha256": spec.settings_hash,
@@ -848,7 +890,7 @@ def run_experiment(
                 f"collection/{batch}/{run_id}/interruption.json",
                 judge._json(interruption).encode(),
             )
-            intake.complete(
+            saved_failure = intake.complete(
                 run_id,
                 job["lease_token"],
                 "failed",
@@ -856,6 +898,8 @@ def run_experiment(
                 interruption["sha256"] if generator_finished else None,
                 epoch(),
             )
+            if pool and on_pool_settled and saved_failure == {"status": "failed", "job_id": run_id}:
+                on_pool_settled("failed")
             raise RuntimeError(
                 "experiment interrupted: " + type(exc).__name__
             ) from None
@@ -902,6 +946,7 @@ def pool_verified_result(objects, job, spec):
         or manifest["experiment"]["arm"] != arm["id"]
         or manifest["experiment"]["repeat"] != repeat
         or manifest["experiment"]["role"] != arm["role"]
+        or manifest["experiment"].get("program") != spec.raw.get("program")
         or job["model"] != arm["model"]
         or job["scenario_id"] != case["scenario_id"]
         or manifest["judge_policy"] != asdict(spec.policy)

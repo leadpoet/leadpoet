@@ -353,6 +353,8 @@ def register_signatures():
         "collection_priced_claim_v1",
         tuple(("p_" + name, kind) for name, kind in _SIGNATURES["claim"]) + (("p_expected_model", "text"),),
     )
+    store.FUNCTION_SIGNATURES.setdefault("collection_governed_claim_v1",
+        store.FUNCTION_SIGNATURES["collection_priced_claim_v1"] + (("p_epoch","bigint"),("p_routes","jsonb")))
     store.FUNCTION_SIGNATURES.setdefault("collection_interrupted_pilot_judges_v1", (("p_batch", "text"),))
     store.FUNCTION_SIGNATURES.setdefault("collection_training_consents_v1", (("p_batch", "text"),))
     store.FUNCTION_SIGNATURES.setdefault("collection_open_correction_quotes_v1", ())

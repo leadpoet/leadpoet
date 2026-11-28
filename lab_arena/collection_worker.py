@@ -312,10 +312,13 @@ P7_PAYMENT_RULE = "verified_p7_v1"
 
 
 def task_payment_rule(job):
-    if re.fullmatch(r"pool-[0-9a-f]{64}", str(job.get("batch_id"))) and re.fullmatch(
-        r"(P7|P8|P9|P10)-s[1-9][0-9]{0,7}", job["scenario_id"]
-    ):
-        return POOL_PAYMENT_RULE
+    if re.fullmatch(r"pool-[0-9a-f]{64}", str(job.get("batch_id"))):
+        from lab_arena.collection_programs import SCENARIO, sandbox
+        from lab_arena.collection_workflow import NATIVE_PARTITIONS
+        match = SCENARIO.fullmatch(job["scenario_id"])
+        if match and (match[1] in NATIVE_PARTITIONS or sandbox(match[1])["kind"] == "train"):
+            return POOL_PAYMENT_RULE
+        return None
     match = re.fullmatch(r"(P7|P8)-s[1-9]\d{0,7}", job["scenario_id"])
     if not match or job.get("experiment"):
         return None
@@ -399,9 +402,25 @@ def native_payment_evidence(objects, job, manifest, *, receipts_out=None):
         "capture_version": COMPARISON_CAPTURE,
         "scenario_ids": [job["scenario_id"]],
     }
-    agent, builder = comparison_revisions(capture)
+    program = manifest.get("experiment", {}).get("program")
+    if program is not None:
+        from lab_arena.collection_programs import sandbox, validate_program, run_metadata
+        from lab_arena.collection_experiment import source_revisions
+        settings = read_artifact(objects, batch, run, "settings", manifest["settings"], 2 << 20)
+        validate_program(settings)
+        if (settings["program"] != program or program["sandbox"] != family
+                or any(manifest["experiment"].get(k) != v for k,v in run_metadata(settings,job["scenario_id"]).items())):
+            raise ValueError("registered work differs from the pinned program")
+        entry = sandbox(family)
+        agent, builder = source_revisions(settings)
+        partition = entry["partition"].removeprefix("sha256:")
+        grader = entry["grader"]
+    else:
+        agent, builder = comparison_revisions(capture)
+        partition = NATIVE_PARTITIONS.get(family)
+        grader = {"P7":"posting","P8":"qualification","P9":"outreach","P10":"outreach"}.get(family)
     if (
-        not rule
+        not partition or not grader or not rule
         or manifest.get("control")
         or manifest["job_id"] != run
         or manifest["batch_id"] != batch
@@ -431,7 +450,7 @@ def native_payment_evidence(objects, job, manifest, *, receipts_out=None):
         or split
         != {
             **row["split"],
-            "manifest_sha256": NATIVE_PARTITIONS[family],
+            "manifest_sha256": partition,
         }
         or row["split"]["template_id"] != job["scenario_id"].split("-s")[0]
     ):
@@ -507,12 +526,12 @@ def native_payment_evidence(objects, job, manifest, *, receipts_out=None):
         )
     expected = json.loads(packet["reference_answer"])["answer"]
     additional = {}
-    if family == "P8":
+    if grader == "qualification":
         from lab_arena.collection_sales_evidence import verify_account_memo
 
         additional = verify_account_memo(objects, job, manifest, row, packet)
         task_pass = additional["verified_decision"]
-    elif family == "P7":
+    elif grader == "posting":
         posting = (ev["out"]["state"] or {}).get("posting") or {}
         task_pass = native["credits"] == {
             "sealed": 1,
@@ -547,9 +566,9 @@ def native_payment_evidence(objects, job, manifest, *, receipts_out=None):
         and isinstance(expected, str)
         and expected
         and task_pass
-        and (family in {"P9", "P10"} or expected == ev["out"]["answer"].strip())
+        and (grader in {"outreach","native"} or expected == ev["out"]["answer"].strip())
         and messages
-        and (family in {"P9", "P10"} or expected == messages[-1]["content"].strip())
+        and (grader in {"outreach","native"} or expected == messages[-1]["content"].strip())
         and any(
             (m.get("reasoning") or m.get("reasoning_content") or "").strip()
             for m in messages
@@ -571,7 +590,7 @@ def native_payment_evidence(objects, job, manifest, *, receipts_out=None):
             and task_pass
             and checks["code_grade"]
             and checks["no_hard_failure"]
-            and (family in {"P9", "P10"} or expected == final_answer.strip())
+            and (grader in {"outreach","native"} or expected == final_answer.strip())
         )
         rate = job_reward_rate(job)
         if rate != 12500:

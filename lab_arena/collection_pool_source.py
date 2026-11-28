@@ -13,6 +13,10 @@ from lab_arena.collection_workflow import read_artifact
 SCHEMA = "collection.funded-student.v1"
 
 
+class NoCorrectionState(ValueError):
+    """A verified failure for which the original record has no observable branching action."""
+
+
 def funded_source(
     database, objects, batch_id, run_id, prompt, *, classify_grounding=False
 ):
@@ -60,7 +64,8 @@ def funded_source(
         or evidence["task_pass"]
         or grants[run_id]["miner_cost_microusd"] != evidence["cost_microusd"]
         or grants[run_id]["generator_calls"] != evidence["calls"]
-        or manifest["experiment"]["role"] != "expert"
+        or manifest["experiment"]["role"] not in {"expert","student"}
+        or manifest["experiment"].get("program", {}).get("use") == "pass_rate_only"
     ):
         raise ValueError(
             "a correction requires a complete original funded task failure"
@@ -70,7 +75,10 @@ def funded_source(
     )
     family = job["scenario_id"].split("-s")[0]
     labels = {}
-    if family == "P8":
+    program = manifest["experiment"].get("program")
+    from lab_arena.collection_programs import sandbox
+    kind = sandbox(family)["grader"] if program else {"P7":"posting","P8":"qualification","P9":"outreach","P10":"outreach"}.get(family)
+    if kind == "qualification":
         from lab_arena.collection_sales_evidence import _history
 
         packet = read_artifact(
@@ -80,7 +88,7 @@ def funded_source(
             objects, job, manifest, row, packet, classify_grounding=classify_grounding
         )
         if failure is None:
-            raise ValueError("no recoverable observed evidence mistake")
+            raise NoCorrectionState("no recoverable observed evidence mistake")
         checkpoint, rejected, turn, reason = (
             failure[k] for k in ("checkpoint", "rejected", "turn", "reason")
         )
@@ -89,7 +97,7 @@ def funded_source(
             labels["unrepaired_grounding"] = failure["unrepaired_grounding"]
     else:
         checkpoint, rejected, turn, reason = _locked_mistake(
-            objects, job, manifest, row, family
+            objects, job, manifest, row, kind
         )
         fatal = True
     origin = {k: job[k] for k in ("batch_id", "job_id", "artifact_sha256")}
@@ -123,17 +131,17 @@ def verify_funded_source(database, objects, student, prompt):
         raise ValueError("funded checkpoint differs from its original paid run")
 
 
-def _locked_mistake(objects, job, manifest, row, family):
-    if family not in {"P7", "P9", "P10"}:
+def _locked_mistake(objects, job, manifest, row, kind):
+    if kind not in {"posting","outreach","native"}:
         raise ValueError("unknown irreversible decision schema")
     evidence = row["evidence"]
     grade = evidence["grade"]
-    state_key = "posting" if family == "P7" else "plan"
+    state_key = "posting" if kind == "posting" else "plan"
     # With a correct posting but a wrong final answer, the irreversible mistake
     # is the final reply. Never mislabel the student's correct write as rejected.
     wrong_commit = (
         not all(grade["credits"].get(k) == 1 for k in ("sealed", "charter"))
-        if family == "P7"
+        if kind == "posting"
         else grade["score"] != 1 or bool(grade.get("hard_fail"))
     )
     visible = row["messages"]
@@ -171,4 +179,4 @@ def _locked_mistake(objects, job, manifest, row, family):
                     ),
                 )
         before = event
-    raise ValueError("no observed failed student step")
+    raise NoCorrectionState("no observed failed student step")

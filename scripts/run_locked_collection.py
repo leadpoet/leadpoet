@@ -858,11 +858,12 @@ def _freeze_pool_successor(parent, directory, prompt, leader):
     return successor
 
 
-def poll_pool_experiments(prompt, directory, database, run, *, successor_leader=None):
+def poll_pool_experiments(prompt, directory, database, run, *, successor_leader=None, lane=None, fundable=None):
     """Try a disjoint healthy program after a pre-lease refusal, never after an ambiguous claim."""
     from lab_arena.collection_experiment import load_experiment, pool_program_id
     from scripts.collection_review import read_file
     from lab_arena.collection_prices import CatalogError
+    from lab_arena.collection_governor import HeldRoute
 
     def unavailable(name, exc):
         reason = exc.code if isinstance(exc, CatalogError) else type(exc).__name__
@@ -897,8 +898,13 @@ def poll_pool_experiments(prompt, directory, database, run, *, successor_leader=
             active[group] = seed, spec
     if not active:
         raise ValueError("active standing pool requires a valid operator experiment")
-    cursor = directory / ".last-pool-program"
+    cursor = directory / (
+        ".last-pool-program" if not lane else f".last-pool-program-{lane}"
+    )
     groups = sorted(k for k, (_, spec) in active.items() if spec is not None)
+    if lane and groups:
+        offset = lane % len(groups)
+        groups = groups[offset:] + groups[:offset]
     if cursor.exists():
         previous = read_file(cursor, maximum=128).decode()
         if previous in groups:
@@ -917,21 +923,65 @@ def poll_pool_experiments(prompt, directory, database, run, *, successor_leader=
                 os.fsync(out.fileno())
             os.replace(out.name, cursor)
 
+        def dispatch(member):
+            held = set()
+            while True:
+                try:
+                    return run(member.raw, before_claim=on_claim)
+                except HeldRoute as exc:
+                    if lane is None or attempted or exc.model in held:
+                        raise
+                    unavailable(member.batch_id, exc.cause)
+                    held.add(exc.model)
+                    if len(held) >= len({arm["model"] for arm in member.raw["arms"]}):
+                        return 0
+
         try:
-            if run(spec.raw, before_claim=on_claim):
-                return 1
-            if attempted:
-                return 0
+            if (
+                fundable is not None
+                and min(a["budget_microusd"] for a in spec.raw["arms"]) > fundable
+            ):
+                continue
+            state = (
+                "open"
+                if lane is None
+                else database.rpc(
+                    "collection_pool_pack_state_v1",
+                    {"p_batch": spec.batch_id, "p_slots": len(spec.slots)},
+                )
+            )
+            if state == "running":
+                continue
+            if state == "open":
+                if dispatch(spec):
+                    return 1
+                if attempted and lane is None:
+                    return 0
+                if lane is not None:
+                    # Other concurrent lanes may just have acquired the preview.
+                    # A qualified empty response confirms we hold no new lease.
+                    continue
+            elif state != "complete":
+                raise ValueError("unknown governed pack status")
             if not spec.raw.get("successor_seeds"):
                 continue
-            jobs = database.rpc("collection_batch_jobs_v1", {"p_batch": spec.batch_id})
-            finished = {j["slot"] for j in jobs if j["status"] in {"accepted", "rejected", "failed"}}
-            if finished != set(range(len(spec.slots))):
-                continue
-            successor = _freeze_pool_successor(spec, directory, prompt, successor_leader)
-            if run(successor.raw, before_claim=on_claim):
+            if lane is None:
+                jobs = database.rpc(
+                    "collection_batch_jobs_v1", {"p_batch": spec.batch_id}
+                )
+                finished = {
+                    j["slot"]
+                    for j in jobs
+                    if j["status"] in {"accepted", "rejected", "failed"}
+                }
+                if finished != set(range(len(spec.slots))):
+                    continue
+            successor = _freeze_pool_successor(
+                spec, directory, prompt, successor_leader
+            )
+            if dispatch(successor):
                 return 1
-            if attempted:
+            if attempted and lane is None:
                 return 0
         except Exception as exc:
             if attempted:
@@ -1039,6 +1089,175 @@ def poll_funded_burst(
     return completed
 
 
+class LaneDraining(Exception):
+    pass
+
+
+def governed_tick(args, lane, deadline):
+    """One authenticated experiment in this process; no shared harness module globals."""
+    from lab_arena.collection_intake import register_signatures
+
+    register_signatures()
+    db, _ = evidence_stores()
+    settled = []
+    prompt = json.loads(args.prompt.read_bytes())
+
+    def run(raw, *, before_claim):
+        def mark_claim():
+            if time.monotonic() >= deadline or not _worker_timer_active():
+                raise LaneDraining()
+            before_claim()
+
+        return _run_options(
+            args,
+            argparse.ArgumentParser(),
+            raw,
+            before_claim=mark_claim,
+            on_pool_settled=settled.append,
+        )
+
+    try:
+        funds = db.rpc("collection_pool_fundable_v1", {})
+        if type(funds) is not int or funds < 0:
+            raise ValueError("invalid signed pool capacity")
+        if not funds:
+            return 0
+        return poll_pool_experiments(
+            prompt,
+            args.offer_directory,
+            db,
+            run,
+            lane=lane,
+            fundable=funds,
+            successor_leader=args.successor_first_model,
+        )
+    except LaneDraining:
+        return 0
+    except RuntimeError:
+        # Only a finished failure acknowledged by its own immutable lease can
+        # advance the lane. Neither an ambiguous claim nor uncertain completion
+        # can trigger an immediate repeat of that operation.
+        if settled == ["failed"]:
+            return 1
+        raise
+    finally:
+        db.close()
+
+
+def _init_collection_process():
+    # The SDK registers a regular atexit hook. A multiprocessing child closes its
+    # log pipe earlier, so drain that child's listener before queue finalizers.
+    import atexit
+    from multiprocessing.util import Finalize
+
+    def stop_sdk_listener():
+        logs = sys.modules.get("bittensor.utils.btlogging")
+        listener = getattr(getattr(logs, "logging", None), "_listener", None)
+        if listener is not None and getattr(listener, "_thread", None) is not None:
+            atexit.unregister(listener.stop)
+            listener.stop()
+    Finalize(None, stop_sdk_listener, exitpriority=20)
+
+
+def _fundable_program(directory, database, funds):
+    """Scheduling hint only. The atomic DB preview and lease still authorize every charged call."""
+    from scripts.collection_review import read_file
+    if funds == 0:
+        return False
+    configured = False
+    for path in sorted(directory.glob("pool-*.json")):
+        try:
+            raw = json.loads(read_file(path))
+            arms = raw["arms"]
+            caps = [a["budget_microusd"] for a in arms]
+            slots = len(raw["cases"]) * sum(a["repeats"] for a in arms)
+            if not caps or not all(type(c) is int and c > 0 for c in caps) or not 1 <= slots <= 4096:
+                continue
+        except (ValueError, KeyError, OSError, TypeError):
+            continue
+        configured = True
+        if min(caps) > funds:
+            continue
+        state = database.rpc("collection_pool_pack_state_v1", {"p_batch": path.stem, "p_slots": slots})
+        if state not in ("complete", "open", "running"):
+            raise ValueError("invalid funded pack state")
+        if state == "open" or (state == "complete" and raw.get("successor_seeds")):
+            return True
+    if not configured:
+        raise ValueError("no standing program is configured")
+    return False
+
+
+def run_governed_lanes(
+    args,
+    lanes,
+    *,
+    executor=None,
+    tick=governed_tick,
+    clock=time.monotonic,
+    timer_active=_worker_timer_active,
+):
+    from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+    from multiprocessing import get_context
+
+    if type(lanes) is not int or lanes not in (4, 16, 40, 66):
+        raise ValueError("unapproved worker tier")
+    limit = args.max_jobs
+    args = argparse.Namespace(**{**vars(args), "max_jobs": 1})
+    deadline = clock() + 1800
+    counts = [0] * lanes
+    stopped = set()
+    if not timer_active():
+        return 0
+    if executor is None:
+        executor = ProcessPoolExecutor(
+            max_workers=lanes, mp_context=get_context("spawn"), initializer=_init_collection_process
+        )
+    with executor as workers:
+        running = {
+            workers.submit(tick, args, lane, deadline): lane for lane in range(lanes)
+        }
+        while running:
+            done, _ = wait(running, return_when=FIRST_COMPLETED)
+            progress = False
+            for future in done:
+                lane = running.pop(future)
+                try:
+                    count = future.result()
+                    if type(count) is not int or count not in (0, 1):
+                        raise ValueError("invalid governed worker result")
+                except Exception as exc:
+                    print(
+                        json.dumps(
+                            {
+                                "lane": lane,
+                                "status": "lane_stopped",
+                                "reason": type(exc).__name__,
+                            }
+                        ),
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    stopped.add(lane)
+                    continue
+                counts[lane] += count
+                progress |= bool(count)
+            if progress and clock() < deadline and timer_active():
+                busy = set(running.values())
+                for lane in range(lanes):
+                    if (
+                        lane not in busy
+                        and lane not in stopped
+                        and counts[lane] < limit
+                    ):
+                        running[workers.submit(tick, args, lane, deadline)] = lane
+    if stopped:
+        raise RuntimeError(
+            "governed worker cycle had an unconfirmed operation; inspect its journal"
+        )
+    return sum(counts)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
@@ -1051,6 +1270,8 @@ def main(argv=None):
     p.add_argument("--champion-repo", type=Path)
     p.add_argument("--poet-repo", type=Path)
     p.add_argument("--max-jobs", type=int, default=1)
+    p.add_argument("--governed-workers", action="store_true",
+                   help="Use the approved database worker tier, epoch budget and route backoff on paid work")
     p.add_argument("--productive-burst", action="store_true",
                    help="Paid service only: admit up to 64 jobs or 30 minutes of new work, and drain on timer stop")
     p.add_argument("--successor-first-model", nargs=2, metavar=("PROGRAM", "MODEL"),
@@ -1093,6 +1314,8 @@ def main(argv=None):
         from scripts.run_lab_arena_service import load_scoped_environment
 
         load_scoped_environment(args.environment_file)
+    if args.governed_workers and (not args.offer_directory or not args.productive_burst):
+        p.error("governed-workers requires the existing paid service burst")
     if args.productive_burst and not args.offer_directory:
         p.error("productive-burst requires offer-directory")
     job_limit = 64 if args.productive_burst else (8 if args.offer_directory else 6)
@@ -1112,6 +1335,15 @@ def main(argv=None):
                 args.experiment_inputs
                 or args.offer_directory.parent / "experiment-inputs"
             )
+            if args.governed_workers:
+                args.max_jobs = limit
+                # No provider or chain traffic when every authorized limit is empty.
+                funds = database.rpc("collection_worker_funding_v1", {})
+                if type(funds) is not int or funds<0:
+                    raise ValueError("invalid signed pool capacity")
+                if _fundable_program(args.offer_directory, database, funds):
+                    run_governed_lanes(args,database.rpc("collection_worker_lanes_v1",{}))
+                return 0
             def scan():
                 settled = []
                 handled = poll_pool_experiments(
@@ -1369,6 +1601,8 @@ def _run_options(args, p, raw, *, before_claim=None, on_pool_settled=None):
             research = RemoteResearch(open_channel, cases.load, cases.grade, grant=ResearchGrant.deployed(), objects=objects)
         with ExitStack() as stack:
             stack.callback(client.close)
+            if getattr(args, "governed_workers", False):
+                stack.callback(db.close)
             # Confirm the finalized genesis and subnet before even an unpaid lease.
             chain.current_settlement_epoch(client, cutover)
             transport = stack.enter_context(closing(HttpxProviderTransport()))
@@ -1377,11 +1611,17 @@ def _run_options(args, p, raw, *, before_claim=None, on_pool_settled=None):
             if experiment:
                 if not standing and not judge_key:
                     raise ValueError("private claim-reader credential unavailable")
+                intake = CollectionIntake(db, cm, mode)
+                price = (lambda model: endpoint_prices(experiment.routes,models=[model])) if standing else prices_for_assignment(experiment.routes,policy)
+                if standing and getattr(args, "governed_workers", False):
+                    from lab_arena.collection_governor import GovernedIntake, prepare_epoch
+                    from scripts.prepare_collection_experiment import lock_pool_directory
+                    epoch_id = prepare_epoch(client,cutover,db,partial(lock_pool_directory,args.offer_directory))
+                    intake = GovernedIntake(db,cm,epoch_id,experiment.routes,lambda: chain.current_settlement_epoch(client,cutover))
+                    price = intake.prices
                 completed = experiments.run_experiment(
                     spec=experiment, sources=sources, inputs=experiment_inputs,
-                    intake=CollectionIntake(db, cm, mode), database=db, objects=objects,
-                    transport=transport, pricing=(lambda model: endpoint_prices(experiment.routes,models=[model]))
-                    if standing else prices_for_assignment(experiment.routes, policy),
+                    intake=intake, database=db, objects=objects, transport=transport, pricing=price,
                     owner_lookup=lambda hk: resolve_finalized_owner(client, hk), judge_key=judge_key,
                     max_jobs=args.max_jobs, epoch=lambda: chain.current_settlement_epoch(client, cutover),
                     before_claim=before_claim, prompt=prompt, on_pool_settled=on_pool_settled,

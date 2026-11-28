@@ -28,7 +28,7 @@ from lab_arena.lead_orders.auth import signed_message
 from lab_arena.tool_market import btauth
 from lab_arena.tool_market.config import PUBLISHED_TERMS
 
-TIMEOUT_SECONDS = 120
+TIMEOUT_SECONDS = 150  # above the 120 s a call can take (market.FAILOVER_SECONDS)
 _LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 
 
@@ -102,6 +102,9 @@ class Client:
                 status, raw = answer.status, answer.read()
         except urllib.error.HTTPError as error:
             status, raw = error.code, error.read()
+        except TimeoutError:  # the answer is lost, not the request: a call may still be charged
+            return {"error": "outcome_unknown", "status": 0,
+                    "hint": "usage shows a call after 11 minutes; a retry before then can pay twice"}
         try:
             document = json.loads(raw or b"{}")
         except ValueError:

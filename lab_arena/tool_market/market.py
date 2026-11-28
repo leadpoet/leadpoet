@@ -40,6 +40,11 @@ from lead_order_vault import tools as vault_tools
 TOKEN_PREFIX = "tmt_"
 # Keys tried for one call before the buyer is told there is no supply.
 MAX_KEYS_PER_CALL = 3
+# A call tries another key only this long after it starts, so it ends within
+# 120 s: 30 s for the epoch read or earlier keys, then one key (30 s plus the
+# vault's 15) and its 402 re-check (45 s). The gateway's stop grace and the
+# client's timeout sit above that.
+FAILOVER_SECONDS = 30.0
 # Reserve attempts per call, refused ones included (an ask that just moved,
 # a key that just reached its cap), so one call cannot walk a whole book.
 MAX_ASKS_PER_CALL = 10
@@ -589,6 +594,7 @@ class ToolMarket:
         ``asks``: the book as the caller already read it; each reserve re-checks
         its key under the key's lock, so a moment-old book cannot over-reserve."""
 
+        started = time.monotonic()
         # Read before any vendor request, so a chain outage cannot strand a paid answer.
         try:
             epoch = int(self._epoch())
@@ -610,7 +616,8 @@ class ToolMarket:
         tried = attempts = 0
         short = False
         for ask, owed_cap in self._asks(tool, op, max_ask, private, hotkey, pinned) if asks is None else asks:
-            if tried >= MAX_KEYS_PER_CALL or attempts >= MAX_ASKS_PER_CALL:
+            if tried >= MAX_KEYS_PER_CALL or attempts >= MAX_ASKS_PER_CALL \
+                    or (tried and time.monotonic() - started > FAILOVER_SECONDS):
                 break
             attempts += 1
             call_id = str(uuid.uuid5(purchase, str(attempts))) if purchase else self._new_id()

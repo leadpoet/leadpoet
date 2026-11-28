@@ -105,7 +105,7 @@ TOOLS: Mapping[str, Tool] = {
                    # Its account answer gives a plan's searches, not what is left, so
                    # the check proves the key only.
                    balance_url="https://api.hunter.io/v2/account", invalid_statuses=(401,)),
-    "harvestapi": Tool("api.harvestapi.io", shape("GET", r"/linkedin/(?:profile|company|job|job-search|post-search|post-comments|post-reactions|profile-posts)", query=True), "x-api-key"),
+    "harvestapi": Tool("api.harvestapi.io", shape("GET", r"/linkedin/(?:profile|company|lead-search|job|job-search|post-search|post-comments|post-reactions|profile-posts)", query=True), "x-api-key"),
     "exa": Tool("api.exa.ai", shape("POST", r"/(?:search|contents)", query=False), "x-api-key"),
 }
 HOSTS: Mapping[str, str] = {tool.host: name for name, tool in TOOLS.items()}

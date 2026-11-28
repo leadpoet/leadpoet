@@ -110,7 +110,7 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
         platform_limits = json.loads(env.get(PLATFORM_MAX_ASKS_ENV, "{}"))
     except (ValueError, RecursionError):
         raise ToolMarketConfigError(f"{PLATFORM_MAX_ASKS_ENV} must be a JSON object") from None
-    permitted = (set(platform.OPERATIONS) - {"zerobounce_validate"}) | {platform.SHORT_PROFILE}
+    permitted = (set(platform.OPERATIONS) - {"zerobounce_validate"}) | {platform.SHORT_PROFILE, platform.EMAIL_PROFILE}
     if not isinstance(platform_limits, dict) or any(
         key not in permitted or type(limit) is not int or not 1 <= limit <= MAX_ASK["call"]
         for key, limit in platform_limits.items()

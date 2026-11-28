@@ -130,6 +130,8 @@ def test_every_operation_fits_its_vault_route():
         for required_only, chosen in ((True, {n: _sample(p) for n, p in op.params.items() if p.required}),
                                       (False, {n: _sample(p) for n, p in op.params.items()}),
                                       (False, {n: _sample(p, high=True) for n, p in op.params.items()})):
+            if required_only and op.name == "search_leads":
+                chosen["currentJobTitles"] = "Director"  # at least one explicit targeting filter
             try:
                 url, headers, body = op.build(chosen)
             except catalog.CatalogError:

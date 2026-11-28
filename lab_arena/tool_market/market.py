@@ -60,7 +60,6 @@ UNCREDITED_CHAIN_READS = 1
 MAX_SIGNED_BODY_BYTES = 8192
 MAX_TERMS_BODY_BYTES = 512
 MAX_USAGE_PAGE = 500
-CALL_TIMEOUT_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MIN_TAB_SECONDS = 60
 # A signed call's own tab: closed when the call ends, else it lapses after one
@@ -634,7 +633,7 @@ class ToolMarket:
         try:
             response = self._transport.send(
                 method=op.method, url=url, headers=dict(headers, authorization="Bearer " + ask.envelope),
-                body=payload, timeout_seconds=CALL_TIMEOUT_SECONDS, max_response_bytes=MAX_RESPONSE_BYTES)
+                body=payload, timeout_seconds=op.timeout_seconds, max_response_bytes=MAX_RESPONSE_BYTES)
         except VaultTransportError as error:
             if error.forwarded is False:
                 settle("skipped", None)

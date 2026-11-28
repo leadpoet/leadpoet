@@ -134,13 +134,14 @@ class Operation:
     params: Mapping[str, Param]
     # Units a 2xx answer counts: ``cost(document)`` when set, else 1.
     cost: Optional[Callable[[Any], Optional[int]]] = field(default=None, compare=False)
-    # How the checked params become the vendor's JSON body (default: as is).
+    # Translate checked params to the vendor's body or query fields.
     wrap: Optional[Callable[[Dict[str, Any]], Any]] = field(default=None, compare=False)
     # A vendor whose status codes say something else, such as an error in a
     # 200 or "out of credits" as 429: the status its answer means.
     real_status: Optional[Callable[[int, Any], int]] = field(default=None, compare=False)
     # One line on the job it does, so an agent picks by task, not vendor.
     does: str = ""
+    timeout_seconds: float = 30.0
 
     @property
     def unit_scale(self) -> int:
@@ -158,6 +159,8 @@ class Operation:
                   for name, value in params.items()}
         headers = {"accept": "application/json"}
         if self.method == "GET":
+            if self.wrap is not None:
+                values = self.wrap(values)
             if any(len(quote_plus(str(v))) > MAX_ENCODED_QUERY_VALUE for v in values.values()):
                 raise CatalogError("param_invalid")
             url = self.url + ("?" + urlencode(sorted(values.items())) if values else "")
@@ -286,6 +289,29 @@ def _harvest_page_cost(document: Any) -> Optional[int]:
     return 1
 
 
+# One independent lead-search page. Use the subset of vendor filters used by
+# Lead Search. Session-bound paging is a separate marketplace capability.
+_HARVEST_LEAD_LIMITS = {
+    "currentCompanies": 50, "currentJobTitles": 70, "excludeCurrentJobTitles": 70,
+    "locations": 70, "lastNames": 70, "pastCompanies": 50, "schools": 50,
+    "industryIds": 70, "seniorityLevelIds": 20, "companyHeadcount": 20,
+}
+
+
+def _lead_search_query(values: Dict[str, Any]) -> Dict[str, Any]:
+    if not any(name in values for name in _HARVEST_LEAD_LIMITS):
+        raise CatalogError("param_missing")
+    for name, limit in _HARVEST_LEAD_LIMITS.items():
+        if name in values:
+            items = values[name].split(",")
+            if len(items) > limit or any(not item.strip() for item in items):
+                raise CatalogError("param_invalid")
+    # Query flags sent by urllib must have the vendor's lowercase spelling.
+    if "recentlyChangedJobs" in values:
+        values["recentlyChangedJobs"] = "true" if values["recentlyChangedJobs"] else "false"
+    return values
+
+
 _ZB = "https://api.zerobounce.net"
 _HARVEST = "https://api.harvestapi.io"
 _EXA = "https://api.exa.ai"
@@ -360,6 +386,15 @@ _OPERATIONS: Sequence[Operation] = (
     # endpoint, so launch keeps the two profile reads only.
     Operation("harvestapi", "linkedin_profile", "GET", _HARVEST + "/linkedin/profile", UNIT_CALL, 1,
               {"url": _HARVEST_URL, "main": Param("enum", choices=("true",))}, cost=_harvest_cost, does="Read a LinkedIn profile: name, headline, current jobs."),
+    Operation("harvestapi", "linkedin_profile_email", "GET", _HARVEST + "/linkedin/profile", UNIT_CALL, 1,
+              {"url": _HARVEST_URL, "main": Param("enum", choices=("true",))},
+              wrap=lambda values: dict(values, findEmail="true"), cost=_harvest_cost,
+              does="Read a LinkedIn profile with the vendor's email discovery and SMTP checks."),
+    Operation("harvestapi", "search_leads", "GET", _HARVEST + "/linkedin/lead-search", UNIT_CALL, 1,
+              {**{key: Param("str", max_length=2000) for key in _HARVEST_LEAD_LIMITS},
+               "recentlyChangedJobs": Param("bool"), "page": Param("int", high=1)},
+              wrap=_lead_search_query, cost=_harvest_page_cost, timeout_seconds=90.0,
+              does="Search one standalone Sales Navigator lead page by company, role or location."),
     Operation("harvestapi", "linkedin_company", "GET", _HARVEST + "/linkedin/company", UNIT_CALL, 1,
               {"url": _HARVEST_URL}, cost=_harvest_cost, does="Read a LinkedIn company page."),
 )

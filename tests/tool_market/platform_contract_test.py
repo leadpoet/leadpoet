@@ -35,7 +35,7 @@ def test_harvest_profile_version_remains_exact(payload, query, price_key):
 @pytest.mark.parametrize(
     "op,payload",
     [
-        ("harvestapi_get_profile", {"url": "person", "findEmail": "true"}),
+        ("harvestapi_get_profile", {"url": "person", "findEmail": "maybe"}),
         ("harvestapi_get_company", {"universalName": "acme", "url": "different"}),
         ("harvestapi_get_company", {"search": "Acme Corp"}),
         ("prospeo_enrich_person", {"linkedin_url": "person", "enrich_mobile": True}),

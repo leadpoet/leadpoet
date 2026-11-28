@@ -97,7 +97,7 @@ TOOLS: Mapping[str, Tool] = {
                        balance_url="https://api.zerobounce.net/v2/getcredits", balance_field=("Credits",)),
     "prospeo": Tool("api.prospeo.io", shape("POST", r"/enrich-person", query=False), "x-key",
                     balance_url="https://api.prospeo.io/account-information",
-                    balance_field=("response", "remaining_credits"), invalid_statuses=(401, 403, 404)),
+                    balance_field=("response", "remaining_credits")),
     "findymail": Tool("app.findymail.com", shape("POST", r"/api/search/(?:business-profile|name)", query=False),
                       "authorization", "Bearer ", balance_url="https://app.findymail.com/api/credits",
                       balance_field=("credits",)),

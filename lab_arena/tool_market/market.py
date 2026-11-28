@@ -48,14 +48,17 @@ MAX_CALLS_IN_FLIGHT_PER_BUYER = 8
 RECHECK_SPACING_SECONDS = 60
 # Gamma balance reads in flight in this process. Each is several chain
 # requests under the chain client's one lock, which every paid call's epoch
-# read also takes; anyone can ask for one (a fresh hotkey, the public
-# balance), so past this many the answer is 503 at once. The public read
-# has its own slot, so it cannot hold the ones tabs and calls top up with.
+# read also takes; past this many the answer is 503 at once. Anyone can ask
+# for one (the public read, a fresh hotkey's call), so hotkeys with no
+# stored credit share one slot and cannot hold the ones credited buyers
+# top up with.
 CHAIN_READS = 2
-PUBLIC_CHAIN_READS = 1
-# The largest body kept as signed: a register body (a 4,096-character
-# envelope, the attestation, the other fields); a terms body is far smaller.
+UNCREDITED_CHAIN_READS = 1
+# The largest bodies kept as signed: a register body (a 4,096-character
+# envelope, the attestation, the other fields), and a terms body, which any
+# fresh hotkey may send.
 MAX_SIGNED_BODY_BYTES = 8192
+MAX_TERMS_BODY_BYTES = 512
 MAX_USAGE_PAGE = 500
 CALL_TIMEOUT_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -144,7 +147,7 @@ class ToolMarket:
         self._in_flight: Dict[str, int] = {}
         self._lock = threading.Lock()
         self._chain_reads = threading.BoundedSemaphore(CHAIN_READS)
-        self._public_chain_reads = threading.BoundedSemaphore(PUBLIC_CHAIN_READS)
+        self._uncredited_chain_reads = threading.BoundedSemaphore(UNCREDITED_CHAIN_READS)
 
     # Terms and balance ------------------------------------------------------
     def accept_terms(self, identity: BuyerIdentity, body: Mapping[str, Any], signed_body: bytes) -> Dict[str, Any]:
@@ -153,7 +156,7 @@ class ToolMarket:
         role = body.get("role")
         if role not in ("buyer", "miner") or set(body) != {"role", "terms_version", "terms_sha256"}:
             raise ToolMarketError(400, "request_invalid")
-        if len(signed_body) > MAX_SIGNED_BODY_BYTES:
+        if len(signed_body) > MAX_TERMS_BODY_BYTES:  # kept for good, from any hotkey
             raise ToolMarketError(413, "request_too_large")
         if body["terms_version"] != self._config.terms_version or body["terms_sha256"] != self._config.terms_sha256:
             raise ToolMarketError(409, "terms_outdated", terms_version=self._config.terms_version)
@@ -165,10 +168,14 @@ class ToolMarket:
     def use_nonce(self, hotkey: str, signature_hash: str, signed_at: int) -> bool:
         return self._store.use_nonce(hotkey=hotkey, signature_hash=signature_hash, signed_at=signed_at)
 
-    def balance(self, hotkey: str, *, public: bool = False) -> Dict[str, Any]:
-        """Read the buyer's Gamma spend to this service and return their balance."""
+    def balance(self, hotkey: str, stored: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        """Read the buyer's Gamma spend to this service and return their balance.
 
-        slots = self._public_chain_reads if public else self._chain_reads
+        ``stored`` is their stored balance; with credit in it the read takes a credited buyer's slot.
+        """
+
+        credited = int((stored or {}).get("credit_microusd") or 0) > 0
+        slots = self._chain_reads if credited else self._uncredited_chain_reads
         if not slots.acquire(blocking=False):
             raise ToolMarketError(503, "gamma_unavailable")
         try:
@@ -190,7 +197,7 @@ class ToolMarket:
 
         if not isinstance(hotkey, str) or not is_valid_hotkey(hotkey):
             raise ToolMarketError(400, "invalid_hotkey")
-        found = self.balance(hotkey, public=True)
+        found = self.balance(hotkey)
         credited = max(int(found.get("credit_microusd") or 0), 0)
         remaining = min(max(int(found.get("balance_microusd") or 0), 0), credited)
         return {"hotkey": hotkey, "credited_usd": _usd(credited), "used_usd": _usd(credited - remaining),
@@ -219,7 +226,7 @@ class ToolMarket:
 
         result = open_once()  # the stored balance first: a busy chain cannot stop it
         if result["status"] == "insufficient_balance":
-            self.balance(identity.hotkey)  # credit Gamma spent since; an unread chain is its 503
+            self.balance(identity.hotkey, result["balance"])  # credit Gamma spent since; unread is a 503
             result = open_once()
         if result["status"] == "terms_required":
             raise ToolMarketError(403, "terms_required")
@@ -504,7 +511,7 @@ class ToolMarket:
             if opened["status"] == "insufficient_balance":
                 have = int(opened["balance"].get("balance_microusd") or 0)
                 try:  # credit Gamma spent since the last reading
-                    have = int(self.balance(hotkey).get("balance_microusd") or 0)
+                    have = int(self.balance(hotkey, opened["balance"]).get("balance_microusd") or 0)
                 except ToolMarketError as error:
                     unread = error  # the chain is busy or down: the stored balance still counts
                 if min(needs) <= have:

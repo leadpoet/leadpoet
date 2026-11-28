@@ -402,7 +402,7 @@ All tool-market data is in `scripts/770-tool-market.sql`.
 | `LEADPOET_TOOL_MARKET_TERMS_VERSION` | the terms both sides sign: `tool-market-terms-v1`, whose SHA-256 of `docs/tool-market-terms.md`'s exact bytes is in `PUBLISHED_TERMS` in `config.py`; live mode refuses any other version |
 | `LEADPOET_TOOL_MARKET_PUBLIC_BASE_URL` | the https host every signed request names, and the base of the services document's urls |
 | `LEADPOET_TOOL_MARKET_VERIFY_MAX_ASK_MICROUSD` | the highest ask, in micro-USD a call, the Lead Search ZeroBounce route pays; unset turns that route off (`404 verification_route_disabled`) |
-| `LEADPOET_TOOL_MARKET_PLATFORM_MAX_ASKS` | JSON mapping of platform operation or short-profile variant to maximum supplier ask in micro-USD. Missing entries disable the corresponding route. |
+| `LEADPOET_TOOL_MARKET_PLATFORM_MAX_ASKS` | JSON mapping of platform operation, or profile variant (`harvestapi_get_profile.main`, `harvestapi_get_profile.findEmail`), to maximum supplier ask in micro-USD. Missing entries disable the corresponding route. `zerobounce_validate` is refused here: the variable above sets it. |
 | `LAB_ARENA_NETUID` | must be 71, the default; any other value is `503 tool_market_misconfigured` |
 
 It reuses the Arena store and chain settings, and the key vault

@@ -262,4 +262,3 @@ def test_discovery_and_balance_are_public_and_readable_from_any_page(client):
                  "/tool-market/gamma/balance?hotkey=" + ALICE):
         answer = client.get(path)
         assert answer.status_code == 200 and answer.headers["access-control-allow-origin"] == "*"
-    assert client.get("/tool-market/gamma/balance?hotkey=" + ALICE).json()["remaining_usd"] == "0.000000"

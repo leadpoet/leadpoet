@@ -7,7 +7,7 @@ buyer's hotkey spent to the market's Gamma service on netuid 71
 (`GammaSpent`). Each call selects an eligible key from the price-ranked book, subject to health, privacy, price and budget limits. The attested vault and the vendor execute the request.
 
 It is off by default. Every route answers 404 until
-`LEADPOET_TOOL_MARKET_MODE=live`. In live mode a tool needs an approved supplier before it can serve calls.
+`LEADPOET_TOOL_MARKET_MODE=live`. The production factory currently serves quotes, existing balances, statements and key management. Opening a tab or submitting a paid call returns HTTP 503 `miner_settlement_unavailable`. Discovery advertises no payment method. Do not spend Gamma for this preview. The execution and settlement examples below describe the integration-tested dispatcher for a future funded release.
 `LEADPOET_TOOL_MARKET_TOOLS_OFF` turns single tools off, for example
 `exa,hunter`.
 

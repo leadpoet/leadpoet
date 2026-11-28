@@ -17,7 +17,7 @@ from lab_arena.lead_orders.gamma import GammaBalanceReader
 from lab_arena.lead_orders.vault_client import VaultClient, VaultTransport
 from lab_arena.store import PostgrestTransport
 from lab_arena.tool_market.config import NETUID, ToolMarketConfig, ToolMarketConfigError
-from lab_arena.tool_market.market import ToolMarket
+from lab_arena.tool_market.market import ToolMarket, ToolMarketError
 from lab_arena.tool_market.store import ToolMarketStore
 from lead_order_vault import trust as vault_trust
 
@@ -75,6 +75,27 @@ class MarketGammaReader(GammaBalanceReader):
         return epoch
 
 
+class QuotingMarket(ToolMarket):
+    """Public production interface until supplier payments have a funded rail."""
+
+    def open_tab(self, identity, body):
+        raise ToolMarketError(503, "miner_settlement_unavailable")
+
+    def call(self, token, body, identity=None):
+        raise ToolMarketError(503, "miner_settlement_unavailable")
+
+    def services(self):
+        document = super().services()
+        document.update(payments=[], description="GTM API price quotes. Paid calls are unavailable.")
+        return document
+
+    def openapi(self):
+        document = super().openapi()
+        document["paths"].pop("/tool-market/call")
+        document.pop("components")  # The remaining public routes require no payment signature.
+        return document
+
+
 def build_from_environment(config: ToolMarketConfig):
     """The live market for ``config``, which ``gateway_support`` loads and checks."""
 
@@ -95,7 +116,7 @@ def build_from_environment(config: ToolMarketConfig):
         raise ToolMarketConfigError(str(error)) from None
     vault = VaultClient(deployment, _required("LEAD_ORDER_VAULT_CALLER_TOKEN", env))
     gamma = MarketGammaReader(arena_chain, config.gamma_service, cutover, store)
-    return ToolMarket(
+    return QuotingMarket(
         config=config, store=store, vault=vault, transport=VaultTransport(vault),
         gamma_reader=gamma, current_epoch=gamma.current_epoch,
         is_registered=lambda hotkey: chain_module.is_registered(arena_chain.metagraph(), hotkey),

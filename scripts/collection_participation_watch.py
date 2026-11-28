@@ -395,7 +395,7 @@ def main():
         data["read_errors"]["settlement"] = type(exc).__name__
     private_root = args.state_directory.parent / "pilot"
     # Leave time for billing reconciliation in the same three-minute systemd unit.
-    window = min(45, 120 - int(time.monotonic() - started))
+    window = min(95, 120 - int(time.monotonic() - started))
     if db is not None and window > 0 and (private_root / "paid" / "batch.json").is_file():
         try:
             from lab_arena.service import S3ObjectStore
@@ -410,7 +410,7 @@ def main():
                 signal.alarm(window)
                 objects = S3ObjectStore(env["LAB_ARENA_BUCKET"], prefix=env.get("LAB_ARENA_OBJECT_PREFIX", ""))
                 data["exports"] = observe(private_root, args.state_directory / "exports", db, objects,
-                                          prior.get("exports"), deadline=deadline)
+                                          prior.get("exports"), deadline=deadline, max_groups=50)
             finally:
                 signal.alarm(0)
                 signal.signal(signal.SIGALRM, prior_alarm)

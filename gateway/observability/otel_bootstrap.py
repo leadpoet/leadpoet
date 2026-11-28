@@ -427,6 +427,7 @@ ARENA_DENIAL_CODES = frozenset(
         "collection_money_invalid",
         "collection_offer_unknown",
         "collection_outcome_invalid",
+        "collection_pool_rate_unavailable",
         "collection_price_coverage_invalid",
         "collection_provider_invalid",
         "collection_quality_invalid",

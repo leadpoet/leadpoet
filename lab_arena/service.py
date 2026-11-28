@@ -859,6 +859,7 @@ class ServiceConfig:
     accepted_burn_hotkey: str = ""
     # Enable only after normal validators support signed model tenure.
     collection_emission_valuation: Optional[Callable[[int], Mapping[str, Any]]] = None
+    market_payout_store: Optional[Callable[[], Any]] = None
     weekly_slot_decay_enabled: bool = False
     # Identity-only test seam for existing leases. New claims and capacity
     # always require the finalized permit/stake snapshot, never this override.
@@ -9410,7 +9411,12 @@ class ArenaService:
             try:
                 state = collection_rewards.epoch_state(self._store, self._config.chain, self._reward_signer(),
                     epoch=requested_epoch, burn_hotkey=self._config.accepted_burn_hotkey,
-                    valuation_source=self._config.collection_emission_valuation)
+                    valuation_source=self._config.collection_emission_valuation,
+                    market_store=getattr(self._config, "market_payout_store", None))
+            except collection_rewards.EpochNotCurrent as exc:
+                raise ServiceError("accepted_weight_epoch_not_current", 409) from exc
+            except ServiceError:
+                raise
             except Exception as exc:
                 raise ServiceError("collection_weight_state_unavailable", 503) from exc
             return {"state": state, "lookup_ok": True}

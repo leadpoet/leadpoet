@@ -683,6 +683,15 @@ def build_service_from_environment(mode: str):
     store.code_review_schema(require_refusal_fallback=True, require_invalid_review_budget=True,
                              require_prospective_primary=True, require_prospective_alternate=True)
     store.submission_replacement_schema(require_per_round_cutoff=True)
+    def market_payout_store():
+        # Validate the same service scope and supplier policy as the buying path.
+        # Only invoked by collection issuance when tool-market live mode is on.
+        from lab_arena.tool_market.config import load_config
+        from lab_arena.tool_market.store import ToolMarketStore
+        if not load_config().enabled:
+            raise ValueError("tool market disabled")
+        return ToolMarketStore(transport)
+
     config = ServiceConfig(
         mode=mode, store=store, object_store=objects, training_object_store=capture_objects, signer=None, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
         daily_icp_source=daily_icp_source,
@@ -704,6 +713,8 @@ def build_service_from_environment(mode: str):
         network_name=chain_config.network_name,
         netuid=chain_config.netuid,
         collection_emission_valuation=lambda block: collection_rewards.emission_valuation(arena_chain, block),
+        market_payout_store=(market_payout_store if mode == "live" and
+                             os.environ.get("LEADPOET_TOOL_MARKET_MODE", "").strip() == "live" else None),
         weekly_slot_decay_enabled=_weekly_slot_decay_enabled_from_environment(),
         scorer_image_access=image_access,
         reward_signer_factory=lambda: signing.KmsSigner(_required("LAB_ARENA_SIGNING_KEY_ID"), region_name=os.environ.get("AWS_REGION")),

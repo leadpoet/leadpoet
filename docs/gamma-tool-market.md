@@ -449,7 +449,7 @@ deployment, exactly as lead orders do.
   written); if the store is still down, the call is `503 store_unavailable`
   with its `call_id`, which may have been charged. `/usage` shows the
   outcome once the call is 11 minutes old; a retry before then can pay
-  twice. A tab whose opening answer is lost this way answers with its `token`:
+  twice unless it reuses the call's `request_id`. A tab whose opening answer is lost this way answers with its `token`:
   keep it, since an open still in flight ends within the store's 30 s
   statement timeout. After a minute `GET /tool-market/tab` shows whether it
   opened, and `POST /tool-market/tab/close` frees its budget.

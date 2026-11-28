@@ -46,6 +46,8 @@ def sign_nodes(args):
             }:
                 raise ValueError("invalid native dossier index")
             folder = (args.runs.parent / item["folder"]).resolve()
+            if not folder.is_relative_to(args.runs.parent.resolve()):
+                raise ValueError("native dossier is outside its signed input root")
             rid = item["producer_run_id"]
             if not NAME.fullmatch(rid) or rid in seen:
                 raise ValueError("duplicate or invalid producer run id")
@@ -91,7 +93,13 @@ def sign_nodes(args):
                 "scenario_id": row["scenario_id"],
             }
     node = sign(
-        {"schema": NODES, "producer": args.producer, "records": runs}, args.private_key
+        {
+            "schema": NODES,
+            "producer": args.producer,
+            "records": runs,
+            "rights": "owned_synthetic_training_and_review",
+        },
+        args.private_key,
     )
     receipt = sign(
         {
@@ -123,7 +131,10 @@ def sign_restatements(args):
     ):
         raise ValueError("invalid restatement batch")
     for ref in items:
-        row = json.loads(read_file(args.runs.parent / ref))
+        path = (args.runs.parent / ref).resolve()
+        if not path.is_relative_to(args.runs.parent.resolve()):
+            raise ValueError("restatement is outside its input root")
+        row = json.loads(read_file(path))
         rid = row["producer_run_id"]
         if (
             row["schema"] != "poet.student-restatement.v1"
@@ -141,7 +152,12 @@ def sign_restatements(args):
         store_private_json(args.output / "restatements" / (digest[7:] + ".json"), row)
         records[digest] = rid
     envelope = sign(
-        {"schema": RESTATEMENTS, "producer": args.producer, "records": records},
+        {
+            "schema": RESTATEMENTS,
+            "producer": args.producer,
+            "records": records,
+            "rights": "owned_synthetic_training_and_review",
+        },
         args.private_key,
     )
     store_private_json(args.output / "restatements.json", envelope)

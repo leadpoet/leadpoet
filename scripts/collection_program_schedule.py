@@ -80,6 +80,26 @@ def slot_keys(raw):
                 )
 
 
+def source_coverage(raws):
+    coverage = defaultdict(set)
+    for raw in raws:
+        metadata = raw.get("program") or {}
+        if metadata.get("collection") != "C4":
+            continue
+        for case in raw["cases"]:
+            family, _, ordinal = programs.identity(case["scenario_id"])
+            coverage[(family, ordinal, metadata["source_kind"])].add(
+                case["decision_sha256"]
+            )
+    return coverage
+
+
+def calibration_ordinals(family):
+    # Spread across pattern strata even when a future registry has more than 200.
+    count = max(programs.sandbox(family)["patterns"], 200)
+    return [i * count // 200 for i in range(200)]
+
+
 def publish(packs, prompt, directory, inputs):
     """Fail before publishing a changed purchase of a slot. Retries reuse the original immutable ID."""
     from scripts.prepare_collection_experiment import (
@@ -90,8 +110,10 @@ def publish(packs, prompt, directory, inputs):
     staged = {}
     with lock_pool_directory(directory):
         occupied = {}
+        existing = []
         for path in sorted(directory.glob("pool-*.json")):
             old = json.loads(read_file(path))
+            existing.append(old)
             for slot in slot_keys(old):
                 occupied.setdefault(slot, path.stem)
         for raw in packs:
@@ -110,6 +132,21 @@ def publish(packs, prompt, directory, inputs):
             for s in slot_keys(raw):
                 occupied[s] = bid
             staged[bid] = spec
+        all_manifests = existing + [v.raw for v in staged.values()]
+        for (_, _, origin), decisions in source_coverage(all_manifests).items():
+            if len(decisions) > programs.SOURCES_PER_ORDINAL[origin]:
+                raise ValueError(
+                    "correction source allocation exceeded for this ordinal"
+                )
+        maps = defaultdict(set)
+        for raw in all_manifests:
+            doc = raw.get("program") or {}
+            if doc.get("collection") == "C5":
+                maps[doc["sandbox"]].update(
+                    case["scenario_id"] for case in raw["cases"]
+                )
+        if any(len(seeds) > 50 for seeds in maps.values()):
+            raise ValueError("effort sweep exceeds its frozen 50 selected seeds")
         required = set()
         for spec in staged.values():
             required.add(spec.raw["split_sha256"])
@@ -195,7 +232,9 @@ def compile_program(args):
                 if args.student_bundle or args.exports:
                     raise ValueError("fresh programs do not take source evidence")
                 for band in ((2, 3) if args.collection == "C2" else (1,)):
-                    ordinals = range(0, 200, 2 if args.collection == "C2" else 1)
+                    ordinals = calibration_ordinals(family)[
+                        :: 2 if args.collection == "C2" else 1
+                    ]
                     doc = programs.program(
                         args.collection, family, programs.VARIANTS[band]
                     )
@@ -224,6 +263,9 @@ def compile_program(args):
                 if receipt["schema"] != "collection.poet-student-sources.v2":
                     raise ValueError("expected signed bulk student sources")
                 candidates = []
+                previous = source_coverage(
+                    json.loads(read_file(p)) for p in args.directory.glob("pool-*.json")
+                )
                 for ref in sorted(receipt["sources"]):
                     if not programs.SHA.fullmatch(ref):
                         raise ValueError("invalid source hash")
@@ -234,8 +276,18 @@ def compile_program(args):
                         raise ValueError("student source bytes changed")
                     if programs.identity(val["scenario_id"])[0] != family:
                         continue
-                    if programs.identity(val["scenario_id"])[2] in range(0, 200, 2):
-                        candidates.append((ref, val))
+                    ordinal = programs.identity(val["scenario_id"])[2]
+                    if ordinal not in calibration_ordinals(family)[::2]:
+                        continue
+                    decision = programs.source_case(val)["decision_sha256"]
+                    prior = previous[(family, ordinal, "node_student")]
+                    if (
+                        decision in prior
+                        or len(prior) >= programs.SOURCES_PER_ORDINAL["node_student"]
+                    ):
+                        continue
+                    prior.add(decision)
+                    candidates.append((ref, val))
                 for variant in programs.VARIANTS.values():
                     distinct = {}
                     for ref, v in candidates:
@@ -328,13 +380,10 @@ def stage_followups(
         value = json.loads(read_file(f))
         if value.get("program"):
             manifests[f.stem] = value
-    prior_corrections = defaultdict(set)
+    prior_corrections = source_coverage(manifests.values())
     prior_maps = defaultdict(set)
     for value in manifests.values():
         p = value["program"]
-        if p["collection"] == "C4":
-            for c in value["cases"]:
-                prior_corrections[c["scenario_id"]].add(c["decision_sha256"])
         if p["collection"] == "C5":
             prior_maps[p["sandbox"]].update(c["scenario_id"] for c in value["cases"])
     result = []
@@ -405,8 +454,9 @@ def stage_followups(
                     )
                     if (
                         row["verified_task_pass"]
-                        or ordn not in range(0, 200, 2)
-                        or len(prior_corrections[sid]) >= 7
+                        or ordn not in calibration_ordinals(family)[::2]
+                        or len(prior_corrections[(family, ordn, "funded_failure")])
+                        >= programs.SOURCES_PER_ORDINAL["funded_failure"]
                     ):
                         continue
                     try:
@@ -426,7 +476,10 @@ def stage_followups(
                     ):
                         continue
                     case = programs.source_case(source)
-                    if case["decision_sha256"] in prior_corrections[sid]:
+                    if (
+                        case["decision_sha256"]
+                        in prior_corrections[(family, ordn, "funded_failure")]
+                    ):
                         continue
                     teachers = tuple(
                         m
@@ -448,7 +501,9 @@ def stage_followups(
                         )
                     )
                     source_objects[case["source_sha256"]] = source
-                    prior_corrections[sid].add(case["decision_sha256"])
+                    prior_corrections[(family, ordn, "funded_failure")].add(
+                        case["decision_sha256"]
+                    )
             draws = {(r["model"], r["repeat"]) for r in observations}
             expected = {(m, i) for m in programs.TEACHERS for i in range(1, 5)}
             if (

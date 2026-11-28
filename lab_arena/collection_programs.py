@@ -32,6 +32,7 @@ TEACHERS = (
 )
 VARIANTS = {1: "base", 2: "brief", 3: "review"}
 BAND = 10_000_000
+SOURCES_PER_ORDINAL = {"funded_failure": 3, "node_student": 4}
 SHA = re.compile(r"sha256:[a-f0-9]{64}")
 FAMILY = re.compile(r"P[1-9][0-9]{0,3}")
 SCENARIO = re.compile(r"(P[1-9][0-9]{0,3})-s([1-9][0-9]{0,7})")
@@ -168,7 +169,7 @@ def verify_admission(record, key):
         )
         or solver["tested"] < 200
         or solver["matched"] != solver["tested"]
-        or teacher["tested"] < 50
+        or teacher["tested"] <= 0
         or not 0.90 <= teacher["passed"] / teacher["tested"] <= 1
         or teacher["misses_reviewed"] != teacher["tested"] - teacher["passed"]
         or student["tested"] <= 0

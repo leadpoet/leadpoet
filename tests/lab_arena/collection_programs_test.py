@@ -127,7 +127,10 @@ def test_finite_compiler_balances_cases_and_resumes_original_canary(tmp_path):
         v3.hosted_student_route()
 
 
-def test_signed_student_pass_failure_import_and_bulk_correction(tmp_path, monkeypatch):
+@pytest.mark.parametrize("pool_fixture", ["v3"], indirect=True)
+def test_signed_student_pass_failure_import_and_bulk_correction(
+    tmp_path, monkeypatch, pool_fixture
+):
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from lab_arena.collection_node_runs import verified_node_runs
@@ -249,6 +252,24 @@ def test_signed_student_pass_failure_import_and_bulk_correction(tmp_path, monkey
     ) as sources:
         result = xp.read_inputs(spec, args.inputs, sources, prompt=PROMPT)
         assert list(result[0]) == [rows[1]["source_sha256"]]
+    env = pool_fixture
+    env.inputs = args.inputs
+    ref = env.sources[1].perfect(env.sources[1].build("P9", v3.BAND))
+    resumed = simulation(env, raw, [[ref["calls"][-1], ref["answer"]]])
+    out = tmp_path / "node-correction.zip"
+    stats = write_dataset(
+        resumed, env.db, env.objects, out, full_trajectories=True, prompt=PROMPT
+    )
+    assert stats["correction_pairs"] == 1 and env.jobs[-1]["price_microusd"] > 0
+    with ZipFile(out) as archive:
+        pair = json.loads(archive.read("pairs/" + env.jobs[-1]["job_id"] + ".jsonl"))
+        source = json.loads(
+            (args.inputs / (rows[1]["source_sha256"][7:] + ".json")).read_bytes()
+        )
+        assert (
+            pair["checkpoint_sha256"] == source["checkpoint_sha256"]
+            and pair["rejected"] == source["rejected"]
+        )
     sig = json.loads((bundle / "nodes.json").read_bytes())
     sig["producer"] = "substitute"
     (bundle / "nodes.json").write_text(json.dumps(sig))
@@ -411,7 +432,13 @@ def test_verified_followups_recover_after_interruption_and_map_only_exports(
 
     def signed_index(m):
         value = prep.sign(
-            {"schema": RESTATEMENTS, "producer": "training-node", "records": m}, keyfile
+            {
+                "schema": RESTATEMENTS,
+                "producer": "training-node",
+                "records": m,
+                "rights": "owned_synthetic_training_and_review",
+            },
+            keyfile,
         )
         path = bundle / "restatements.json"
         path.write_text(json.dumps(value))

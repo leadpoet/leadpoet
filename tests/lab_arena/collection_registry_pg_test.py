@@ -1,6 +1,5 @@
 """The real governed PostgreSQL allocator consults the owner-controlled sandbox admission."""
 
-import os
 from pathlib import Path
 from psycopg2.extras import Json
 import pytest
@@ -14,14 +13,7 @@ def test_774_catalog_fails_closed_and_preserves_allocator_permissions(pool):
     scripts = Path(__file__).resolve().parents[2] / "scripts"
     with pool.driver.connect(**pool.dsn) as conn, conn.cursor() as c:
         c.execute("SET ROLE rate_test_migrator")
-        c.execute(
-            Path(
-                os.getenv(
-                    "COLLECTION_TEST_773_SQL",
-                    scripts / "773-governed-standing-workers.sql",
-                )
-            ).read_text()
-        )
+        c.execute((scripts / "773-governed-standing-workers.sql").read_text())
         c.execute((scripts / "774-registered-sales-sandboxes.sql").read_text())
         for f in ("P7", "P8", "P9", "P10"):
             c.execute("SELECT public.collection_registered_sandbox_v1(%s)", (f,))

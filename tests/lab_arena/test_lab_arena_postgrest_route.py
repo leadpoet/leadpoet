@@ -259,6 +259,7 @@ def stack(tmp_path_factory):
                     "758-standing-collection-funding.sql",
                     "772-standing-pool-reward-rate.sql",
                     "773-governed-standing-workers.sql",
+                    "774-registered-sales-sandboxes.sql",
                 ):
                     cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / migration).read_text())
             # Install additive current readers before PostgREST takes its

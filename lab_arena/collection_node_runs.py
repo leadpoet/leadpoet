@@ -42,7 +42,8 @@ def authenticated(document, public_key, schema):
     body = {k: v for k, v in document.items() if k != "signature"}
     if (
         not isinstance(key, Ed25519PublicKey)
-        or set(body) != {"schema", "producer", "records"}
+        or set(body) != {"schema", "producer", "records", "rights"}
+        or body.get("rights") != "owned_synthetic_training_and_review"
         or body["schema"] != schema
         or not isinstance(body["producer"], str)
         or not isinstance(body["records"], dict)

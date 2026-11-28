@@ -408,6 +408,11 @@ class CollectionBroker:
             p_status=response.status,
             p_provider_id=upstream_id,
         )
+        if provider == "openrouter" and response.status == 429 and hasattr(self.intake, "respect_retry_after"):
+            # The receipt trigger already applied the default cooldown. Honor a
+            # longer provider delay without touching the unresolved cost.
+            header = next((v for k, v in response.headers.items() if k.lower() == "retry-after"), None)
+            self.intake.respect_retry_after(model, header)
         if policy_proof and policy_ref and self.job["mode"] == "pilot" and self.job.get("attempt", 1) == 1:
             self._rpc(
                 "collection_record_throttle_hold_v1",

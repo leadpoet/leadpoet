@@ -176,9 +176,6 @@ class World:
     def register(self, miner, body):
         """A register request as the gateway hands it over: parsed and as signed."""
 
-        self.config = dataclasses.replace(
-            self.market._config, approved_suppliers=self.market._config.approved_suppliers | {(body["tool"], miner)})
-        self.market._config = self.config
         body = dict(body, attestation=ATTESTATION) if "attestation" not in body else body
         return self.market.register_key(self.who(miner), body, json.dumps(body).encode())
 

@@ -1,7 +1,6 @@
 """Tool-market configuration from the environment. Off unless set otherwise.
 
-When live, every catalog tool is on, and trades through approved suppliers
-(``LEADPOET_TOOL_MARKET_APPROVED_SUPPLIERS``). ``LEADPOET_TOOL_MARKET_TOOLS_OFF``
+When live, registered miners can supply enabled tools after signing the attestation. ``LEADPOET_TOOL_MARKET_TOOLS_OFF``
 turns single tools off, e.g. ``exa,hunter``; a new catalog tool is on
 unless it is named there.
 """
@@ -24,7 +23,6 @@ MODE_ENV = "LEADPOET_TOOL_MARKET_MODE"
 TOOLS_OFF_ENV = "LEADPOET_TOOL_MARKET_TOOLS_OFF"
 VERIFY_MAX_ASK_ENV = "LEADPOET_TOOL_MARKET_VERIFY_MAX_ASK_MICROUSD"
 PLATFORM_MAX_ASKS_ENV = "LEADPOET_TOOL_MARKET_PLATFORM_MAX_ASKS"
-APPROVED_SUPPLIERS_ENV = "LEADPOET_TOOL_MARKET_APPROVED_SUPPLIERS"
 BUYERS_ENV = "LEADPOET_TOOL_MARKET_BUYER_HOTKEYS"
 PRIVATE_SUPPLIERS_ENV = "LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS"
 GAMMA_SERVICE_ENV = "LEADPOET_TOOL_MARKET_GAMMA_SERVICE"
@@ -64,12 +62,7 @@ class ToolMarketConfig:
     terms_sha256: str = ""
     public_base_url: str = ""
 
-    approved_suppliers: FrozenSet[Tuple[str, str]] = frozenset()
-
     platform_max_asks: Mapping[str, int] = field(default_factory=dict)
-
-    def may_supply(self, tool: str, hotkey: str) -> bool:
-        return tool in self.tools and (tool, hotkey) in self.approved_suppliers
 
     @property
     def enabled(self) -> bool:
@@ -94,13 +87,6 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
     tools = frozenset(TOOLS) - off
     buyers = frozenset(h.strip() for h in env.get(BUYERS_ENV, "").split(",") if h.strip())
     private = frozenset(h.strip() for h in env.get(PRIVATE_SUPPLIERS_ENV, "").split(",") if h.strip())
-    # Approval records the operator's review of this supplier's provider agreement.
-    approved = set()
-    for item in filter(None, (s.strip() for s in env.get(APPROVED_SUPPLIERS_ENV, "").split(","))):
-        tool, _, hotkey = item.partition(":")
-        if tool not in TOOLS or not is_valid_hotkey(hotkey):
-            raise ToolMarketConfigError("%s requires tool:hotkey pairs" % APPROVED_SUPPLIERS_ENV)
-        approved.add((tool, hotkey))
     try:
         platform_limits = json.loads(env.get(PLATFORM_MAX_ASKS_ENV, "{}"))
     except (ValueError, RecursionError):
@@ -124,7 +110,7 @@ def load_config(environ: Optional[Mapping[str, str]] = None) -> ToolMarketConfig
         raise ToolMarketConfigError("%s must be %d: the market counts only that subnet's Gamma" % (NETUID_ENV, NETUID))
     config = ToolMarketConfig(
         platform_max_asks=platform_limits,
-        mode=mode, tools=tools, approved_suppliers=frozenset(approved), buyer_hotkeys=buyers, private_suppliers=private,
+        mode=mode, tools=tools, buyer_hotkeys=buyers, private_suppliers=private,
         gamma_service=env.get(GAMMA_SERVICE_ENV, "").strip(),
         terms_version=terms_version, terms_sha256=PUBLISHED_TERMS.get(terms_version, ""),
         public_base_url=env.get(PUBLIC_BASE_URL_ENV, "").strip().rstrip("/"),

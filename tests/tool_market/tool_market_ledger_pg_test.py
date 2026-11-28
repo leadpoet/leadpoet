@@ -1,5 +1,4 @@
 """Exercise authoritative reservations, settlements and balance reads on PostgreSQL."""
-import dataclasses
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -79,24 +78,6 @@ def test_simultaneous_calls_cannot_exceed_tab_balance(world):
     assert world.market.statement(miner)["keys"][0]["owed_microusd"] == 10_000
 
 
-def test_revoked_supplier_approval_removes_existing_ask(world):
-    miner, key = world.miner_key("withdraw-approval", 10_000)
-    _, token = world.buyer()
-    checks = world.vault.checks
-    world.market._config = dataclasses.replace(world.config, approved_suppliers=frozenset())
-    assert world.market.order_book("harvestapi")["asks"] == []
-    with pytest.raises(market.ToolMarketError, match="supplier_not_approved"):
-        world.market.check_key(world.who(miner), key)
-    with pytest.raises(market.ToolMarketError, match="supplier_not_approved"):
-        world.market.post_ask(world.who(miner), {"key_id": key, "ask_microusd": 10_001})
-    with pytest.raises(market.ToolMarketError, match="no_supply"):
-        world.market.call(token, PROFILE)
-    assert world.vault.checks == checks and world.vendor.sent == []
-    world.market.post_ask(world.who(miner), {"key_id": key, "ask_microusd": None})
-    world.market.revoke_key(world.who(miner), key)
-    assert not world.market.statement(miner)["keys"][0]["active"]
-
-
 def test_accrual_report_binds_call_to_one_supplier_and_gross_fee(world, database):
     from pathlib import Path
 
@@ -114,15 +95,10 @@ def test_accrual_report_binds_call_to_one_supplier_and_gross_fee(world, database
     assert matches[0][1:10] == (7, miner, "harvestapi", "linkedin_profile", 10_000, 1, 11_000, 10_000, 1_000)
 
 
-def test_unapproved_supplier_cannot_reach_chain_or_vault(world):
-    miner = hotkey()
-    world.accept(miner, "miner")
-    envelope = world.vault.seal("harvestapi", miner, "unauthorized-supply")
-    request = dict(tool="harvestapi", envelope=envelope, daily_cap_microusd=USD, attestation=market.ATTESTATION)
-    def unexpected_check(hotkey):
-        pytest.fail("supplier approval must be verified before a chain lookup")
-
-    world.market._is_registered = unexpected_check
-    with pytest.raises(market.ToolMarketError, match="supplier_not_approved"):
-        world.market.register_key(world.who(miner), request, b"{}")
-    assert world.vault.checks == 0
+def test_registered_miner_lists_and_serves_on_its_signed_attestation(world):
+    miner, key = world.miner_key("self-service", 5_000)
+    _, token = world.buyer()
+    assert world.market.call(token, PROFILE)["charge_microusd"] == 5500
+    assert world.market.statement(miner)["keys"][0]["owed_microusd"] == 5000
+    world.market.revoke_key(world.who(miner), key)
+    assert world.market.order_book("harvestapi")["asks"] == []

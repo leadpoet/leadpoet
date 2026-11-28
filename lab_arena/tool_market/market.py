@@ -290,7 +290,6 @@ class ToolMarket:
         tool = body["tool"]
         if not isinstance(tool, str) or tool not in self._config.tools:
             raise ToolMarketError(404, "tool_unavailable")
-        self._require_supplier(tool, identity.hotkey)
         cap = _int(body["daily_cap_microusd"], 1, MAX_KEY_DAILY_CAP_MICROUSD, "daily_cap_invalid")
         try:
             registered = self._is_registered(identity.hotkey)
@@ -348,7 +347,7 @@ class ToolMarket:
         """
 
         key = self._own_key(identity, key_id)
-        self._require_supplier(key["tool"], identity.hotkey)
+        self._require_enabled_tool(key["tool"])
         if vault_tools.TOOLS[key["tool"]].balance_url is None:
             raise ToolMarketError(409, "key_cannot_be_checked")
         with self._vendor_check(identity.hotkey, key["key_id"]):
@@ -375,7 +374,7 @@ class ToolMarket:
             raise ToolMarketError(400, "operation_required")
         ceiling = catalog.MAX_ASK[catalog.TOOLS[tool]]
         if ask is not None:
-            self._require_supplier(key["tool"], identity.hotkey)
+            self._require_enabled_tool(key["tool"])
             _int(ask, 1, ceiling, "ask_invalid", max_ask_microusd=ceiling)
             # Each operation's largest call owes something, so every call
             # reserves, and a key's cap holds 4 of them, so each buyer's
@@ -730,9 +729,9 @@ class ToolMarket:
         return {"call_id": call_id, "status": response.status, "body": document, "charge_microusd": charge}
 
     # Helpers ----------------------------------------------------------------
-    def _require_supplier(self, tool: str, hotkey: str) -> None:
-        if not self._config.may_supply(tool, hotkey):
-            raise ToolMarketError(403, "supplier_not_approved")
+    def _require_enabled_tool(self, tool: str) -> None:
+        if tool not in self._config.tools:
+            raise ToolMarketError(404, "tool_unavailable")
 
     def _asks(self, op: catalog.Operation, max_ask: int, private: bool, buyer: str, pinned: Optional[str]):
         """The book's asks, best first, that a reserve for this call could take
@@ -748,10 +747,10 @@ class ToolMarket:
                 yield ask, owed_cap
 
     def _supply(self, tool: str, operation: Optional[str] = None) -> List[book.Ask]:
-        """The book's asks from approved suppliers, best first."""
+        """The book's eligible asks, best first."""
 
         rows = self._store.book(tool=tool, terms_sha256=self._config.terms_sha256, operation=operation)
-        return book.rank(book.Ask.from_row(row) for row in rows if self._config.may_supply(tool, row["miner_hotkey"]))
+        return book.rank(book.Ask.from_row(row) for row in rows)
 
     def _check(self, tool: str, envelope: str) -> Mapping[str, Any]:
         try:

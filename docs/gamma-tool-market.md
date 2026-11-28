@@ -7,25 +7,9 @@ buyer's hotkey spent to the market's Gamma service on netuid 71
 (`GammaSpent`). Each call selects an eligible key from the price-ranked book, subject to health, privacy, price and budget limits. The attested vault and the vendor execute the request.
 
 It is off by default. Every route answers 404 until
-`LEADPOET_TOOL_MARKET_MODE=live`. The production factory currently serves quotes, existing balances, statements and key management. Opening a tab or submitting a paid call returns HTTP 503 `miner_settlement_unavailable`. Discovery advertises no payment method. Do not spend Gamma for this preview. The execution and settlement examples below describe the integration-tested dispatcher for a future funded release.
+`LEADPOET_TOOL_MARKET_MODE=live`. Registered miners enroll by signing the provider-use attestation.
 `LEADPOET_TOOL_MARKET_TOOLS_OFF` turns single tools off, for example
 `exa,hunter`.
-
-## Adoption decision
-
-This is an exploratory tool API. For a paid launch, suppliers need an agreed
-payment source, settlement asset, conversion rule and verifiable transfer.
-Today the statement shows a USD liability. Operators can reconcile it by
-call ID using [the accrual query](../scripts/tool_market_accruals.sql).
-The buyer's Gamma spend is burned on-chain. It cannot be withdrawn to pay
-that liability, and the spread is not a cash balance for buybacks.
-
-Supply here means a vendor account and its paid quota. The experiment lab has its own job, capture, funding and weight paths.
-Supplier compute on miner hosts and earnings redeemable across tools are
-not implemented by this API.
-
-Before adoption, follow the steps in [price comparisons and the break-even
-calculation](gamma-tool-market-economics.md).
 
 ## How it works
 
@@ -33,7 +17,7 @@ calculation](gamma-tool-market-economics.md).
    machine (`python -m lead_order_vault.cli seal`). They then send the
    envelope to `POST /tool-market/keys`, signed with their hotkey.
    - Leadpoet stores only the envelope. Only the vault can open it.
-   - The operator first approves the provider agreement for this tool and supplier. The body also carries the miner's signed attestation (below).
+   - The body carries the miner's signed attestation (below).
    - The vault checks the key with the vendor's free balance call, if the
      vendor has one. A key with no credit is refused.
    - The same vendor key can be listed only once at a time.
@@ -276,7 +260,7 @@ versioned: a new version is asked for at the next listing.
 
 A key is in its tool's book only while all of these hold:
 
-- the operator approved this supplier for this tool, and the key is listed and not revoked;
+- the key is listed and not revoked;
 - its miner accepted the current terms;
 - its latest ask is a price, not a withdrawal;
 - its latest health event is `valid` or `unchecked`;
@@ -411,7 +395,6 @@ All tool-market data is in `scripts/770-tool-market.sql`.
 | Variable | Meaning |
 | --- | --- |
 | `LEADPOET_TOOL_MARKET_MODE` | `off` (default) or `live` |
-| `LEADPOET_TOOL_MARKET_APPROVED_SUPPLIERS` | comma-separated `tool:miner_hotkey` pairs reviewed for third-party resale. Empty by default. Remove the pair and restart every gateway process to stop new routing; calls in flight can still settle. Private supply also requires separate privacy approval. |
 | `LEADPOET_TOOL_MARKET_TOOLS_OFF` | comma-separated tools turned off; empty by default, so all trade |
 | `LEADPOET_TOOL_MARKET_BUYER_HOTKEYS` | optional allowlist of buyer hotkeys, for a staff rollout |
 | `LEADPOET_TOOL_MARKET_PRIVATE_SUPPLIERS` | hotkeys of miners with a private-supply agreement; serve private calls |
@@ -427,13 +410,7 @@ deployment, exactly as lead orders do.
 
 ## Known limits
 
-- **Supplier settlement requires an independent funded treasury.** The
-  current ledger records a supplier liability per settled call. A paid
-  release needs an approved asset, funding account and limits, a signed
-  supplier withdrawal destination, a conversion policy for USD liabilities,
-  and independent confirmation of each transfer. Reconcile transfers once
-  against call IDs, including partial and retried withdrawals. The lab's
-  emissions and validator weight budget are outside this marketplace.
+- **Supplier compensation is denominated in subnet emissions.** Reconcile settled calls by epoch and miner using [the accrual report](../scripts/tool_market_accruals.sql). Confirm the validator payout on chain before treating a receivable as paid. The marketplace may use only emission capacity left after the experiment lab's full allocation.
 - **The vendor's answer sets the usage.** Prospeo's free-match rule is
   read from its docs, not a bill; check it against a miner's statement
   before scaling.

@@ -23,7 +23,6 @@ def test_private_platform_lookup_from_funded_tab_to_miner_statement(store, monke
     version, digest = next(iter(PUBLISHED_TERMS.items()))
     cfg = ToolMarketConfig(mode="live", tools=frozenset({"zerobounce", "harvestapi"}), gamma_service=miner.ss58_address,
                            public_base_url="https://gw.example", terms_version=version, terms_sha256=digest,
-                           approved_suppliers=frozenset({(tool, miner.ss58_address) for tool in ("zerobounce", "harvestapi")}),
                            platform_max_asks={"harvestapi_get_profile.main": 1_800, "harvestapi_get_company": 1_800,
                                               "zerobounce_validate": 5000}, private_suppliers=frozenset({miner.ss58_address}))
     secret = "fixture-zb-key"

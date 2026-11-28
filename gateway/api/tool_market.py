@@ -218,16 +218,17 @@ async def gamma_balance(request: Request, hotkey: str = "") -> Response:
 @router.post("/tool-market/call")
 async def call(request: Request) -> Response:
     signed = support.btauth.VERSION_HEADER in request.headers
-    token = _bearer(request)  # empty when signed: btauth/1 refuses an Authorization header
-    return await _handle(request, lambda m, who, body: m.call(token, _json(body), who), signed=signed,
+    token, arrived = _bearer(request), time.monotonic()  # no token when signed: btauth/1 refuses one
+    return await _handle(request, lambda m, who, body: m.call(token, _json(body), who, arrived), signed=signed,
                          limiter=_call_threads)
 
 
 @router.post("/tool-market/api/v2/integrations/{operation}/execute")
 async def platform_call(operation: str, request: Request) -> Response:
-    token = _bearer(request)
+    token, arrived = _bearer(request), time.monotonic()
+    raw = request.headers.get("x-deepline-execute-response-contract") == "raw-v2"
     return await _handle(request, lambda market, who, body: market.platform_call(
-        token, operation, _json(body), raw=request.headers.get("x-deepline-execute-response-contract") == "raw-v2"), signed=False, limiter=_call_threads)
+        token, operation, _json(body), raw=raw, arrived=arrived), signed=False, limiter=_call_threads)
 
 
 @router.get("/tool-market/tab")

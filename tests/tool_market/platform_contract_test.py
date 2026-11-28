@@ -54,7 +54,7 @@ def test_private_funded_company_lookup_serves_site_parsers_and_its_actual_charge
     seen = []
     raw = {"status": 200, "element": {"universalName": "acme", "id": "1"}}
 
-    def call(token, body):
+    def call(token, body, arrived=None):
         seen.append((token, body))
         return {"status": 200, "call_id": "id", "body": raw, "charge_microusd": 1980}
 
@@ -113,7 +113,7 @@ def test_default_result_view_and_raw_v2_keep_provider_errors_distinct():
     request = {"payload": {"linkedin_url": "example"}}
     missed = {"error": True, "error_code": "NO_MATCH"}
 
-    def call(token, body):
+    def call(token, body, arrived=None):
         return {"status": 400, "call_id": "1", "body": missed, "charge_microusd": 0}
 
     market.call = call

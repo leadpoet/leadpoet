@@ -81,7 +81,7 @@ class QuotingMarket(ToolMarket):
     def open_tab(self, identity, body):
         raise ToolMarketError(503, "miner_settlement_unavailable")
 
-    def call(self, token, body, identity=None):
+    def call(self, token, body, identity=None, arrived=None):
         raise ToolMarketError(503, "miner_settlement_unavailable")
 
     def services(self):

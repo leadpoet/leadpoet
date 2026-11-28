@@ -375,9 +375,11 @@ All amounts are integer micro-USD.
   - A call cut off before it settles, by a restart, counts as unknown
     usage, since it may have reached the vendor. Restarts that cut calls
     can shut a buyer out of a key for a day, or out of a tool for an hour.
-    A call tries another key only in its first 30 s, so it ends within
-    120 s; give the gateway a stop grace above that so a restart drains
-    calls. The CLI waits 150 s, and a lost answer reads `outcome_unknown`.
+    A call reserves a key only within 30 s of reaching the gateway, so it
+    ends within 3 minutes; one too late for its first key answers
+    `503 busy` with nothing charged. Give the gateway a stop grace above
+    3 minutes so a restart drains calls. The CLI waits 4 minutes, and a
+    lost answer reads `outcome_unknown`.
   - A request that may have reached the vendor is never retried on another
     key, so it cannot be used twice.
   - A buyer shapes some of these, such as an answer too large to return.

@@ -28,7 +28,7 @@ from lab_arena.lead_orders.auth import signed_message
 from lab_arena.tool_market import btauth
 from lab_arena.tool_market.config import PUBLISHED_TERMS
 
-TIMEOUT_SECONDS = 150  # above the 120 s a call can take (market.FAILOVER_SECONDS)
+TIMEOUT_SECONDS = 240  # above the 3 minutes a call can take (see market.FAILOVER_SECONDS)
 _LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 
 

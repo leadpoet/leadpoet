@@ -1111,13 +1111,23 @@ def test_a_tab_whose_opening_answer_is_lost_still_hands_over_its_token(world, mo
     assert world.market.tab(token)["open"] is False
 
 
-def test_a_call_tries_another_key_only_early_in_the_call(world, monkeypatch):
+def test_a_call_reserves_keys_only_soon_after_it_arrives(world, monkeypatch):
     world.miner_key("late-cheap", 9_000)
     world.miner_key("late-pricier", 10_000)
-    world.vendor.script["late-cheap"] = [ok({}, status=429)]
     _, token = world.buyer()
-    monkeypatch.setattr(market_module, "FAILOVER_SECONDS", -1.0)  # past it once the first key answered
+    # Queued past the limit: nothing is reserved, sent or claimed.
+    request_id = str(uuid.uuid4())
+    long_ago = market_module.time.monotonic() - market_module.FAILOVER_SECONDS - 1
     with pytest.raises(ToolMarketError) as late:
-        world.market.call(token, PROFILE)
+        world.market.call(token, dict(PROFILE, request_id=request_id), arrived=long_ago)
+    assert (late.value.status, late.value.code) == (503, "busy") and world.vendor.sent == []
+
+    def late_429():  # the first key answers past the limit: no other key is tried
+        monkeypatch.setattr(market_module, "FAILOVER_SECONDS", -1.0)
+        return ok({}, status=429)
+
+    world.vendor.script["late-cheap"] = [late_429]
+    with pytest.raises(ToolMarketError) as late:
+        world.market.call(token, dict(PROFILE, request_id=request_id))  # the same ID still works
     assert (late.value.status, late.value.code) == (503, "no_supply")
     assert [sent[0] for sent in world.vendor.sent] == ["late-cheap"]

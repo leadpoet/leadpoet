@@ -37,7 +37,7 @@ class FakeMarket:
         self.seen.append(("ask", identity.hotkey, body))
         return {"status": "posted", "ask_sequence": 1}
 
-    def call(self, token, body, identity=None):
+    def call(self, token, body, identity=None, arrived=None):
         if identity is not None:
             self.seen.append(("signed call", identity.hotkey, body))
             return {"call_id": "c", "status": 200, "body": {}, "charge_microusd": 11_000}
@@ -155,7 +155,7 @@ def test_a_slow_build_does_not_hold_other_requests(client):
 def test_a_store_outage_answers_503(client):
     market = enable()
 
-    def store_down(token, body, identity=None):
+    def store_down(token, body, identity=None, arrived=None):
         raise ArenaStoreError("store unavailable")
 
     market.call = store_down
@@ -202,7 +202,7 @@ def test_lead_search_raw_v2_verification_preserves_vendor_verdict_and_actual_cha
     market = enable()
     market._config = ToolMarketConfig(lead_search_verify_max_ask=5899)
     calls = []
-    def verify(token, body):
+    def verify(token, body, arrived=None):
         calls.append((token, body))
         return {"call_id": "call1", "status": 200, "body": {"status": "invalid"}, "charge_microusd": 5100}
     market.call = verify
@@ -216,9 +216,9 @@ def test_lead_search_raw_v2_verification_preserves_vendor_verdict_and_actual_cha
                                "params": {"email": "fixture@example.test"}})]
     assert client.post(url, json={"payload": {}, "forceToolRefresh": "yes"}).status_code == 400
     assert len(calls) == 1
-    market.call = lambda *_: {"call_id": "call2", "status": 200, "body": {}, "charge_microusd": 0}
+    market.call = lambda *_, **__: {"call_id": "call2", "status": 200, "body": {}, "charge_microusd": 0}
     assert client.post(url, json={"payload": {}}).json()["status"] == "failed"
-    market.call = lambda *_: {"call_id": "call3", "status": 500, "body": {}, "charge_microusd": 0}
+    market.call = lambda *_, **__: {"call_id": "call3", "status": 500, "body": {}, "charge_microusd": 0}
     assert client.post(url, json={"payload": {}}).json()["status"] == "failed"
 
 

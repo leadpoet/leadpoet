@@ -60,7 +60,7 @@ It is off by default. Every route answers 404 until
    keys. With `max_ask_microusd`, no key asking more serves the call.
 5. **Or open a tab (an API key)**, for a client that cannot sign each
    request. A buyer signs `POST /tool-market/tabs` with a budget and a lifetime of up to 30
-   days, and get back a bearer token to use like any API key. While the
+   days, and gets back a bearer token to use like any API key. While the
    tab is open, its whole budget is held against the buyer's balance, and
    the rest of the balance stays free for other tabs. Once it closes or
    expires, only what its calls spent stays held. `POST /tool-market/call`

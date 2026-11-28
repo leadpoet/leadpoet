@@ -59,6 +59,8 @@ MAX_KEYS_PER_CALL = 3
 # The gateway's stop grace and the client's timeout sit above that. A call too
 # late for its first key answers 503 busy, nothing reserved.
 FAILOVER_SECONDS = 30.0
+# A reserve answer that ends the call, with its HTTP status (others try the next key).
+RESERVE_REFUSALS = {"session_page_one_required": 409, "tab_closed": 401, "uncertain_limit": 429}
 # Reserve attempts per call, refused ones included (an ask that just moved,
 # a key that just reached its cap), so one call cannot walk a whole book.
 MAX_ASKS_PER_CALL = 10
@@ -649,12 +651,8 @@ class ToolMarket:
                     first_page=session.first, claim=None if claimed else claim)
                 if status == "request_already_used":
                     raise ToolMarketError(409, status, **claim_detail)
-                if status == "session_page_one_required":
-                    raise ToolMarketError(409, status)
-                if status == "tab_closed":
-                    raise ToolMarketError(401, status)
-                if status == "uncertain_limit":
-                    raise ToolMarketError(429, status)
+                if status in RESERVE_REFUSALS:
+                    raise ToolMarketError(RESERVE_REFUSALS[status], status)
                 if status == "tab_budget":
                     short = True  # a cheaper key further down may still fit
                     continue
